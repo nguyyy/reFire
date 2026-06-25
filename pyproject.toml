@@ -1,0 +1,21 @@
+[project]
+name = "refire"
+version = "0.1.0"
+description = "Automated long-form video editor — Stage 1: segment detection"
+requires-python = ">=3.10"
+dependencies = [
+    "faster-whisper>=1.0",
+    "ollama>=0.3",
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+refire = "refire.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
