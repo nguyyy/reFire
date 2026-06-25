@@ -1,36 +1,35 @@
 import numpy as np
 
-from refire.reframe import smooth_path, zoom_envelope
+from refire.reframe import zoom_track
 
 
-def test_zoom_rises_on_action_and_releases():
-    # calm, then a burst of motion, then calm again
-    inten = [0.0] * 20 + [10.0] * 20 + [0.0] * 40
-    z = zoom_envelope(inten, zmax=1.5, attack=0.35, release=0.06)
+def test_calm_stays_at_100_percent_no_shake():
+    z = zoom_track([0.0] * 60, fps=30)
+    assert np.allclose(z, 1.0)  # dead calm -> no zoom at all, perfectly flat
+
+
+def test_burst_zooms_in_then_back_out():
+    inten = [0.0] * 20 + [10.0] * 30 + [0.0] * 60
+    z = zoom_track(inten, fps=30, zmax=2.0)
     assert z[0] == 1.0
-    assert z[39] > 1.3                 # zoomed in during the burst
-    assert z[-1] < z[39]               # releases back out afterwards
-    assert z[-1] < 1.1                 # nearly fully zoomed out by the end
-    assert np.all(z >= 1.0) and np.all(z <= 1.5)
+    assert z[48] > 1.8          # punched in ~200% during the burst
+    assert z[-1] < 1.1          # quick-zoomed back to ~100% after
 
 
-def test_attack_faster_than_release():
-    inten = [0.0, 10.0, 0.0]
-    fast = zoom_envelope(inten, attack=0.9, release=0.01)
-    # big jump up on the spike, tiny drop after
-    rise = fast[1] - fast[0]
-    fall = fast[1] - fast[2]
-    assert rise > fall
+def test_stable_during_sustained_burst_no_oscillation():
+    z = zoom_track([10.0] * 90, fps=30)
+    tail = z[40:]               # after the ramp settles
+    assert tail.std() < 0.01    # flat hold near 200%, not shaking
+    assert tail.mean() > 1.9
 
 
-def test_smooth_path_lags_toward_target():
-    cents = [(0.5, 0.5)] + [(1.0, 0.0)] * 10
-    p = smooth_path(cents, coeff=0.15)
-    assert p[0][0] == 0.5
-    assert 0.5 < p[5][0] < 1.0         # eased, not snapped
-    assert p[-1][0] > p[5][0]          # still approaching target
+def test_hysteresis_holds_through_a_brief_dip():
+    # enter, then a short dip that's below ENTER but above EXIT -> stays zoomed
+    inten = [0.0] * 10 + [10.0] * 15 + [2.0] * 5 + [10.0] * 15 + [0.0] * 30
+    z = zoom_track(inten, fps=30, enter=0.45, exit=0.18, min_hold_s=0.8)
+    # during the dip (around frame 27) it should still be zoomed in
+    assert z[28] > 1.5
 
 
-def test_empty_inputs():
-    assert zoom_envelope([]).size == 0
-    assert smooth_path([]).size == 0
+def test_empty_input():
+    assert zoom_track([]).size == 0

@@ -1,10 +1,10 @@
-"""Action-aware dynamic reframe: pan toward motion, punch-zoom on action, release.
+"""Motion-triggered punch zoom, fixed bottom-left anchor (the webcam corner).
 
-Per-frame inter-frame motion gives an intensity series + a motion centroid.
-Intensity drives a zoom envelope with fast attack / slow release (zooms in on
-action, eases back out when it calms). The centroid drives the pan, so the frame
-follows whichever of streamer/gameplay is moving most. Fast zoom/pan gets a
-temporal blend for a motion-blurred, fluid feel.
+Per-frame inter-frame motion gives an intensity series. A hysteresis state
+machine turns sustained motion bursts into a stable binary target (100% or
+200%), which is then eased into a smooth, quick zoom ramp. The crop is anchored
+to the bottom-left corner, so there is no panning and no per-frame jitter — the
+shake from continuous centroid-following / oscillating zoom is gone.
 """
 from __future__ import annotations
 
@@ -12,103 +12,93 @@ from pathlib import Path
 
 import numpy as np
 
-ZMAX = 1.5         # max punch-in zoom (aggressive)
-ATTACK = 0.35      # how fast zoom rises toward action (high = aggressive)
-RELEASE = 0.06     # how slow it zooms back out (low = lingers, then releases)
-PAN_SMOOTH = 0.15  # centroid easing (low = smoother, laggier pan)
-BLUR_GAIN = 4.0    # motion-blur sensitivity to zoom/pan velocity
-BLUR_MAX = 0.6     # max temporal-blend strength
+ZMAX = 2.0          # punch-in zoom (200%)
+ENTER = 0.45        # normalized motion to START a zoom (high -> only real bursts)
+EXIT = 0.18         # normalized motion to END a zoom (low -> hysteresis, no flicker)
+MIN_HOLD_S = 0.8    # min seconds to stay zoomed once triggered
+SMOOTH_WIN = 9      # frames of rolling-mean on motion (kills single-frame spikes)
+EASE = 0.20         # zoom ramp speed toward target (quick but smooth)
 
 
-def zoom_envelope(intensity, zmax=ZMAX, attack=ATTACK, release=RELEASE):
-    """Motion intensity -> per-frame zoom, fast attack / slow release."""
+def zoom_track(
+    intensity,
+    fps: float = 30.0,
+    zmax: float = ZMAX,
+    enter: float = ENTER,
+    exit: float = EXIT,
+    min_hold_s: float = MIN_HOLD_S,
+    smooth_win: int = SMOOTH_WIN,
+    ease: float = EASE,
+):
+    """Motion intensity -> stable per-frame zoom (no oscillation -> no shake)."""
     inten = np.asarray(intensity, dtype=float)
-    if inten.size == 0:
+    n = inten.size
+    if n == 0:
         return inten
+
     ref = np.percentile(inten, 95)
-    norm = np.clip(inten / (ref + 1e-9), 0.0, 1.0) if ref > 0 else np.zeros_like(inten)
-    target = 1.0 + (zmax - 1.0) * norm
-    out = np.empty_like(target)
+    norm = np.clip(inten / (ref + 1e-9), 0.0, 1.0) if ref > 0 else np.zeros(n)
+    if smooth_win > 1:
+        norm = np.convolve(norm, np.ones(smooth_win) / smooth_win, mode="same")
+
+    # hysteresis + minimum hold -> a stable binary target (no rapid toggling)
+    target = np.ones(n)
+    zoomed = False
+    hold = max(1, int(min_hold_s * fps))
+    since = 0
+    for i, v in enumerate(norm):
+        if zoomed:
+            since += 1
+            if v < exit and since >= hold:
+                zoomed = False
+        elif v > enter:
+            zoomed = True
+            since = 0
+        target[i] = zmax if zoomed else 1.0
+
+    # ease toward the stable target -> smooth quick ramps, flat holds
+    out = np.empty(n)
     z = 1.0
     for i, t in enumerate(target):
-        z += (t - z) * (attack if t > z else release)
+        z += (t - z) * ease
         out[i] = z
     return out
 
 
-def smooth_path(centroids, coeff=PAN_SMOOTH):
-    """EMA-smooth a list of (x,y) centroids in 0..1 space."""
-    pts = np.asarray(centroids, dtype=float)
-    out = np.empty_like(pts)
-    if pts.size == 0:
-        return out
-    cur = pts[0].copy()
-    for i, p in enumerate(pts):
-        cur = cur + (p - cur) * coeff
-        out[i] = cur
-    return out
-
-
 def reframe_clip(src, dst, out_w=1280, out_h=720):
-    """Read src video, write a dynamically reframed video to dst (no audio)."""
+    """Read src video, write a bottom-left punch-zoomed video to dst (no audio)."""
     import cv2  # heavy/optional dep, import lazily
 
     cap = cv2.VideoCapture(str(src))
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
 
-    # pass 1: per-frame motion intensity + centroid (downscaled for speed)
+    # pass 1: per-frame motion intensity (downscaled for speed)
     inten: list[float] = []
-    cents: list[tuple[float, float]] = []
     prev = None
     while True:
         ok, frame = cap.read()
         if not ok:
             break
         small = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (160, 90))
-        if prev is None:
-            inten.append(0.0)
-            cents.append((0.5, 0.5))
-        else:
-            diff = cv2.absdiff(small, prev)
-            inten.append(float(diff.mean()))
-            m = cv2.moments(diff)
-            if m["m00"] > 1e-6:
-                cents.append((m["m10"] / m["m00"] / 160.0, m["m01"] / m["m00"] / 90.0))
-            else:
-                cents.append((0.5, 0.5))
+        inten.append(0.0 if prev is None else float(cv2.absdiff(small, prev).mean()))
         prev = small
     cap.release()
 
-    zoom = zoom_envelope(inten)
-    path = smooth_path(cents)
+    zoom = zoom_track(inten, fps=fps)
 
-    # pass 2: crop toward centroid at the envelope zoom, blend for motion blur
+    # pass 2: crop anchored to the bottom-left corner at the eased zoom
     vw = cv2.VideoWriter(str(dst), cv2.VideoWriter_fourcc(*"mp4v"), fps, (out_w, out_h))
     cap = cv2.VideoCapture(str(src))
-    prev_out = None
-    pz, pcx, pcy = 1.0, 0.5, 0.5
     i = n = 0
     while True:
         ok, frame = cap.read()
         if not ok:
             break
-        H, W = frame.shape[:2]
+        Hf, Wf = frame.shape[:2]
         z = float(zoom[i]) if i < len(zoom) else 1.0
-        cx, cy = (float(path[i][0]), float(path[i][1])) if i < len(path) else (0.5, 0.5)
-        cw, ch = W / z, H / z
-        x0 = min(max(cx * W - cw / 2, 0), W - cw)
-        y0 = min(max(cy * H - ch / 2, 0), H - ch)
-        crop = frame[int(y0):int(y0 + ch), int(x0):int(x0 + cw)]
-        out = cv2.resize(crop, (out_w, out_h))
-
-        vel = (abs(z - pz) + np.hypot(cx - pcx, cy - pcy)) * BLUR_GAIN
-        a = float(min(BLUR_MAX, vel))
-        if prev_out is not None and a > 0:
-            out = cv2.addWeighted(out, 1 - a, prev_out, a, 0)
-
-        vw.write(out)
-        prev_out = out
-        pz, pcx, pcy = z, cx, cy
+        cw, ch = int(round(Wf / z)), int(round(Hf / z))
+        crop = frame[Hf - ch:Hf, 0:cw]            # bottom-left anchor
+        vw.write(cv2.resize(crop, (out_w, out_h)))
         i += 1
         n += 1
     cap.release()
