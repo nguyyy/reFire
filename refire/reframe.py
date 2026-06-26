@@ -15,7 +15,7 @@ import numpy as np
 
 ZMAX = 2.0            # final zoom (200%)
 PUNCH_TO = 1.9        # where the quick initial punch lands (190%)
-PUNCH_S = 0.5         # seconds for the 100% -> 190% punch
+PUNCH_S = 0.3         # seconds for the 100% -> 190% punch
 OUT_S = 0.5           # seconds for the zoom back to 100%
 ENTER = 0.45          # normalized motion to START a zoom
 EXIT = 0.18           # normalized motion to END a zoom (hysteresis)
@@ -44,24 +44,20 @@ def _intervals(active):
     return out
 
 
-def zoom_track(
+def _merged_frames(
     intensity,
-    fps: float = 30.0,
-    zmax: float = ZMAX,
-    punch_to: float = PUNCH_TO,
-    punch_s: float = PUNCH_S,
-    out_s: float = OUT_S,
-    enter: float = ENTER,
-    exit: float = EXIT,
-    smooth_win: int = SMOOTH_WIN,
-    bridge_gap_s: float = BRIDGE_GAP_S,
-    min_interval_s: float = MIN_INTERVAL_S,
-):
-    """Motion intensity -> per-frame zoom with tapered punch + merged intervals."""
+    fps: float,
+    enter: float,
+    exit: float,
+    smooth_win: int,
+    bridge_gap_s: float,
+    min_interval_s: float,
+) -> list[list[int]]:
+    """Motion bursts as merged [start, end) frame pairs (the zoom episodes)."""
     inten = np.asarray(intensity, dtype=float)
     n = inten.size
     if n == 0:
-        return inten
+        return []
 
     ref = np.percentile(inten, 95)
     norm = np.clip(inten / (ref + 1e-9), 0.0, 1.0) if ref > 0 else np.zeros(n)
@@ -84,7 +80,80 @@ def zoom_track(
         else:
             merged.append(iv[:])
     min_len = int(min_interval_s * fps)
-    merged = [iv for iv in merged if iv[1] - iv[0] >= min_len]
+    return [iv for iv in merged if iv[1] - iv[0] >= min_len]
+
+
+def hold_through_speech(intervals, speech, limit):
+    """Extend each (start, end) so its end never falls inside a speech run.
+
+    `intervals` and `speech` are [(start, end)] in the same unit; `limit` caps how
+    far an end may slide (the next interval's start, or the clip end). Keeps the
+    zoom up while the subject is mid-sentence, releasing it at the next silence.
+    """
+    out = []
+    for k, (s, e) in enumerate(intervals):
+        nxt = intervals[k + 1][0] if k + 1 < len(intervals) else limit
+        for sp_s, sp_e in speech:
+            if sp_s <= e < sp_e:           # end lands mid-phrase -> hold to phrase end
+                e = max(e, sp_e)
+                break
+        out.append((s, min(e, nxt, limit)))
+    return out
+
+
+def motion_intervals(
+    intensity,
+    fps: float = 30.0,
+    enter: float = ENTER,
+    exit: float = EXIT,
+    smooth_win: int = SMOOTH_WIN,
+    bridge_gap_s: float = BRIDGE_GAP_S,
+    min_interval_s: float = MIN_INTERVAL_S,
+    speech_intervals=None,
+) -> list[tuple[float, float]]:
+    """Motion bursts as merged (start, end) pairs in seconds -- the zoom episodes.
+
+    With `speech_intervals` (seconds), an episode whose end lands mid-phrase is
+    extended to the phrase end so the zoom holds through speech.
+    """
+    merged = _merged_frames(
+        intensity, fps, enter, exit, smooth_win, bridge_gap_s, min_interval_s)
+    secs = [(s / fps, e / fps) for s, e in merged]
+    if speech_intervals:
+        limit = len(np.asarray(intensity, dtype=float)) / fps
+        secs = hold_through_speech(secs, speech_intervals, limit)
+    return secs
+
+
+def zoom_track(
+    intensity,
+    fps: float = 30.0,
+    zmax: float = ZMAX,
+    punch_to: float = PUNCH_TO,
+    punch_s: float = PUNCH_S,
+    out_s: float = OUT_S,
+    enter: float = ENTER,
+    exit: float = EXIT,
+    smooth_win: int = SMOOTH_WIN,
+    bridge_gap_s: float = BRIDGE_GAP_S,
+    min_interval_s: float = MIN_INTERVAL_S,
+    speech_intervals=None,
+):
+    """Motion intensity -> per-frame zoom with tapered punch + merged intervals.
+
+    With `speech_intervals` (seconds), an episode's zoom-out is deferred until the
+    subject stops speaking, so the zoom never releases mid-sentence.
+    """
+    n = np.asarray(intensity, dtype=float).size
+    if n == 0:
+        return np.zeros(0)
+
+    merged = _merged_frames(
+        intensity, fps, enter, exit, smooth_win, bridge_gap_s, min_interval_s)
+    if speech_intervals:
+        held = hold_through_speech([(s / fps, e / fps) for s, e in merged],
+                                   speech_intervals, n / fps)
+        merged = [[int(round(s * fps)), int(round(e * fps))] for s, e in held]
 
     # build tapered curve per interval
     z = np.ones(n)
@@ -105,8 +174,12 @@ def zoom_track(
     return z
 
 
-def reframe_clip(src, dst, out_w=1280, out_h=720):
-    """Read src video, write a bottom-left punch-zoomed video to dst (no audio)."""
+def reframe_clip(src, dst, out_w=1280, out_h=720, speech=None):
+    """Read src video, write a bottom-left punch-zoomed video to dst (no audio).
+
+    `speech` is clip-relative [(start, end)] speaking runs; when given, the zoom
+    holds through them and only releases at a pause.
+    """
     import cv2  # heavy/optional dep, import lazily
 
     cap = cv2.VideoCapture(str(src))
@@ -123,7 +196,7 @@ def reframe_clip(src, dst, out_w=1280, out_h=720):
         prev = small
     cap.release()
 
-    zoom = zoom_track(inten, fps=fps)
+    zoom = zoom_track(inten, fps=fps, speech_intervals=speech)
 
     vw = cv2.VideoWriter(str(dst), cv2.VideoWriter_fourcc(*"mp4v"), fps, (out_w, out_h))
     cap = cv2.VideoCapture(str(src))

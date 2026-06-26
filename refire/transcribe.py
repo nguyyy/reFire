@@ -39,16 +39,28 @@ def transcribe(
     cache_path: str | Path | None = None,
     model_size: str = "large-v3",
     device: str = "cuda",
+    hotwords: str = "",
 ) -> list[Word]:
-    """Return word-level transcript. Reads/writes cache_path JSON if given."""
-    if cache_path and Path(cache_path).exists():
-        return json.loads(Path(cache_path).read_text(encoding="utf-8"))
+    """Return word-level transcript. Reads/writes cache_path JSON if given.
+
+    `hotwords` is a comma-joined game glossary that biases decoding toward proper
+    nouns. The cache is keyed by the glossary: a transcript made with a different
+    (or no) glossary is ignored so a stale "who tao" is never served back.
+    """
+    cache_path = Path(cache_path) if cache_path else None
+    sidecar = cache_path.with_suffix(".glossary.json") if cache_path else None
+    if cache_path and cache_path.exists():
+        prev = sidecar.read_text(encoding="utf-8") if sidecar and sidecar.exists() else '""'
+        if json.loads(prev) == hotwords:
+            return json.loads(cache_path.read_text(encoding="utf-8"))
 
     _register_cuda_dlls()
     from faster_whisper import WhisperModel  # local import: heavy, GPU-only
 
     model = WhisperModel(model_size, device=device, compute_type="float16")
-    segments, _ = model.transcribe(str(wav_path), word_timestamps=True)
+    segments, _ = model.transcribe(
+        str(wav_path), word_timestamps=True,
+        hotwords=hotwords or None, initial_prompt=hotwords or None)
 
     words: list[Word] = []
     for seg in segments:
@@ -56,5 +68,6 @@ def transcribe(
             words.append({"text": w.word.strip(), "start": w.start, "end": w.end})
 
     if cache_path:
-        Path(cache_path).write_text(json.dumps(words), encoding="utf-8")
+        cache_path.write_text(json.dumps(words), encoding="utf-8")
+        sidecar.write_text(json.dumps(hotwords), encoding="utf-8")
     return words

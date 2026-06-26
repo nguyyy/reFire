@@ -8,8 +8,11 @@ import json
 import subprocess
 from pathlib import Path
 
+from .continuity import organize
+from .emphasis import annotate_emphasis
 from .render import render_clip
-from .select import select_segments
+from .score import DEFAULT_MODEL
+from .select import select_segments, snap_to_sentences, speech_intervals
 from .subtitles import build_ass
 
 
@@ -61,16 +64,27 @@ def edit(
     min_score: float | None = None,
     order: str = "chrono",
     encoder: str = "libx264",
+    topic: str = "",
+    model: str = DEFAULT_MODEL,
 ) -> Path:
     """Stage 2 end-to-end. Requires run_dir/segments.json + transcript.json."""
     run_dir = Path(run_dir)
     segments = json.loads((run_dir / "segments.json").read_text(encoding="utf-8"))
     words = json.loads((run_dir / "transcript.json").read_text(encoding="utf-8"))
+    annotate_emphasis(words, run_dir / "audio.wav")  # lowercase + caps-on-hype
 
     chosen = select_segments(segments, count=count, min_score=min_score, order=order)
     if not chosen:
         raise SystemExit("No segments selected (check --count/--min-score).")
 
+    # snap onto sentence boundaries, then let the topic organize narrative order
+    snapped = []
+    for seg in chosen:
+        s, e = snap_to_sentences(words, seg["start"], seg["end"])
+        snapped.append({**seg, "start": s, "end": e})
+    chosen = [c for sec in organize(snapped, topic, model) for c in sec["clips"]]
+
+    speech = speech_intervals(words)        # phrase runs; hold zoom through these
     clips_dir = run_dir / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
     clips: list[Path] = []
@@ -78,8 +92,12 @@ def edit(
         ass = clips_dir / f"clip{i:03d}.ass"
         out = clips_dir / f"clip{i:03d}.mp4"
         ass.write_text(build_ass(words, seg["start"], seg["end"]), encoding="utf-8")
-        if not out.exists():  # cache: skip already-rendered clips
-            render_clip(video, seg, ass, out, encoder=encoder)
+        # clip-relative speech so the zoom never releases mid-sentence
+        seg_speech = [(max(s, seg["start"]) - seg["start"], min(e, seg["end"]) - seg["start"])
+                      for s, e in speech if e > seg["start"] and s < seg["end"]]
+        # ponytail: always re-render; a clip cache silently ships stale styling
+        # on re-runs. Add a content-hash cache only if re-encode cost ever bites.
+        render_clip(video, seg, ass, out, encoder=encoder, speech=seg_speech)
         clips.append(out)
 
     return assemble(clips, run_dir / "final.mp4", music=music)

@@ -32,8 +32,13 @@ def render_clip(
     ass_path: str | Path,
     out_path: str | Path,
     encoder: str = "libx264",
+    speech=None,
 ) -> Path:
-    """Trim [seg.start, seg.end], dynamic reframe, burn subtitles. Raises on fail."""
+    """Trim [seg.start, seg.end], dynamic reframe, burn subtitles. Raises on fail.
+
+    `speech` is clip-relative speaking runs; passed to the reframe so the zoom
+    holds through speech and releases at a pause.
+    """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     dur = seg["end"] - seg["start"]
@@ -46,7 +51,7 @@ def render_clip(
           "-c:a", "aac", "-ar", "48000", "-ac", "2", "-dn", "-y", str(work)])
 
     # B: action-aware dynamic reframe (zoom/pan/motion-blur) -> 720p video, no audio
-    reframe_clip(work, reframed, out_w=W, out_h=H)
+    reframe_clip(work, reframed, out_w=W, out_h=H, speech=speech)
 
     # C: burn subtitles on the reframed video, take audio from the work clip
     _run(["ffmpeg", "-i", str(reframed), "-i", str(work),

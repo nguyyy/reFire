@@ -7,6 +7,7 @@ from pathlib import Path
 from .audio import extract_audio
 from .chat import chat_signal
 from .chunk import make_chunks
+from .glossary import game_glossary
 from .rank import rank_select
 from .score import DEFAULT_MODEL, score_chunk
 from .transcribe import transcribe
@@ -21,6 +22,7 @@ def run(
     w_chat: float = 0.4,
     top_n: int | None = None,
     threshold: float | None = None,
+    game: str = "",
 ) -> Path:
     """Run detection end-to-end; return path to segments.json."""
     run_dir = Path(run_dir)
@@ -31,7 +33,8 @@ def run(
 
     if not wav.exists():
         extract_audio(video, wav)
-    words = transcribe(wav, cache_path=transcript_cache)
+    hotwords = ", ".join(game_glossary(game, model=model, cache_dir=run_dir))
+    words = transcribe(wav, cache_path=transcript_cache, hotwords=hotwords)
     if not words:
         out.write_text("[]", encoding="utf-8")
         return out

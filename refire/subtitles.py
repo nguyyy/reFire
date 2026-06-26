@@ -5,6 +5,7 @@ the ASS can be burned onto a freshly-trimmed segment.
 """
 from __future__ import annotations
 
+from .emphasis import style_text
 from .transcribe import Word
 
 # 720p canvas; libass scales to the actual frame. Yellow highlight, white idle.
@@ -16,7 +17,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,52,&H0000FFFF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,4,1,2,60,60,70,1
+Style: Default,Helvetica,48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,5,1,2,60,60,70,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -32,33 +33,64 @@ def _ts(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:05.2f}"
 
 
-def build_ass(
+PAUSE_GAP = 0.35      # seconds of silence that forces a new caption line
+MAX_CARRY = 0.15      # max seconds a word's karaoke highlight may hold past its end
+
+
+def group_words(
     words: list[Word],
     seg_start: float,
     seg_end: float,
-    words_per_line: int = 4,
-) -> str:
-    """Return ASS file text for words falling within [seg_start, seg_end)."""
+    words_per_line: int = 3,
+) -> list[list[dict]]:
+    """Words within [seg_start, seg_end) -> clip-relative, zero-based line groups.
+
+    A line breaks on sentence-ending punctuation, on a pause >= PAUSE_GAP before
+    the next word, or once it hits words_per_line. This keeps each line on a single
+    phrase and stops a caption from hanging on screen across a silence.
+    """
     clip_len = seg_end - seg_start
     sel = [
         {"text": w["text"],
          "start": min(max(w["start"] - seg_start, 0.0), clip_len),
-         "end": min(max(w["end"] - seg_start, 0.0), clip_len)}
+         "end": min(max(w["end"] - seg_start, 0.0), clip_len),
+         "emph": bool(w.get("emph"))}
         for w in words
         if seg_start <= w["start"] < seg_end and w["text"]
     ]
+    groups: list[list[dict]] = []
+    buf: list[dict] = []
+    for i, w in enumerate(sel):
+        buf.append(w)
+        sentence_end = w["text"][-1:] in ".?!"
+        nxt_gap = (sel[i + 1]["start"] - w["end"]) if i + 1 < len(sel) else 0.0
+        if sentence_end or nxt_gap >= PAUSE_GAP or len(buf) >= words_per_line:
+            groups.append(buf)
+            buf = []
+    if buf:
+        groups.append(buf)
+    return groups
 
+
+def build_ass(
+    words: list[Word],
+    seg_start: float,
+    seg_end: float,
+    words_per_line: int = 3,
+) -> str:
+    """Return ASS file text for words falling within [seg_start, seg_end)."""
     lines = []
-    for i in range(0, len(sel), words_per_line):
-        group = sel[i:i + words_per_line]
+    for group in group_words(words, seg_start, seg_end, words_per_line):
         line_start = group[0]["start"]
         line_end = group[-1]["end"]
         parts = []
         for j, w in enumerate(group):
-            # highlight holds until the next word begins (continuous karaoke)
+            # highlight holds until the next word begins, but never lingers more
+            # than MAX_CARRY past this word's end -- otherwise it hangs over a pause
             nxt = group[j + 1]["start"] if j + 1 < len(group) else w["end"]
-            kcs = max(1, round((nxt - w["start"]) * 100))
-            parts.append(f"{{\\k{kcs}}}{w['text']} ")
+            hold_end = min(nxt, w["end"] + MAX_CARRY)
+            kcs = max(1, round((hold_end - w["start"]) * 100))
+            parts.append(f"{{\\k{kcs}}}{style_text(w['text'], w['emph'])} ")
         text = "".join(parts).strip()
         lines.append(
             f"Dialogue: 0,{_ts(line_start)},{_ts(line_end)},Default,,0,0,0,,{text}"
