@@ -82,6 +82,64 @@ def clip_intensity(source, start: float, end: float):
     return inten, fps
 
 
+def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
+                   z_enter: float = ENTER, z_exit: float = EXIT,
+                   overlays_by_clip=None, bgm=None, bgm_db: float = -18.0) -> Path:
+    """Write run_dir/ae/manifest.json from already-chosen sections. Returns its path.
+
+    Shared by `export_ae` (legacy detect path) and `pipeline.make` (brief path).
+    `words` must already be emphasis-annotated; `sections` is [{title, clips}] where
+    each clip is {start, end} in absolute source seconds (sentence-snapped upstream).
+    `overlays_by_clip`, if given, is a per-clip list (in flattened build order) of
+    overlay punch-ins; `bgm` is a music-bed path mixed under the whole cut.
+    """
+    run_dir = Path(run_dir)
+    speech = speech_intervals(words)                 # hold zoom through phrases
+    clips = []
+    manifest_sections = []
+    ci = 0                                            # flattened clip counter
+    for sec in sections:
+        idxs = []
+        for seg in sec["clips"]:
+            groups = group_words(words, seg["start"], seg["end"], words_per_line)
+            captions = [
+                {"text": " ".join(style_text(w["text"], w["emph"]) for w in g),
+                 "start": g[0]["start"], "end": g[-1]["end"]}
+                for g in groups
+            ]
+            # clip-relative speech runs so an episode never releases mid-sentence
+            seg_speech = [(max(s, seg["start"]) - seg["start"], min(e, seg["end"]) - seg["start"])
+                          for s, e in speech if e > seg["start"] and s < seg["end"]]
+            inten, fps = clip_intensity(video, seg["start"], seg["end"])
+            episodes = [{"start": round(a, 3), "end": round(b, 3)}
+                        for a, b in motion_intervals(inten, fps=fps,
+                                                     enter=z_enter, exit=z_exit,
+                                                     speech_intervals=seg_speech)]
+            clip = {"start": seg["start"], "end": seg["end"],
+                    "captions": captions, "zoom_episodes": episodes}
+            if overlays_by_clip and ci < len(overlays_by_clip):
+                clip["overlays"] = overlays_by_clip[ci]
+            clips.append(clip)
+            idxs.append(len(clips) - 1)
+            ci += 1
+        manifest_sections.append({"title": sec["title"], "clip_indices": idxs})
+
+    manifest = {
+        "source": str(Path(video).resolve()).replace("\\", "/"),
+        "fps": FPS, "out_w": OUT_W, "out_h": OUT_H,
+        "sections": manifest_sections,
+        "clips": clips,
+    }
+    if bgm:
+        manifest["bgm"] = str(Path(bgm).resolve()).replace("\\", "/")
+        manifest["bgm_db"] = bgm_db
+    out_dir = run_dir / "ae"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    mp = out_dir / "manifest.json"
+    mp.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return mp
+
+
 def export_ae(
     video,
     run_dir="run",
@@ -105,7 +163,6 @@ def export_ae(
     segments = json.loads((run_dir / "segments.json").read_text(encoding="utf-8"))
     words = json.loads((run_dir / "transcript.json").read_text(encoding="utf-8"))
     annotate_emphasis(words, run_dir / "audio.wav")  # lowercase + caps-on-hype
-    speech = speech_intervals(words)                 # hold zoom through phrases
 
     chosen = select_segments(segments, count=count, min_score=min_score, order=order)
     if not chosen:
@@ -117,39 +174,4 @@ def export_ae(
         s, e = snap_to_sentences(words, seg["start"], seg["end"])
         snapped.append({**seg, "start": s, "end": e})
     sections = organize(snapped, topic, model)
-
-    clips = []
-    manifest_sections = []
-    for sec in sections:
-        idxs = []
-        for seg in sec["clips"]:
-            groups = group_words(words, seg["start"], seg["end"], words_per_line)
-            captions = [
-                {"text": " ".join(style_text(w["text"], w["emph"]) for w in g),
-                 "start": g[0]["start"], "end": g[-1]["end"]}
-                for g in groups
-            ]
-            # clip-relative speech runs so an episode never releases mid-sentence
-            seg_speech = [(max(s, seg["start"]) - seg["start"], min(e, seg["end"]) - seg["start"])
-                          for s, e in speech if e > seg["start"] and s < seg["end"]]
-            inten, fps = clip_intensity(video, seg["start"], seg["end"])
-            episodes = [{"start": round(a, 3), "end": round(b, 3)}
-                        for a, b in motion_intervals(inten, fps=fps,
-                                                     enter=z_enter, exit=z_exit,
-                                                     speech_intervals=seg_speech)]
-            clips.append({"start": seg["start"], "end": seg["end"],
-                          "captions": captions, "zoom_episodes": episodes})
-            idxs.append(len(clips) - 1)
-        manifest_sections.append({"title": sec["title"], "clip_indices": idxs})
-
-    manifest = {
-        "source": str(Path(video).resolve()).replace("\\", "/"),
-        "fps": FPS, "out_w": OUT_W, "out_h": OUT_H,
-        "sections": manifest_sections,
-        "clips": clips,
-    }
-    out_dir = run_dir / "ae"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    mp = out_dir / "manifest.json"
-    mp.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    return mp
+    return build_manifest(video, run_dir, words, sections, words_per_line, z_enter, z_exit)

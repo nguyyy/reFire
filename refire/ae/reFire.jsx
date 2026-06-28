@@ -3,16 +3,16 @@
 // Launch as a dockable panel (drop in AE's "ScriptUI Panels" folder, then
 // Window > reFire) or as a floating palette (File > Scripts > Run Script File...).
 //
-//   Choose manifest...  pick run/ae/manifest.json
-//   Topic / Count       optional: stream subject (groups+orders clips into titled
-//                        sections via the local LLM) and how many clips to keep.
-//   Fine-tune           Min score drops weak/boring clips (higher = less footage);
-//                        Zoom amount scales how readily motion triggers a punch
-//                        (1 = normal, >1 = more/earlier zooms, <1 = fewer).
-//   Generate            re-run `python -m refire ae` with the topic/count -> writes
-//                        a fresh manifest (motion zoom episodes + sections), then
-//                        reloads it. Needs python on PATH + a manifest already
-//                        chosen (it supplies the video + run dir). Then click Build.
+//   Make (one click)    the hands-off flow: pick an Output folder, type a VOD #,
+//                        a free-text Brief (what video you want), and a target
+//                        Duration (e.g. 20m). Shells `python -m refire make` ->
+//                        downloads the VOD, transcribes/embeds (cached), retrieves
+//                        + LLM-scores clips against the brief, packs them to the
+//                        duration budget chronologically, writes the manifest, and
+//                        auto-loads it. Tuning row: zoom amount / words-per-line /
+//                        duration tolerance. Needs python + ollama on PATH. Then Build.
+//   Load manifest...    (alt) point Build at an existing run/ae/manifest.json
+//                        instead of running Make.
 //   Build               import footage + build one comp per clip (footage trim,
 //                        bottom-left zoom keyframes, captions) + a Master comp.
 //   Update              re-apply captions + footage zoom on the already-built
@@ -179,6 +179,9 @@
         for (var i = 1; i <= g.numProperties; i++) {
             var p = g.property(i);
             if (p.propertyType === PropertyType.PROPERTY) {
+                // never retime Time Remap: it's driven by loopOut on overlays, and
+                // stretching it would re-speed the emote instead of the punch.
+                if (p.matchName === "ADBE Time Remapping") { continue; }
                 if (p.canVaryOverTime && p.numKeys > 0) { fn(p); }
             } else {
                 eachKeyedProp(p, fn);
@@ -202,10 +205,19 @@
         for (i = n; i >= 1; i--) { p.removeKey(i); }
         if (n === 1) { p.setValueAtTime(times[0], vals[0]); return; }
         p.setValuesAtTimes(times, vals);
-        for (i = 1; i <= n; i++) {   // restore the authored feel
-            try { p.setInterpolationTypeAtKey(i, inI[i - 1], outI[i - 1]); } catch (e) {}
-            if (inE[i - 1]) {
+        // Restore the authored feel. Order matters: set the captured temporal ease
+        // FIRST (this also makes the key Bezier with the template's influence), then
+        // set interpolation type ONLY for non-Bezier keys. Re-stamping BEZIER would
+        // reset the ease to AE's default Easy Ease -- the bug this fixes.
+        for (i = 1; i <= n; i++) {
+            if (inE[i - 1] && outE[i - 1]) {
                 try { p.setTemporalEaseAtKey(i, inE[i - 1], outE[i - 1]); } catch (e) {}
+            }
+        }
+        for (i = 1; i <= n; i++) {
+            if (inI[i - 1] !== KeyframeInterpolationType.BEZIER ||
+                outI[i - 1] !== KeyframeInterpolationType.BEZIER) {
+                try { p.setInterpolationTypeAtKey(i, inI[i - 1], outI[i - 1]); } catch (e) {}
             }
         }
     }
@@ -308,20 +320,93 @@
         d.text = cap.text;
         sp.setValue(d);                        // keep template char style
         L.inPoint = Math.max(0, cap.start);
-        var animEnd = Math.min(comp.duration, cap.end);
         // linger ~10 frames past the last word so quick dialogue stays readable
         // and overlaps the next caption; the intro keeps its original timing.
         L.outPoint = Math.min(comp.duration, cap.end + 10 / comp.frameRate);
-        stretchKeys(L, L.inPoint, animEnd);    // first kf -> start, last kf -> last word
+        stretchKeys(L, L.inPoint, L.outPoint);  // first kf -> start, last kf -> out
         fadeOut(L, L.outPoint);
+    }
+
+    // --- overlays: emote punch-in + impact SFX on funny moments ------------
+
+    function ensureOverlayTemplate(M) {
+        // returns the layer whose Transform keyframes define the impact punch-in; the
+        // emote image is swapped onto a clone of it per overlay, keeping the animation.
+        // Restyle/move/re-time THIS one layer and Update to re-punch every overlay.
+        var comp = findComp("Overlay Template");
+        if (comp) {
+            for (var i = 1; i <= comp.numLayers; i++) {
+                if (comp.layer(i).name === "Overlay Style") { return comp.layer(i); }
+            }
+            return comp.layer(1);
+        }
+        comp = app.project.items.addComp("Overlay Template", M.out_w, M.out_h, 1, 3.0, M.fps);
+        var sol = comp.layers.addSolid([0.95, 0.85, 0.20], "Overlay Style", 200, 200, 1);
+        sol.name = "Overlay Style";
+        var tr = sol.property("Transform");
+        tr.property("Position").setValue([M.out_w / 2, M.out_h * 0.40]);
+        var sc = tr.property("Scale");          // bounce in, hold, pop out (% of emote px)
+        sc.setValueAtTime(0.00, [0, 0]);
+        sc.setValueAtTime(0.18, [360, 360]);    // overshoot
+        sc.setValueAtTime(0.34, [300, 300]);    // settle
+        sc.setValueAtTime(2.70, [300, 300]);    // hold
+        sc.setValueAtTime(3.00, [0, 0]);        // pop out
+        var op = tr.property("Opacity");
+        op.setValueAtTime(0.00, 0);
+        op.setValueAtTime(0.12, 100);
+        return sol;
+    }
+
+    function addSfx(comp, path, atTime, folder) {
+        var snd = importSource(path);            // wav/mp3 via the same importer/dedupe
+        if (folder) { snd.parentFolder = folder; }
+        var L = comp.layers.add(snd);
+        L.name = "reFire sfx";
+        L.startTime = atTime;
+        L.inPoint = atTime;
+        var natural = atTime + (snd.duration || 3.5);
+        L.outPoint = Math.min(comp.duration, natural);
+    }
+
+    function buildOverlay(comp, tmpl, ov, folder) {
+        if (!ov || !ov.asset) { return; }
+        var emote = importSource(ov.asset);      // png/gif punch-in image
+        if (folder) { emote.parentFolder = folder; }
+        tmpl.copyToComp(comp);                   // clone the animated placeholder -> layer(1)
+        var L = comp.layer(1);
+        L.replaceSource(emote, false);           // swap the emote in, keep the keyframes
+        L.name = "reFire overlay";
+        // re-center the anchor on the emote (the placeholder solid was a different size)
+        L.property("Transform").property("Anchor Point").setValue([emote.width / 2, emote.height / 2]);
+
+        var dur = ov.duration || 3;
+        var inP = Math.max(0, ov.start);
+        var outP = Math.min(comp.duration, inP + dur);
+        // An animated GIF imports as short, finite footage -- left alone its layer
+        // out point clamps to a frame or two and the whole punch collapses to one
+        // frame. Time Remap frees the duration; loopOut keeps the emote moving for
+        // the full hold. Stills (png/jpg, duration 0) already stretch to any length.
+        // ponytail: loopOut('cycle') replays the gif; use 'none' to hold frame 1.
+        if (emote.duration && emote.duration > 0) {
+            try {
+                L.timeRemapEnabled = true;
+                L.property("Time Remap").expression = "loopOut('cycle')";
+            } catch (e) {}
+        }
+        L.startTime = inP;
+        L.inPoint = inP;
+        L.outPoint = outP;
+        stretchKeys(L, inP, outP);               // first kf -> start, last kf -> out
+        if (ov.sfx) { addSfx(comp, ov.sfx, inP, folder); }
     }
 
     // --- build -------------------------------------------------------------
 
-    function buildClip(M, clip, src, tmpl, zoomScale, idx) {
+    function buildClip(M, clip, src, tmpl, zoomScale, idx, folder, overlayTmpl, ovFolder) {
         var dur = clip.end - clip.start;
         var comp = app.project.items.addComp(
             "reFire clip " + idx, M.out_w, M.out_h, 1, dur, M.fps);
+        if (folder) { comp.parentFolder = folder; }
 
         var foot = comp.layers.add(src);
         foot.startTime = -clip.start;
@@ -337,6 +422,11 @@
         var caps = clip.captions || [];
         for (var ci = 0; ci < caps.length; ci++) {
             buildCaption(comp, tmpl, caps[ci]);
+        }
+        // overlays last so the emote sits on top of the captions
+        var ovs = clip.overlays || [];
+        for (var oi = 0; oi < ovs.length; oi++) {
+            buildOverlay(comp, overlayTmpl, ovs[oi], ovFolder);
         }
         return comp;
     }
@@ -358,14 +448,15 @@
         }
     }
 
-    function buildCard(M, title, cardComp) {
+    function buildCard(M, title, cardComp, folder) {
         var comp = app.project.items.addComp(
             "reFire card: " + title, M.out_w, M.out_h, 1, CARD_S, M.fps);
+        if (folder) { comp.parentFolder = folder; }
         populateCard(cardComp, comp, title);
         return comp;
     }
 
-    function buildMaster(M, comps, cardTmpl) {
+    function buildMaster(M, comps, cardTmpl, folder) {
         // order the comps by section, dropping a title card before each titled
         // section, then lay them out with a short crossfade between neighbours.
         var sections = M.sections, s, ci, idx;
@@ -375,7 +466,7 @@
         }
         var seq = [];
         for (s = 0; s < sections.length; s++) {
-            if (sections[s].title) { seq.push(buildCard(M, sections[s].title, cardTmpl)); }
+            if (sections[s].title) { seq.push(buildCard(M, sections[s].title, cardTmpl, folder)); }
             var idxs = sections[s].clip_indices || [];
             for (ci = 0; ci < idxs.length; ci++) {
                 idx = idxs[ci];
@@ -393,6 +484,7 @@
 
         var master = app.project.items.addComp(
             "reFire Master", M.out_w, M.out_h, 1, Math.max(total, 1), M.fps);
+        if (folder) { master.parentFolder = folder; }
         var t = 0;
         for (i = 0; i < seq.length; i++) {
             var lay = master.layers.add(seq[i]);   // later layers stack on top -> fade in over prev
@@ -403,24 +495,85 @@
             if (i < seq.length - 1 && xf > 0) { op.setValueAtTime(en - xf, 100); op.setValueAtTime(en, 0); }
             t = en - xf;
         }
+        // music bed under the whole cut: place once, fade in/out, hold at bgm_db.
+        // ponytail: no loop -- a track shorter than the cut just ends; loop it manually
+        // (enable Time Remap + loopOut) if you need it to fill.
+        if (M.bgm) {
+            try {
+                var music = importSource(M.bgm);
+                if (folder) { music.parentFolder = folder; }
+                var mL = master.layers.add(music);
+                mL.name = "reFire music";
+                mL.startTime = 0;
+                if (mL.outPoint > master.duration) { mL.outPoint = master.duration; }
+                var lvl = mL.property("Audio").property("Audio Levels");
+                var db = (M.bgm_db != null) ? M.bgm_db : -18;
+                var fade = Math.min(1.0, master.duration * 0.45);
+                lvl.setValueAtTime(0, [-48, -48]);
+                lvl.setValueAtTime(fade, [db, db]);
+                lvl.setValueAtTime(master.duration - fade, [db, db]);
+                lvl.setValueAtTime(master.duration, [-48, -48]);
+            } catch (e) { /* missing/odd audio -> silent cut, build still succeeds */ }
+        }
         app.project.renderQueue.items.add(master);
     }
 
-    function doBuild() {
+    function ensureFolder(name) {
+        // reuse a shared folder (templates/footage) across builds; create on demand.
+        for (var i = 1; i <= app.project.numItems; i++) {
+            var it = app.project.item(i);
+            if (it instanceof FolderItem && it.name === name) { return it; }
+        }
+        return app.project.items.addFolder(name);
+    }
+
+    function nextBuildFolder() {
+        // a fresh masterbuild1 / masterbuild2 / ... so repeated Builds don't mingle.
+        var n = 1;
+        for (;;) {
+            var nm = "masterbuild" + n, taken = false;
+            for (var i = 1; i <= app.project.numItems; i++) {
+                var it = app.project.item(i);
+                if (it instanceof FolderItem && it.name === nm) { taken = true; break; }
+            }
+            if (!taken) { return app.project.items.addFolder(nm); }
+            n++;
+        }
+    }
+
+    function doBuild(report) {
+        report = report || function () {};
         var M = readManifest();
         if (!M) { return "Pick a manifest first."; }
         app.beginUndoGroup("reFire build");
         try {
+            var tplF = ensureFolder("reFire templates");   // shared singletons
+            var footF = ensureFolder("reFire footage");
+            var buildF = nextBuildFolder();                // this build's home
+
+            var ovF = ensureFolder("reFire overlays");      // shared emote/sfx/music assets
             var src = importSource(M.source);
+            src.parentFolder = footF;
             var tmpl = ensureTemplate(M);
             var zoomScale = ensureZoomTemplate(M);
             var cardTmpl = ensureSectionTemplate(M);
-            var comps = [];
-            for (var c = 0; c < M.clips.length; c++) {
-                comps.push(buildClip(M, M.clips[c], src, tmpl, zoomScale, c));
+            var overlayTmpl = ensureOverlayTemplate(M);
+            // tuck the (shared) templates into their folder
+            var capC = findComp("Caption Template"); if (capC) { capC.parentFolder = tplF; }
+            var zoomC = findComp("Zoom Template");   if (zoomC) { zoomC.parentFolder = tplF; }
+            var ovC = findComp("Overlay Template");  if (ovC) { ovC.parentFolder = tplF; }
+            if (cardTmpl) { cardTmpl.parentFolder = tplF; }
+
+            var comps = [], N = M.clips.length;
+            for (var c = 0; c < N; c++) {
+                comps.push(buildClip(M, M.clips[c], src, tmpl, zoomScale, c, buildF,
+                                     overlayTmpl, ovF));
+                report(Math.round((c + 1) / N * 95), "building clip " + (c + 1) + "/" + N);
             }
-            buildMaster(M, comps, cardTmpl);
-            return "Built " + comps.length + " clip(s). Master in render queue.";
+            buildMaster(M, comps, cardTmpl, buildF);
+            report(100, "master queued");
+            return "Built " + comps.length + " clip(s) in '" + buildF.name +
+                   "'. Master in render queue.";
         } finally {
             app.endUndoGroup();
         }
@@ -435,14 +588,20 @@
         var tmpl = ensureTemplate(M);
         var zoomScale = ensureZoomTemplate(M);
         var cardComp = ensureSectionTemplate(M);
+        var overlayTmpl = ensureOverlayTemplate(M);
+        var ovF = ensureFolder("reFire overlays");
         app.beginUndoGroup("reFire update");
         try {
             var touched = 0;
             for (var c = 0; c < M.clips.length; c++) {
                 var comp = findComp("reFire clip " + c);
                 if (!comp) { continue; }
-                for (var i = comp.numLayers; i >= 1; i--) {   // drop old captions
-                    if (comp.layer(i) instanceof TextLayer) { comp.layer(i).remove(); }
+                for (var i = comp.numLayers; i >= 1; i--) {   // drop old captions + overlays
+                    var nm = comp.layer(i).name;
+                    if (comp.layer(i) instanceof TextLayer ||
+                        nm === "reFire overlay" || nm === "reFire sfx") {
+                        comp.layer(i).remove();
+                    }
                 }
                 var foot = footageLayer(comp);   // re-punch zoom from the template
                 if (foot) {
@@ -453,6 +612,10 @@
                 var caps = M.clips[c].captions || [];
                 for (var ci = 0; ci < caps.length; ci++) {
                     buildCaption(comp, tmpl, caps[ci]);
+                }
+                var ovs = M.clips[c].overlays || [];
+                for (var oi = 0; oi < ovs.length; oi++) {
+                    buildOverlay(comp, overlayTmpl, ovs[oi], ovF);
                 }
                 touched++;
             }
@@ -471,33 +634,52 @@
         }
     }
 
-    // --- generate: re-run the Python export (topic -> organize + manifest) --
+    // --- make: the hands-off pipeline (VOD# + brief + duration -> manifest) --
 
-    function doGenerate(topic, count, model, minScore, zoomSens) {
-        // Re-runs `python -m refire ae` so the topic drives the Ollama grouping and
-        // a fresh manifest (zoom_episodes + sections) is written, then reloads it.
-        // Needs an existing manifest chosen first -- it supplies the video + run dir.
-        var M = readManifest();
-        if (!M) { return "Choose an existing manifest first (sets video + run dir)."; }
-        var mf = new File(manifestPath);
-        var runDir = mf.parent.parent;                 // <run>/ae/manifest.json -> <run>
-        var cmd = 'cmd.exe /c python -m refire ae "' + M.source +
-                  '" --run-dir "' + runDir.fsName + '"';
-        if (topic && topic.length) { cmd += ' --topic "' + topic + '"'; }
-        if (count && ("" + count).length) { cmd += ' --count ' + count; }
-        if (model && model.length) { cmd += ' --model ' + model; }
-        if (minScore && ("" + minScore).length) { cmd += ' --min-score ' + minScore; }
-        if (zoomSens && ("" + zoomSens).length) { cmd += ' --zoom-sens ' + zoomSens; }
-        cmd += ' 2>&1';
-        var res = system.callSystem(cmd);
-        var M2 = readManifest();                        // confirm it actually rewrote
-        if (M2 && M2.clips && M2.clips.length &&
-            M2.clips[0].zoom_episodes !== undefined) {
-            var secs = M2.sections ? M2.sections.length : 0;
-            return "Generated " + M2.clips.length + " clip(s), " + secs +
-                   " section(s). Now click Build. " + (res || "");
-        }
-        return "Generate may have failed (no new manifest). Output:\n" + (res || "(none)");
+    function writeFile(f, text) { f.open("w"); f.write(text); f.close(); }
+
+    function doMake(o) {
+        // Launches `python -m refire make` in a VISIBLE, detached terminal so its live
+        // progress (printed by the CLI) can be monitored, and the AE panel never freezes
+        // (no blocking poll loop). A .bat carries the command, so there are no nested
+        // quotes on the cmd line for cmd.exe to mangle. When it finishes, click
+        // 'Load manifest...'. Needs python + ollama on PATH.
+        if (!o.out) { return "Pick an output folder first."; }
+        if (!o.vod || !o.vod.length) { return "Enter a VOD number."; }
+        if (!o.brief || !o.brief.length) { return "Describe the video you want (Brief)."; }
+        if (!o.duration || !o.duration.length) { return "Set a target Duration (e.g. 20m)."; }
+
+        var runDir = o.out + "/run", vods = o.out + "/vods";
+        new Folder(runDir).create();
+        var batF = new File(runDir + "/reFire_make.bat");
+
+        var brief = o.brief.replace(/"/g, "").replace(/[\r\n]+/g, " ");
+        var py = 'python -m refire make ' + o.vod +
+                 ' --brief "' + brief + '"' +
+                 ' --duration ' + o.duration +
+                 ' --run-dir "' + runDir + '"' +
+                 ' --cache-dir "' + vods + '"';
+        if (o.game && o.game.length) { py += ' --game "' + o.game.replace(/"/g, "") + '"'; }
+        if (o.model && o.model.length) { py += ' --model ' + o.model; }
+        if (o.zoom && o.zoom.length) { py += ' --zoom-sens ' + o.zoom; }
+        if (o.wpl && o.wpl.length) { py += ' --words-per-line ' + o.wpl; }
+        if (o.tol && o.tol.length) { py += ' --tol ' + o.tol; }
+
+        writeFile(batF,
+            "@echo off\r\n" +
+            "title reFire make " + o.vod + "\r\n" +
+            "echo reFire make -- live progress below. Leave this window open.\r\n" +
+            "echo.\r\n" +
+            py + "\r\n" +
+            "echo.\r\n" +
+            "echo ==== finished (exit %ERRORLEVEL%). Manifest: run\\ae\\manifest.json ====\r\n" +
+            "echo Back in After Effects, click 'Load manifest...' then Build.\r\n" +
+            "pause\r\n");
+
+        // visible + detached: callSystem returns immediately, the terminal shows progress
+        system.callSystem('cmd.exe /c start "reFire make" "' + batF.fsName + '"');
+        return "Make launched in a terminal -- watch progress there.\n" +
+               "When it finishes, click 'Load manifest...' (run/ae/manifest.json).";
     }
 
     // --- UI ----------------------------------------------------------------
@@ -511,82 +693,164 @@
         w.spacing = 8;
         w.margins = 14;
 
-        // minimalist "opencode" palette: dark canvas, mono text, one accent.
-        // ponytail: native buttons can't be themed in ScriptUI -- left as-is.
-        var INK = [0.85, 0.86, 0.88], MUTE = [0.55, 0.56, 0.60],
-            ACCENT = [0.45, 0.85, 0.62], BG = [0.12, 0.12, 0.14];
-        var texts = [], labels = [];
-        function field(parent, label, def, chars) {       // "label  [____]" row
-            var grp = parent.add("group");
-            grp.spacing = 8;
-            var l = grp.add("statictext", undefined, label); labels.push(l);
-            var e = grp.add("edittext", undefined, def || "");
-            e.characters = chars; texts.push(e);
-            return e;
+        // "opencode" palette: dark canvas, mono text, one accent, box-rule dividers.
+        // ponytail: native buttons/panel chrome can't be themed in ScriptUI -- the
+        // text, fields, header and dividers carry the look.
+        var INK = [0.86, 0.87, 0.90], MUTE = [0.52, 0.54, 0.60],
+            ACCENT = [0.42, 0.86, 0.62], BG = [0.11, 0.11, 0.13];
+        var LABELW = 78;
+        var texts = [], labels = [], heads = [], rules = [];
+        var outFolder = null;
+
+        function rule(parent) {                            // a thin terminal-style divider
+            var r = parent.add("statictext", undefined, mk("─", 46));
+            r.alignment = ["fill", "top"]; rules.push(r); return r;
         }
+        function mk(ch, n) { var s = ""; while (n-- > 0) { s += ch; } return s; }
         function panel(title) {
             var p = w.add("panel", undefined, title);
             p.orientation = "column"; p.alignChildren = ["fill", "top"];
-            p.margins = 10; p.spacing = 6; labels.push(p);
+            p.margins = [12, 12, 12, 12]; p.spacing = 6; labels.push(p);
             return p;
         }
+        function field(parent, label, def, opts) {         // aligned "label [____]" row
+            opts = opts || {};
+            var grp = parent.add("group");
+            grp.orientation = "row"; grp.spacing = 8;
+            grp.alignChildren = ["left", "center"]; grp.alignment = ["fill", "top"];
+            var l = grp.add("statictext", undefined, label);
+            l.preferredSize = [LABELW, -1]; labels.push(l);
+            var e;
+            if (opts.multiline) {
+                e = grp.add("edittext", undefined, def || "", { multiline: true });
+                e.preferredSize = [-1, opts.h || 50]; e.alignment = ["fill", "center"];
+            } else {
+                e = grp.add("edittext", undefined, def || "");
+                if (opts.chars) { e.characters = opts.chars; }
+                e.alignment = opts.fill ? ["fill", "center"] : ["left", "center"];
+            }
+            texts.push(e); return e;
+        }
 
-        var srcP = panel("Source");
-        var pathTxt = srcP.add("statictext", undefined, "No manifest selected");
-        pathTxt.minimumSize = [240, 20]; texts.push(pathTxt);
-        var btnPick = srcP.add("button", undefined, "Choose manifest…");
+        // header
+        var head = w.add("statictext", undefined, "reFire"); heads.push(head);
+        var tag = w.add("statictext", undefined, "vod → brief → edited cut");
+        labels.push(tag);
+        rule(w);
 
-        var genP = panel("Generate");
-        var topicTxt = field(genP, "Topic", "", 22);
-        var countTxt = field(genP, "Count", "", 6);
-        var modelTxt = field(genP, "Model", "llama3.1:8b", 16);
-        var scoreTxt = field(genP, "Min score", "", 5);   // cut boring clips, 0-10
-        var zoomTxt = field(genP, "Zoom amt", "1.0", 5);   // 1=normal, >1 more
-        var btnGen = genP.add("button", undefined, "Generate (topic → organize)");
+        // MAKE: the autonomous flow
+        var makeP = panel("Make");
+        var outGrp = makeP.add("group"); outGrp.orientation = "row"; outGrp.spacing = 8;
+        outGrp.alignChildren = ["left", "center"]; outGrp.alignment = ["fill", "top"];
+        var outLbl = outGrp.add("statictext", undefined, "Output");
+        outLbl.preferredSize = [LABELW, -1]; labels.push(outLbl);
+        var outTxt = outGrp.add("statictext", undefined, "(no folder)");
+        outTxt.alignment = ["fill", "center"]; texts.push(outTxt);
+        var btnOut = outGrp.add("button", undefined, "Pick…"); btnOut.preferredSize = [56, -1];
 
+        var vodTxt = field(makeP, "VOD #", "", { chars: 14 });
+        var briefTxt = field(makeP, "Brief", "", { multiline: true, h: 46 });
+        var durTxt = field(makeP, "Duration", "20m", { chars: 10 });
+        var gameTxt = field(makeP, "Game", "", { fill: true });
+        var modelTxt = field(makeP, "Model", "llama3.1:8b", { fill: true });
+
+        // advanced knobs on one compact row
+        var advGrp = makeP.add("group"); advGrp.orientation = "row"; advGrp.spacing = 8;
+        advGrp.alignChildren = ["left", "center"]; advGrp.alignment = ["fill", "top"];
+        var advLbl = advGrp.add("statictext", undefined, "Tuning");
+        advLbl.preferredSize = [LABELW, -1]; labels.push(advLbl);
+        function mini(label, def, chars) {
+            var l = advGrp.add("statictext", undefined, label); labels.push(l);
+            var e = advGrp.add("edittext", undefined, def); e.characters = chars;
+            texts.push(e); return e;
+        }
+        var zoomTxt = mini("zoom", "1.0", 4);
+        var wplTxt = mini("words", "3", 3);
+        var tolTxt = mini("tol", "0.25", 5);
+
+        var btnMake = makeP.add("button", undefined, "Make");
+        var note = makeP.add("statictext", undefined,
+            "runs in the background; the bar tracks progress", { multiline: true });
+        note.alignment = ["fill", "top"]; labels.push(note);
+
+        rule(w);
+
+        // BUILD: turn the loaded manifest into AE comps
         var buildP = panel("Build");
-        var btnBuild = buildP.add("button", undefined, "Build");
-        var btnUpd = buildP.add("button", undefined, "Update");
+        var pathTxt = buildP.add("statictext", undefined, "No manifest loaded");
+        pathTxt.alignment = ["fill", "top"]; texts.push(pathTxt);
+        var btnPick = buildP.add("button", undefined, "Load manifest…");
+        var rowB = buildP.add("group"); rowB.orientation = "row"; rowB.spacing = 8;
+        rowB.alignment = ["fill", "top"];
+        var btnBuild = rowB.add("button", undefined, "Build"); btnBuild.alignment = ["fill", "center"];
+        var btnUpd = rowB.add("button", undefined, "Update"); btnUpd.alignment = ["fill", "center"];
 
-        var status = w.add("statictext", undefined, "", { multiline: true });
-        status.minimumSize = [240, 48];
+        rule(w);
+        var bar = w.add("progressbar", undefined, 0, 100);
+        bar.preferredSize = [-1, 8]; bar.alignment = ["fill", "top"];
+        var status = w.add("statictext", undefined, "ready", { multiline: true });
+        status.minimumSize = [240, 56]; status.alignment = ["fill", "top"];
 
-        // apply the palette + monospace; cosmetic only, never break the panel
+        // paint the palette + monospace; cosmetic only, wrapped so it never breaks
         try {
-            var g = w.graphics, mono = ScriptUI.newFont("Consolas", "Regular", 12);
+            var g = w.graphics;
+            var mono = ScriptUI.newFont("Consolas", "Regular", 12);
+            var monoH = ScriptUI.newFont("Consolas", ScriptUI.FontStyle.BOLD, 18);
             w.graphics.backgroundColor = g.newBrush(g.BrushType.SOLID_COLOR, BG);
-            function paint(c, rgb) {
-                c.graphics.font = mono;
+            function paint(c, rgb, font) {
+                c.graphics.font = font || mono;
                 c.graphics.foregroundColor = g.newPen(g.PenType.SOLID_COLOR, rgb, 1);
             }
-            for (var i = 0; i < labels.length; i++) paint(labels[i], MUTE);
-            for (var j = 0; j < texts.length; j++) paint(texts[j], INK);
+            var i;
+            for (i = 0; i < labels.length; i++) { paint(labels[i], MUTE); }
+            for (i = 0; i < texts.length; i++) { paint(texts[i], INK); }
+            for (i = 0; i < rules.length; i++) { paint(rules[i], [0.24, 0.25, 0.29]); }
+            for (i = 0; i < heads.length; i++) { paint(heads[i], ACCENT, monoH); }
             paint(status, ACCENT);
         } catch (e) { /* older AE / no Consolas -> default chrome, still works */ }
 
-        btnPick.onClick = function () {
-            var f = File.openDialog("Select reFire manifest.json", "*.json");
-            if (f) {
-                manifestPath = f.fsName;
-                pathTxt.text = decodeURI(f.name);
-                status.text = "";
-            }
-        };
-        btnGen.onClick = function () {
-            status.text = "Generating… (running detector export)";
+        function gather() {
+            return { out: outFolder, vod: vodTxt.text, brief: briefTxt.text,
+                     duration: durTxt.text, game: gameTxt.text, model: modelTxt.text,
+                     zoom: zoomTxt.text, wpl: wplTxt.text, tol: tolTxt.text };
+        }
+        function report(pct, msg) {                 // drive bar + status, repaint live
             try {
-                status.text = doGenerate(topicTxt.text, countTxt.text, modelTxt.text,
-                                         scoreTxt.text, zoomTxt.text);
-            }
+                if (pct != null) { bar.value = pct; }
+                if (msg != null) { status.text = (pct != null ? pct + "%  " : "") + msg; }
+                w.update();
+            } catch (e) {}
+        }
+
+        btnOut.onClick = function () {
+            var f = Folder.selectDialog("Choose an output folder for reFire");
+            if (f) { outFolder = f.fsName; outTxt.text = decodeURI(f.name); status.text = "ready"; }
+        };
+        btnMake.onClick = function () {
+            try { status.text = doMake(gather()); }
             catch (e) { status.text = "Error: " + e.toString(); }
+        };
+        btnPick.onClick = function () {
+            // if Make ran, the manifest is at <out>/run/ae/manifest.json -- auto-load it,
+            // else open a file dialog (start near the output folder for convenience).
+            if (outFolder) {
+                var auto = new File(outFolder + "/run/ae/manifest.json");
+                if (auto.exists) {
+                    manifestPath = auto.fsName; pathTxt.text = "run/ae/manifest.json";
+                    status.text = "manifest loaded -> click Build"; return;
+                }
+            }
+            var start = outFolder ? new File(outFolder + "/run/ae/manifest.json") : null;
+            var f = start ? start.openDlg("Select reFire manifest.json", "*.json")
+                          : File.openDialog("Select reFire manifest.json", "*.json");
+            if (f) { manifestPath = f.fsName; pathTxt.text = decodeURI(f.name); status.text = "ready"; }
         };
         btnBuild.onClick = function () {
-            try { status.text = doBuild(); }
-            catch (e) { status.text = "Error: " + e.toString(); }
+            report(0, "building…");
+            try { status.text = doBuild(report); } catch (e) { status.text = "Error: " + e.toString(); }
         };
         btnUpd.onClick = function () {
-            try { status.text = doUpdate(); }
-            catch (e) { status.text = "Error: " + e.toString(); }
+            try { status.text = doUpdate(); } catch (e) { status.text = "Error: " + e.toString(); }
         };
 
         w.layout.layout(true);

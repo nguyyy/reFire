@@ -26,6 +26,51 @@ def select_segments(
     return segs
 
 
+def parse_duration(text) -> float:
+    """'20m' / '90s' / '1.5h' / '20:00' / 'hh:mm:ss' / bare seconds -> seconds."""
+    t = str(text).strip().lower()
+    if ":" in t:                       # mm:ss or hh:mm:ss
+        sec = 0.0
+        for part in t.split(":"):
+            sec = sec * 60.0 + float(part)
+        return sec
+    mult = 1.0
+    if t.endswith("h"):
+        mult, t = 3600.0, t[:-1]
+    elif t.endswith("m"):
+        mult, t = 60.0, t[:-1]
+    elif t.endswith("s"):
+        mult, t = 1.0, t[:-1]
+    return float(t) * mult
+
+
+def budget_select(scored, target_s: float, tol: float = 0.25, order: str = "chrono"):
+    """Greedily pick highest-scored clips until total duration reaches target_s.
+
+    Items need start/end/score; durations are measured as end-start, so callers
+    that snap to sentences should pass POST-snap bounds for an accurate budget.
+    Stops once the target is met. If the pool can't reach the lower tolerance band
+    it returns what it has plus a warning string (never pads with filler).
+    Returns (clips, warning|None); clips ordered chrono (default) or by score.
+    """
+    lo = target_s * (1.0 - tol)
+    picked, total = [], 0.0
+    for s in sorted(scored, key=lambda x: x["score"], reverse=True):
+        if total >= target_s:
+            break
+        picked.append(s)
+        total += s["end"] - s["start"]
+    warning = None
+    if total < lo:
+        warning = (f"only {total:.0f}s of material cleared selection "
+                   f"(target {target_s:.0f}s) -- not padding with filler.")
+    if order == "chrono":
+        picked.sort(key=lambda s: s["start"])
+    else:
+        picked.sort(key=lambda s: s["score"], reverse=True)
+    return picked, warning
+
+
 def snap_to_sentences(words, start: float, end: float, max_pad: float = 5.0):
     """Nudge a clip's [start, end] onto sentence boundaries so it never cuts mid-sentence.
 

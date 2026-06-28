@@ -2,17 +2,63 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from .ae_export import export_ae
 from .assemble import edit
-from .pipeline import run
+from .pipeline import make, run
 from .score import DEFAULT_MODEL
+from .select import parse_duration
+
+# Anchor to the repo's assets/, not the CWD: the AE "Make" button launches the CLI
+# via a detached `cmd /c start`, whose working dir isn't the repo, so a relative
+# "assets" wouldn't resolve and overlays/bgm would come up empty.
+_DEFAULT_ASSETS = str(Path(__file__).resolve().parent.parent / "assets")
+
+
+def _progress_writer(path):
+    """Return a throttled progress(frac, msg) that writes {pct,msg,done} JSON.
+
+    Only writes when the integer pct changes, so a long transcription emits ~100
+    files, not thousands. The GUI polls this file to animate its bar.
+    """
+    path = Path(path)
+    state = {"pct": -1}
+
+    def write(frac, msg, done=False):
+        pct = max(0, min(100, int(frac * 100)))
+        if pct == state["pct"] and not done:
+            return
+        state["pct"] = pct
+        path.write_text(json.dumps({"pct": pct, "msg": msg, "done": done}),
+                        encoding="utf-8")
+
+    return write
 
 
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="refire", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    mk = sub.add_parser("make", help="VOD# + brief + duration -> focused AE manifest (hands-off)")
+    mk.add_argument("vod_id", help="Twitch VOD number (auto-downloaded + cached)")
+    mk.add_argument("--brief", required=True, help="free text: the subject + vibe you want")
+    mk.add_argument("--duration", required=True, help="target runtime: 20m / 20:00 / 1200")
+    mk.add_argument("--run-dir", default="run", help="artifact/output directory")
+    mk.add_argument("--model", default=DEFAULT_MODEL, help="Ollama model for scoring")
+    mk.add_argument("--game", default="", help="game name; LLM-builds a glossary for "
+                    "proper-noun mistranscriptions (e.g. \"Genshin Impact\")")
+    mk.add_argument("--zoom-sens", type=float, default=1.0,
+                    help="zoom amount: >1 more/earlier punches, <1 fewer (default 1.0)")
+    mk.add_argument("--words-per-line", type=int, default=3, help="caption grouping")
+    mk.add_argument("--tol", type=float, default=0.25, help="duration tolerance band (0-1)")
+    mk.add_argument("--cache-dir", default="vods", help="VOD download cache directory")
+    mk.add_argument("--assets-dir", default=_DEFAULT_ASSETS,
+                    help="folder with bgm/ sfx/ overlays/ for music + emote punch-ins")
+    mk.add_argument("--bgm", default=None, help="music-bed track (overrides a random pick from assets/bgm)")
+    mk.add_argument("--progress-file", default=None,
+                    help="write {pct,msg,done} JSON here for a GUI progress bar")
 
     d = sub.add_parser("detect", help="find clip-worthy segments -> segments.json")
     d.add_argument("video", help="path to the stream video file")
@@ -51,6 +97,34 @@ def main(argv: list[str] | None = None) -> None:
 
     args = p.parse_args(argv)
 
+    if args.cmd == "make":
+        file_w = _progress_writer(args.progress_file) if args.progress_file else None
+        last = {"pct": -1}
+
+        def prog(frac, msg, done=False):
+            pct = max(0, min(100, int(frac * 100)))
+            if pct != last["pct"] or done:         # throttle to integer-pct changes
+                last["pct"] = pct
+                print("[%3d%%] %s" % (pct, msg), flush=True)
+            if file_w:
+                file_w(frac, msg, done)
+
+        try:
+            out = make(args.vod_id, args.brief, parse_duration(args.duration),
+                       run_dir=args.run_dir, model=args.model, game=args.game,
+                       zoom_sens=args.zoom_sens, words_per_line=args.words_per_line,
+                       tol=args.tol, cache_dir=args.cache_dir,
+                       assets_dir=args.assets_dir, bgm=args.bgm, progress=prog)
+        except BaseException as e:                 # show the failure in the terminal
+            prog(1.0, "error: " + str(e), done=True)
+            raise
+        prog(1.0, "done", done=True)
+        jsx = Path(__file__).with_name("ae") / "reFire.jsx"
+        print(f"Manifest: {out}")
+        print("In After Effects: File > Scripts > Run Script File... ->")
+        print(f"  {jsx}")
+        print("In the panel: Choose manifest -> Build.")
+        return
     if args.cmd == "detect":
         out = run(args.video, args.chat, args.run_dir, model=args.model,
                   w_llm=args.w_llm, w_chat=args.w_chat,

@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 run/
+assets/**/_cache/
 *.wav
 *.mp4
 *.exe
