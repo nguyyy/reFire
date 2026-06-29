@@ -45,7 +45,9 @@ def _scan(folder, exts, exclude_hint=(), only_hint=()):
     for p in folder.rglob("*"):
         if not p.is_file() or p.suffix.lower() not in exts:
             continue
-        parts = " ".join(p.parts).lower()
+        # match hints on FOLDER names only -- a meme sfx named "clownMusic.mp3" must
+        # not count as a music bed just because its filename contains "music".
+        parts = " ".join(p.parent.parts).lower()
         if exclude_hint and any(h in parts for h in exclude_hint):
             continue
         if only_hint and not any(h in parts for h in only_hint):

@@ -53,7 +53,40 @@ def assemble(
         "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac",
         "-y", str(out_path),
     ])
+    joined.unlink(missing_ok=True)   # drop the music-less intermediate
     return out_path
+
+
+def render_clips(
+    video: str | Path,
+    run_dir: str | Path,
+    clips: list[dict],
+    words: list[dict],
+    music: str | Path | None = None,
+    encoder: str = "libx264",
+    out_name: str = "rough.mp4",
+) -> Path:
+    """Render a flat list of {start,end} clips into a watchable rough cut.
+
+    Per-clip trim -> reframe -> burn subs, concat, optional music bed. `words` must
+    already be emphasis-annotated. Reuses the ffmpeg path so a `make` run can be
+    eyeballed without After Effects; skips AE-only polish (section cards, emote
+    overlays, SFX). Returns run_dir/out_name.
+    """
+    run_dir = Path(run_dir)
+    speech = speech_intervals(words)            # phrase runs; hold zoom through these
+    clips_dir = run_dir / "clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    rendered: list[Path] = []
+    for i, seg in enumerate(clips):
+        ass = clips_dir / f"clip{i:03d}.ass"
+        out = clips_dir / f"clip{i:03d}.mp4"
+        ass.write_text(build_ass(words, seg["start"], seg["end"]), encoding="utf-8")
+        seg_speech = [(max(s, seg["start"]) - seg["start"], min(e, seg["end"]) - seg["start"])
+                      for s, e in speech if e > seg["start"] and s < seg["end"]]
+        render_clip(video, seg, ass, out, encoder=encoder, speech=seg_speech)
+        rendered.append(out)
+    return assemble(rendered, run_dir / out_name, music=music)
 
 
 def edit(

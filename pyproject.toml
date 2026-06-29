@@ -8,6 +8,7 @@ dependencies = [
     "ollama>=0.3",
     "numpy>=1.24",
     "opencv-python>=4.8",
+    "anthropic>=0.40",
 ]
 
 [project.optional-dependencies]

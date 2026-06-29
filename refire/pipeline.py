@@ -91,14 +91,23 @@ def make(
     cache_dir: str | Path = "vods",
     assets_dir: str | Path = "assets",
     bgm: str | Path | None = None,
+    title: str = "",
+    claude_model: str = "claude-sonnet-4-6",
+    flat: bool = False,
+    local_director: bool = False,
+    render: bool = False,
+    encoder: str = "libx264",
     progress=None,
 ) -> Path:
-    """Hands-off: VOD# + brief + duration -> focused, chronological AE manifest.
+    """Hands-off: VOD# + brief + duration -> focused, narrative AE manifest.
 
-    Downloads the VOD (cached), runs the cached detect core, then the brief-driven
-    half: retrieve candidates -> LLM-score against the brief -> sentence-snap ->
-    fill the duration budget -> chronological manifest. Prints any shortfall warning.
-    `progress(frac, msg)` (0..1) reports stage progress for the GUI.
+    Downloads the VOD (cached), runs the cached detect core, then the narrative half:
+    a Claude "director" pass reads the whole stream and writes a story outline (central
+    idea + ordered beats), and each beat is cast with the best local clip -> titled
+    sections -> manifest. If Claude is unavailable (no ANTHROPIC_API_KEY / API error /
+    `flat=True`), falls back to the flat path: retrieve -> LLM-score against the brief
+    -> sentence-snap -> fill the duration budget -> one untitled section. Prints any
+    shortfall warning. `progress(frac, msg)` (0..1) reports stage progress for the GUI.
     """
     from .ae_export import build_manifest
     from .emphasis import annotate_emphasis
@@ -122,39 +131,72 @@ def make(
     report(0.55, "embedding chunks")
     chunks = _ensure_embeddings(chunks, run_dir)
 
-    # candidate pool ~3x the budget worth of ~60s chunks, floored so short briefs
-    # still get headroom for the LLM scorer.
-    report(0.62, "retrieving candidates")
-    k = max(40, int(duration_s / 60.0 * 3))
-    candidates = retrieve(brief, chunks, k)
-    scored = []
-    for i, c in enumerate(candidates):
-        res = score_chunk(c, brief=brief, model=model)
-        scored.append({"start": c["start"], "end": c["end"],
-                       "score": res["llm_score"], "reason": res["reason"]})
-        report(0.66 + 0.24 * (i + 1) / len(candidates), "scoring clips")
+    # Narrative path: a Claude director pass writes the story outline, then we cast the
+    # best local clip into each beat -> titled sections (= AE section cards).
+    sections = None
+    warning = None
+    if not flat:
+        try:
+            from . import director, narrative
+            report(0.60, "writing story outline")
+            smap = director.stream_map(words)
+            ol = (director.outline_local(smap, brief, title, duration_s, model=model)
+                  if local_director
+                  else director.outline(smap, brief, title, duration_s, model=claude_model))
+            report(0.66, "casting beats")
+            sections, outline_log, warning = narrative.cast(
+                ol, chunks, words, duration_s, model=model, tol=tol)
+            if sections:
+                (run_dir / "outline.json").write_text(
+                    json.dumps(outline_log, indent=2), encoding="utf-8")
+        except Exception as e:
+            # ponytail: any director failure (no key, API error, parse, empty cast) ->
+            # fall back to flat selection so the run still ships a cut.
+            print("narrative outline unavailable, using flat selection:", e)
+            sections = None
+
+    if not sections:
+        # Flat fallback: candidate pool ~3x the budget worth of ~60s chunks, floored so
+        # short briefs still get headroom for the LLM scorer; one untitled section.
+        report(0.62, "retrieving candidates")
+        k = max(40, int(duration_s / 60.0 * 3))
+        candidates = retrieve(brief, chunks, k)
+        scored = []
+        for i, c in enumerate(candidates):
+            res = score_chunk(c, brief=brief, model=model)
+            scored.append({"start": c["start"], "end": c["end"],
+                           "score": res["llm_score"], "reason": res["reason"]})
+            report(0.66 + 0.24 * (i + 1) / len(candidates), "scoring clips")
+        snapped = []
+        for s in scored:
+            a, b = snap_to_sentences(words, s["start"], s["end"])
+            snapped.append({**s, "start": a, "end": b})
+        picked, warning = budget_select(snapped, duration_s, tol=tol, order="chrono")
+        if not picked:
+            raise SystemExit("No clips cleared selection for this brief.")
+        sections = [{"title": "", "clips": picked}]
 
     report(0.90, "selecting clips")
     annotate_emphasis(words, run_dir / "audio.wav")
-    snapped = []
-    for s in scored:
-        a, b = snap_to_sentences(words, s["start"], s["end"])
-        snapped.append({**s, "start": a, "end": b})
-
-    picked, warning = budget_select(snapped, duration_s, tol=tol, order="chrono")
-    if not picked:
-        raise SystemExit("No clips cleared selection for this brief.")
+    flat_clips = [clip for sec in sections for clip in sec["clips"]]
 
     report(0.93, "placing overlays + music")
-    overlays = pick_overlays(words, picked, assets_dir, model=model)
+    overlays = pick_overlays(words, flat_clips, assets_dir, model=model)
     music = pick_bgm(assets_dir, override=bgm)
 
     report(0.95, "building manifest (motion scan)")
     z_enter = min(0.95, ENTER / max(zoom_sens, 1e-3))
     z_exit = min(z_enter * 0.9, EXIT / max(zoom_sens, 1e-3))
-    mp = build_manifest(video, run_dir, words, [{"title": "", "clips": picked}],
+    mp = build_manifest(video, run_dir, words, sections,
                         words_per_line, z_enter, z_exit,
                         overlays_by_clip=overlays, bgm=music)
+    if render:
+        # no-AE rough cut for eyeballing: ffmpeg trim+reframe+subs+concat+music bed.
+        report(0.97, "rendering rough cut (ffmpeg)")
+        from .assemble import render_clips
+        rough = render_clips(video, run_dir, flat_clips, words,
+                             music=music, encoder=encoder)
+        print("Rough cut:", rough)
     report(1.0, "done")
     if warning:
         print("WARNING:", warning)

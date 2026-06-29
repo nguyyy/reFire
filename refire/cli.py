@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from .ae_export import export_ae
@@ -15,6 +16,25 @@ from .select import parse_duration
 # via a detached `cmd /c start`, whose working dir isn't the repo, so a relative
 # "assets" wouldn't resolve and overlays/bgm would come up empty.
 _DEFAULT_ASSETS = str(Path(__file__).resolve().parent.parent / "assets")
+
+
+def _load_dotenv() -> None:
+    """Load KEY=VALUE lines from a .env (CWD first, then repo root) into os.environ.
+
+    ponytail: ~10 lines instead of a python-dotenv dependency. Real env wins
+    (setdefault), so an exported var still overrides the file. Used so the Claude
+    director can read ANTHROPIC_API_KEY from a gitignored .env file.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    for env_path in (Path.cwd() / ".env", repo_root / ".env"):
+        if not env_path.is_file():
+            continue
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
 
 
 def _progress_writer(path):
@@ -38,6 +58,7 @@ def _progress_writer(path):
 
 
 def main(argv: list[str] | None = None) -> None:
+    _load_dotenv()
     p = argparse.ArgumentParser(prog="refire", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -57,6 +78,16 @@ def main(argv: list[str] | None = None) -> None:
     mk.add_argument("--assets-dir", default=_DEFAULT_ASSETS,
                     help="folder with bgm/ sfx/ overlays/ for music + emote punch-ins")
     mk.add_argument("--bgm", default=None, help="music-bed track (overrides a random pick from assets/bgm)")
+    mk.add_argument("--title", default="", help="stream title; helps the director understand the story")
+    mk.add_argument("--claude-model", default="claude-sonnet-4-6",
+                    help="Claude model for the narrative director pass")
+    mk.add_argument("--flat", action="store_true",
+                    help="skip the Claude director; use flat brief-relevance selection")
+    mk.add_argument("--local-director", action="store_true",
+                    help="run the narrative director on local Ollama (--model), no API spend")
+    mk.add_argument("--render", action="store_true",
+                    help="also ffmpeg-render a no-AE rough cut to run/rough.mp4 for eyeballing")
+    mk.add_argument("--encoder", default="libx264", help="ffmpeg encoder (e.g. h264_nvenc) for --render")
     mk.add_argument("--progress-file", default=None,
                     help="write {pct,msg,done} JSON here for a GUI progress bar")
 
@@ -114,7 +145,10 @@ def main(argv: list[str] | None = None) -> None:
                        run_dir=args.run_dir, model=args.model, game=args.game,
                        zoom_sens=args.zoom_sens, words_per_line=args.words_per_line,
                        tol=args.tol, cache_dir=args.cache_dir,
-                       assets_dir=args.assets_dir, bgm=args.bgm, progress=prog)
+                       assets_dir=args.assets_dir, bgm=args.bgm,
+                       title=args.title, claude_model=args.claude_model,
+                       flat=args.flat, local_director=args.local_director,
+                       render=args.render, encoder=args.encoder, progress=prog)
         except BaseException as e:                 # show the failure in the terminal
             prog(1.0, "error: " + str(e), done=True)
             raise
