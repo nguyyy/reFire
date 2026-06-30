@@ -1,4 +1,6 @@
-from refire.ae_export import decimate_zoom
+import json
+
+from refire.ae_export import build_manifest, decimate_zoom
 from refire.reframe import zoom_track
 from refire.subtitles import group_words
 
@@ -38,3 +40,18 @@ def test_decimate_zoom_burst_rises_and_returns():
 
 def test_decimate_zoom_empty():
     assert decimate_zoom([], FPS) == []
+
+def test_build_manifest_can_skip_motion_scan(monkeypatch, tmp_path):
+    """motion_zoom=False writes static-fit clips without touching OpenCV/video frames."""
+    monkeypatch.setattr("refire.ae_export.clip_intensity",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("scan called")))
+    words = [
+        {"text": "Hello", "start": 0.0, "end": 0.4, "emph": False},
+        {"text": "there.", "start": 0.5, "end": 0.9, "emph": False},
+    ]
+    sections = [{"title": "Open", "clips": [{"start": 0.0, "end": 1.0}]}]
+
+    mp = build_manifest("missing-video.mp4", tmp_path, words, sections, motion_zoom=False)
+    data = json.loads(mp.read_text(encoding="utf-8"))
+
+    assert data["clips"][0]["zoom_episodes"] == []

@@ -106,25 +106,132 @@ def test_stream_map_is_sentence_level():
 
 # --- director backends parse into the new Beat schema ---
 
-def test_director_outline_plumbing(monkeypatch):
-    """outline() returns the parsed Outline without a live API call."""
+def test_max_tokens_reserves_room_after_thinking():
+    from refire import director
+    # always thinking budget + reserved answer room, monotonic, capped
+    assert director._max_tokens(90.0) > director.THINK_BUDGET
+    assert director._max_tokens(2700.0) >= director._max_tokens(1200.0)
+    assert director._max_tokens(99999.0) <= 24000           # capped
+    assert director._out_room(90.0) >= 4000                 # answer always gets room
+
+
+def _fake_anthropic(monkeypatch, responses, output_format=None):
+    """Stub anthropic.Anthropic; parse() yields `responses` (parsed_output, stop_reason)
+    in order and records each call's kwargs into the returned `calls` list."""
     anthropic = pytest.importorskip("anthropic")
     from refire import director
+    expected = output_format or director.Outline
 
-    want = director.Outline(central_idea="x", beats=[
-        director.Beat(title="A", intent="i", query="q", start_s=1.0, end_s=2.0)])
+    calls = []
+    seq = iter(responses)
 
     class FakeMessages:
         def parse(self, **kw):
-            assert kw["output_format"] is director.Outline
-            return SimpleNamespace(parsed_output=want)
+            assert kw["output_format"] is expected
+            calls.append(kw)
+            parsed, stop = next(seq)
+            return SimpleNamespace(parsed_output=parsed, stop_reason=stop)
 
-    class FakeClient:
-        messages = FakeMessages()
+    monkeypatch.setattr(anthropic, "Anthropic",
+                        lambda *a, **k: SimpleNamespace(messages=FakeMessages()))
+    return calls
 
-    monkeypatch.setattr(anthropic, "Anthropic", lambda *a, **k: FakeClient())
-    got = director.outline("[00:00] hi", "brief", "title", 90.0)
+
+def test_director_outline_plumbing(monkeypatch):
+    """outline() returns the parsed Outline and passes a target-scaled max_tokens."""
+    from refire import director
+    want = director.Outline(central_idea="x", beats=[
+        director.Beat(title="A", intent="i", query="q", start_s=1.0, end_s=2.0)])
+    calls = _fake_anthropic(monkeypatch, [(want, "end_turn")])
+    got = director.outline("[00:00] hi", "brief", "title", 1800.0)   # 30-min target
     assert got is want and got.beats[0].title == "A"
+    assert calls[0]["max_tokens"] == director._max_tokens(1800.0)
+    assert calls[0]["thinking"]["type"] == "enabled"      # explicit budget, not adaptive
+
+
+def test_director_retries_without_thinking_on_none(monkeypatch):
+    """parsed_output None (thinking ate the budget) -> retry once with no thinking."""
+    from refire import director
+    want = director.Outline(central_idea="x", beats=[
+        director.Beat(title="A", intent="i", query="q", start_s=1.0, end_s=2.0)])
+    calls = _fake_anthropic(monkeypatch, [(None, "max_tokens"), (want, "end_turn")])
+    got = director.outline("[00:00] hi", "brief", "title", 600.0)
+    assert got is want
+    assert len(calls) == 2
+    assert "thinking" in calls[0] and "thinking" not in calls[1]   # retry drops thinking
+
+
+def test_director_raises_when_no_outline(monkeypatch):
+    """Both attempts empty -> raise with the stop_reason instead of returning None."""
+    from refire import director
+    _fake_anthropic(monkeypatch, [(None, "max_tokens"), (None, "max_tokens")])
+    with pytest.raises(RuntimeError, match="max_tokens"):
+        director.outline("[00:00] hi", "brief", "title", 600.0)
+
+
+def test_cast_reports_progress_per_beat(stubbed):
+    seen = []
+    narrative.cast(_outline("A", "B"), _chunks(), [], target_s=1000.0, model="m",
+                   progress=lambda f, m: seen.append(m))
+    assert len(seen) == 2 and "A" in seen[0] and "B" in seen[1]
+
+
+def test_resolve_model_keeps_installed(monkeypatch):
+    import ollama
+    from refire import pipeline
+    models = SimpleNamespace(models=[
+        SimpleNamespace(model="llama3.1:8b", size=5_000_000_000),
+        SimpleNamespace(model="nomic-embed-text:latest", size=274_000_000)])
+    monkeypatch.setattr(ollama, "list", lambda: models)
+    assert pipeline._resolve_ollama_model("llama3.1:8b") == "llama3.1:8b"
+    assert pipeline._resolve_ollama_model("llama3.1") == "llama3.1:8b"   # base-name match
+
+
+def test_resolve_model_autopicks_largest_non_embed(monkeypatch):
+    import ollama
+    from refire import pipeline
+    models = SimpleNamespace(models=[
+        SimpleNamespace(model="llama3.1:8b", size=5_000_000_000),
+        SimpleNamespace(model="phi3:mini", size=2_000_000_000),
+        SimpleNamespace(model="nomic-embed-text:latest", size=274_000_000)])
+    monkeypatch.setattr(ollama, "list", lambda: models)
+    # qwen2.5:14b absent -> biggest chat model, never the embedder
+    assert pipeline._resolve_ollama_model("qwen2.5:14b") == "llama3.1:8b"
+
+
+# --- editor-review loop: the critic reads the realized cut, then revises ---
+
+def test_realized_script_renders_beats_in_order():
+    """_realized_script feeds the critic the ACTUAL transcript, in order (the loop signal)."""
+    from refire import director
+    log = {"central_idea": "the idea", "beats": [
+        {"title": "Open", "intent": "hook", "start": 0.0, "end": 5.0,
+         "score": 9.0, "text": "first line"},
+        {"title": "Close", "intent": "button", "start": 65.0, "end": 70.0,
+         "score": 8.0, "text": "last line"}]}
+    s = director._realized_script(log)
+    assert s.index("Open") < s.index("Close")          # story order preserved
+    assert "first line" in s and "last line" in s      # realized transcript, not the plan
+    assert "[00:00-00:05]" in s and "[01:05-01:10]" in s
+    assert "the idea" in s
+
+
+def test_review_returns_revised_outline_and_reserves_notes_room(monkeypatch):
+    """review() parses a Review, feeds the realized transcript, and reserves answer room
+    for its notes on top of the outline budget."""
+    from refire import director
+    revised = director.Outline(central_idea="y", beats=[
+        director.Beat(title="B", intent="i", query="q", start_s=1.0, end_s=2.0)])
+    want = director.Review(approved=False, notes="flat; needs a closing button",
+                           outline=revised)
+    calls = _fake_anthropic(monkeypatch, [(want, "end_turn")], output_format=director.Review)
+    log = {"central_idea": "x", "beats": [
+        {"title": "A", "intent": "i", "start": 3.0, "end": 5.0, "score": 9.0,
+         "text": "hi there"}]}
+    got = director.review("[00:00] hi there", "brief", "title", log, 600.0)
+    assert got is want and got.outline.beats[0].title == "B"
+    assert calls[0]["max_tokens"] == min(24000, director._max_tokens(600.0) + 1500)
+    assert "hi there" in calls[0]["messages"][0]["content"]   # critic reads the realized cut
 
 
 def test_local_director_parses_ollama_json(monkeypatch):
@@ -140,3 +247,95 @@ def test_local_director_parses_ollama_json(monkeypatch):
                         lambda **kw: {"message": {"content": json.dumps(payload)}})
     got = director.outline_local("[00:00] hi", "brief", "title", 90.0)
     assert got.central_idea == "x" and got.beats[0].title == "A"
+
+
+# --- editorial schema (full Beat) + payoff-aware bounds + cut plan ---
+
+def test_beat_parses_full_and_minimal():
+    """Full editorial Beat parses; a minimal one still does (defaults fill the rest)."""
+    from refire import director
+    full = director.Beat(title="T", role="climax", intent="i", viewer_question="q?",
+                         turn="t", transition_in="after setup", texture="chaotic",
+                         energy=5, setup_start_s=10.0, payoff_start_s=14.0,
+                         reaction_end_s=17.0, start_s=12.0, end_s=16.0, query="q")
+    assert full.role == "climax" and full.energy == 5 and full.payoff_start_s == 14.0
+    lean = director.Beat(title="T", start_s=1.0, end_s=2.0)        # old shape, no editorial
+    assert lean.role == "" and lean.energy == 3 and lean.reaction_end_s is None
+    ol = director.Outline(central_idea="c", beats=[lean])
+    assert ol.story_shape == "" and ol.viewer_promise == ""        # additive defaults
+
+
+def _ed_beat(**kw):
+    base = dict(title="T", role="hook", intent="i", viewer_question="q?", turn="t",
+                transition_in="tr", texture="funny", energy=4, setup_start_s=None,
+                payoff_start_s=None, reaction_end_s=None, start_s=0.0, end_s=1.0, query="q")
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def _fixed_score(monkeypatch):
+    monkeypatch.setattr("refire.score.score_chunk",
+                        lambda c, brief="", model="": {"llm_score": 9.0, "reason": "r"})
+
+
+def test_cast_logs_editorial_fields(monkeypatch):
+    """cast() carries story_shape/viewer_promise + per-beat editorial fields into the log."""
+    _fixed_score(monkeypatch)
+    words = _words("a b c. d e f. g h i.")
+    ol = SimpleNamespace(central_idea="idea", story_shape="confidence -> chaos",
+                         viewer_promise="watch him spiral", ending_needed="absurd build",
+                         beats=[_ed_beat(start_s=0.0, end_s=1.0)])
+    sections, log, warning = narrative.cast(ol, [], words, target_s=1000.0, model="m")
+    assert log["story_shape"] == "confidence -> chaos"
+    assert log["viewer_promise"] == "watch him spiral"
+    b = log["beats"][0]
+    assert b["role"] == "hook" and b["viewer_question"] == "q?" and b["energy"] == 4
+
+
+def test_cast_extends_end_for_reaction(monkeypatch):
+    """reaction_end_s widens the out-point so the cut keeps the reaction tail."""
+    _fixed_score(monkeypatch)
+    words = _words("a b c. d e f. g h i.")     # terminators at 2.8, 5.8, 8.8
+    # end_s alone snaps to 2.8 (sentence 1); reaction_end_s=4.0 pushes into sentence 2 -> 5.8
+    ol = SimpleNamespace(central_idea="x", beats=[
+        _ed_beat(start_s=0.0, end_s=1.0, reaction_end_s=4.0)])
+    sections, log, warning = narrative.cast(ol, [], words, target_s=1000.0, model="m")
+    assert sections[0]["clips"][0]["end"] == pytest.approx(5.8)
+
+
+def test_final_beat_phrase_fallback_ends_on_pause(monkeypatch):
+    """The final beat ends on a clean breath when whisper dropped the closing punctuation."""
+    _fixed_score(monkeypatch)
+    words = [{"text": "uh", "start": 0.0, "end": 0.5},
+             {"text": "wait", "start": 0.5, "end": 1.0},     # speech run ends here (2s gap)
+             {"text": "what", "start": 3.0, "end": 3.5}]
+    ol = SimpleNamespace(central_idea="x", beats=[_ed_beat(start_s=0.0, end_s=0.9)])
+    sections, log, warning = narrative.cast(ol, [], words, target_s=1000.0, model="m")
+    assert sections[0]["clips"][0]["end"] == pytest.approx(1.0)   # the pause, not mid-word 0.9
+
+
+def test_realized_script_includes_role_and_viewer_question():
+    from refire import director
+    log = {"central_idea": "idea", "story_shape": "x -> y", "beats": [
+        {"title": "Open", "role": "hook", "intent": "grab", "viewer_question": "how?",
+         "transition_in": "", "energy": 5, "start": 0.0, "end": 5.0, "score": 9.0,
+         "text": "first line"}]}
+    s = director._realized_script(log)
+    assert "[hook]" in s and "how?" in s and "first line" in s and "x -> y" in s
+
+
+def test_cut_plan_md_renders_beats():
+    """cut_plan_md renders the editor's notebook: shape, role-tagged beats, mm:ss, notes."""
+    log = {"central_idea": "the idea", "story_shape": "confidence -> chaos",
+           "viewer_promise": "watch him spiral", "rounds": 1,
+           "review": [{"round": 1, "approved": True, "notes": "tight"}],
+           "beats": [{"title": "Cold Open", "role": "hook", "intent": "show chaos",
+                      "viewer_question": "how did we get here?", "transition_in": "",
+                      "texture": "chaotic", "energy": 5, "start": 134.0, "end": 156.0,
+                      "score": 9.0, "reason": "what am I looking at"}]}
+    md = narrative.cut_plan_md(log)
+    assert "# Cut Plan" in md
+    assert "Cold Open" in md and "(hook)" in md
+    assert "02:14-02:36" in md                          # mm:ss clip bounds
+    assert "confidence -> chaos" in md
+    assert "Round 1 (approved): tight" in md

@@ -2,7 +2,7 @@
 
 Alternate final stage to the ffmpeg burn-in (`assemble.edit`). reFire writes
 `run/ae/manifest.json`; `refire/ae/reFire.jsx` reads it inside After Effects to
-build styled, hand-tunable comps. The detector (Stage 1) is untouched — this just
+build styled, hand-tunable comps. The detector (Stage 1) is untouched -- this just
 reshapes the already-computed per-clip data for AE.
 """
 from __future__ import annotations
@@ -15,6 +15,7 @@ from .emphasis import annotate_emphasis, style_text
 from .reframe import ENTER, EXIT, motion_intervals
 from .score import DEFAULT_MODEL
 from .select import select_segments, snap_to_sentences, speech_intervals
+from .style import style_for
 from .subtitles import group_words
 
 FPS = 30
@@ -84,7 +85,8 @@ def clip_intensity(source, start: float, end: float):
 
 def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
                    z_enter: float = ENTER, z_exit: float = EXIT,
-                   overlays_by_clip=None, bgm=None, bgm_db: float = -18.0) -> Path:
+                   overlays_by_clip=None, bgm=None, bgm_db: float = -18.0,
+                   motion_zoom: bool = True) -> Path:
     """Write run_dir/ae/manifest.json from already-chosen sections. Returns its path.
 
     Shared by `export_ae` (legacy detect path) and `pipeline.make` (brief path).
@@ -92,6 +94,8 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
     each clip is {start, end} in absolute source seconds (sentence-snapped upstream).
     `overlays_by_clip`, if given, is a per-clip list (in flattened build order) of
     overlay punch-ins; `bgm` is a music-bed path mixed under the whole cut.
+    `motion_zoom=False` skips the OpenCV frame scan and writes static-fit clips
+    (`zoom_episodes: []`) for faster, calmer builds.
     """
     run_dir = Path(run_dir)
     speech = speech_intervals(words)                 # hold zoom through phrases
@@ -101,7 +105,17 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
     for sec in sections:
         idxs = []
         for seg in sec["clips"]:
-            groups = group_words(words, seg["start"], seg["end"], words_per_line)
+            # Style pass: a beat's role/energy tilts presentation. No role (legacy detect
+            # path / flat fallback) -> NEUTRAL, so those manifests stay byte-identical.
+            role = seg.get("role", "")
+            if role:
+                st = style_for(role, seg.get("energy", 3))
+                wpl = st["words_per_line"]
+                cz_enter = min(0.95, z_enter / st["zoom_sens"])
+                cz_exit = min(cz_enter * 0.9, z_exit / st["zoom_sens"])
+            else:
+                wpl, cz_enter, cz_exit = words_per_line, z_enter, z_exit
+            groups = group_words(words, seg["start"], seg["end"], wpl)
             captions = [
                 {"text": " ".join(style_text(w["text"], w["emph"]) for w in g),
                  "start": g[0]["start"], "end": g[-1]["end"]}
@@ -110,19 +124,29 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
             # clip-relative speech runs so an episode never releases mid-sentence
             seg_speech = [(max(s, seg["start"]) - seg["start"], min(e, seg["end"]) - seg["start"])
                           for s, e in speech if e > seg["start"] and s < seg["end"]]
-            inten, fps = clip_intensity(video, seg["start"], seg["end"])
-            episodes = [{"start": round(a, 3), "end": round(b, 3)}
-                        for a, b in motion_intervals(inten, fps=fps,
-                                                     enter=z_enter, exit=z_exit,
-                                                     speech_intervals=seg_speech)]
+            if motion_zoom:
+                inten, fps = clip_intensity(video, seg["start"], seg["end"])
+                episodes = [{"start": round(a, 3), "end": round(b, 3)}
+                            for a, b in motion_intervals(inten, fps=fps,
+                                                         enter=cz_enter, exit=cz_exit,
+                                                         speech_intervals=seg_speech)]
+            else:
+                episodes = []
             clip = {"start": seg["start"], "end": seg["end"],
                     "captions": captions, "zoom_episodes": episodes}
+            if role:
+                clip["role"] = role                  # informational for AE / debugging
             if overlays_by_clip and ci < len(overlays_by_clip):
                 clip["overlays"] = overlays_by_clip[ci]
             clips.append(clip)
             idxs.append(len(clips) - 1)
             ci += 1
-        manifest_sections.append({"title": sec["title"], "clip_indices": idxs})
+        # hook = minimal: no title card (the cut starts hot). Only flag when False so
+        # legacy/neutral sections keep the existing schema.
+        manifest_section = {"title": sec["title"], "clip_indices": idxs}
+        if sec.get("role") and not style_for(sec["role"], sec.get("energy", 3))["card"]:
+            manifest_section["card"] = False
+        manifest_sections.append(manifest_section)
 
     manifest = {
         "source": str(Path(video).resolve()).replace("\\", "/"),
@@ -150,6 +174,7 @@ def export_ae(
     topic: str = "",
     model: str = DEFAULT_MODEL,
     zoom_sens: float = 1.0,
+    motion_zoom: bool = True,
 ) -> Path:
     """Write run_dir/ae/manifest.json for the AE builder. Returns its path.
 
@@ -174,4 +199,5 @@ def export_ae(
         s, e = snap_to_sentences(words, seg["start"], seg["end"])
         snapped.append({**seg, "start": s, "end": e})
     sections = organize(snapped, topic, model)
-    return build_manifest(video, run_dir, words, sections, words_per_line, z_enter, z_exit)
+    return build_manifest(video, run_dir, words, sections, words_per_line, z_enter, z_exit,
+                          motion_zoom=motion_zoom)

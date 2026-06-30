@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 
 from .rank import Segment
-from .reframe import reframe_clip
+from .reframe import ENTER, EXIT, reframe_clip
 
 W, H, FPS = 1280, 720, 30
 
@@ -33,11 +33,19 @@ def render_clip(
     out_path: str | Path,
     encoder: str = "libx264",
     speech=None,
+    keep=None,
+    motion_zoom: bool = True,
+    enter: float = ENTER,
+    exit: float = EXIT,
 ) -> Path:
     """Trim [seg.start, seg.end], dynamic reframe, burn subtitles. Raises on fail.
 
     `speech` is clip-relative speaking runs; passed to the reframe so the zoom
-    holds through speech and releases at a pause.
+    holds through speech and releases at a pause. `keep`, if given, is a list of
+    clip-relative spans [(a, b)...] to retain -- the gaps between them (dead air)
+    are dropped from the trim so the clip plays tight. Callers passing `keep` must
+    feed captions/`speech` on the matching compressed timeline. `motion_zoom=False`
+    skips OpenCV motion analysis and uses a static bottom-left fit/crop.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -45,13 +53,27 @@ def render_clip(
     work = out_path.with_name(out_path.stem + "_work.mp4")
     reframed = out_path.with_name(out_path.stem + "_reframed.mp4")
 
-    # A: trim + normalize fps, keep source resolution (reframe crops from it), keep audio
+    # A: trim + normalize fps, keep source resolution (reframe crops from it), keep audio.
+    # When `keep` carves out dead air, a select+setpts pass drops the gaps in one encode;
+    # a single full-length span is a no-op so we skip the filter (byte-identical trim).
+    cut = []
+    if keep and not (len(keep) == 1 and keep[0][0] <= 1e-3 and keep[0][1] >= dur - 1e-3):
+        sel = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in keep)
+        cut = ["-vf", f"select='{sel}',setpts=N/FRAME_RATE/TB",
+               "-af", f"aselect='{sel}',asetpts=N/SR/TB"]
     _run(["ffmpeg", "-ss", str(seg["start"]), "-t", str(dur), "-i", str(video),
-          "-r", str(FPS), "-c:v", encoder, "-pix_fmt", "yuv420p",
+          *cut, "-r", str(FPS), "-c:v", encoder, "-pix_fmt", "yuv420p",
           "-c:a", "aac", "-ar", "48000", "-ac", "2", "-dn", "-y", str(work)])
 
-    # B: action-aware dynamic reframe (zoom/pan/motion-blur) -> 720p video, no audio
-    reframe_clip(work, reframed, out_w=W, out_h=H, speech=speech)
+    # B: reframe to the output canvas. Motion zoom is optional because it is a style
+    # pass and can dominate render time on long cuts.
+    if motion_zoom:
+        reframe_clip(work, reframed, out_w=W, out_h=H, speech=speech, enter=enter, exit=exit)
+    else:
+        _run(["ffmpeg", "-i", str(work), "-vf",
+              f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H}:0:ih-{H}",
+              "-an", "-r", str(FPS), "-c:v", encoder, "-pix_fmt", "yuv420p",
+              "-dn", "-y", str(reframed)])
 
     # C: burn subtitles on the reframed video, take audio from the work clip
     _run(["ffmpeg", "-i", str(reframed), "-i", str(work),

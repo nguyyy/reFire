@@ -22,6 +22,13 @@ from pathlib import Path
 
 from .emphasis import _CLEAN, _is_keyword  # reuse keyword detection
 from .score import DEFAULT_MODEL
+from .style import style_for
+
+
+def _overlay_density(clip) -> float:
+    """Role-driven overlay/SFX density for a clip (1.0 when it carries no story role)."""
+    role = clip.get("role")
+    return style_for(role, clip.get("energy", 3))["overlay_density"] if role else 1.0
 
 OVERLAY_S = 3.0                 # each impact punch-in lasts ~3s
 SECONDS_PER_OVERLAY = 30.0      # density cap: ~1 overlay per 30s of footage
@@ -195,9 +202,13 @@ def pick_overlays(words, clips, assets_dir, model=DEFAULT_MODEL):
     cand = [_clip_keyword_moment(words, c["start"], c["end"]) for c in clips]
     total_s = sum(c["end"] - c["start"] for c in clips)
     budget = max(1, int(total_s / SECONDS_PER_OVERLAY))
-    # keep only the highest-scoring clips that actually have a beat
-    ranked = sorted((i for i, m in enumerate(cand) if m),
-                    key=lambda i: clips[i].get("score", 0.0), reverse=True)
+    # Style pass: a clip's story role tilts overlay/SFX density -- a climax stacks them,
+    # a button stays out of the final laugh (density 0 opts out). Rank by score * density
+    # so the hottest, highest-energy beats win the limited overlay budget. Clips with no
+    # role (legacy/flat) get density 1.0 -> ranked by score alone, as before.
+    ranked = sorted((i for i, m in enumerate(cand) if m and _overlay_density(clips[i]) > 0),
+                    key=lambda i: clips[i].get("score", 0.0) * _overlay_density(clips[i]),
+                    reverse=True)
     chosen = sorted(ranked[:budget])
     if not chosen:
         return [[] for _ in clips]

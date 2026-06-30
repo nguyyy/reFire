@@ -466,7 +466,10 @@
         }
         var seq = [];
         for (s = 0; s < sections.length; s++) {
-            if (sections[s].title) { seq.push(buildCard(M, sections[s].title, cardTmpl, folder)); }
+            // style pass: a hook section sets card:false so the cut starts hot (no title card)
+            if (sections[s].title && sections[s].card !== false) {
+                seq.push(buildCard(M, sections[s].title, cardTmpl, folder));
+            }
             var idxs = sections[s].clip_indices || [];
             for (ci = 0; ci < idxs.length; ci++) {
                 idx = idxs[ci];
@@ -664,6 +667,7 @@
         if (o.zoom && o.zoom.length) { py += ' --zoom-sens ' + o.zoom; }
         if (o.wpl && o.wpl.length) { py += ' --words-per-line ' + o.wpl; }
         if (o.tol && o.tol.length) { py += ' --tol ' + o.tol; }
+        if (!o.motionZoom) { py += ' --no-motion-zoom'; }
 
         writeFile(batF,
             "@echo off\r\n" +
@@ -767,6 +771,8 @@
         var zoomTxt = mini("zoom", "1.0", 4);
         var wplTxt = mini("words", "3", 3);
         var tolTxt = mini("tol", "0.25", 5);
+        var motionZoomChk = advGrp.add("checkbox", undefined, "motion zoom");
+        motionZoomChk.value = true; labels.push(motionZoomChk);
 
         var btnMake = makeP.add("button", undefined, "Make");
         var note = makeP.add("statictext", undefined,
@@ -812,7 +818,8 @@
         function gather() {
             return { out: outFolder, vod: vodTxt.text, brief: briefTxt.text,
                      duration: durTxt.text, game: gameTxt.text, model: modelTxt.text,
-                     zoom: zoomTxt.text, wpl: wplTxt.text, tol: tolTxt.text };
+                     zoom: zoomTxt.text, wpl: wplTxt.text, tol: tolTxt.text,
+                     motionZoom: motionZoomChk.value };
         }
         function report(pct, msg) {                 // drive bar + status, repaint live
             try {

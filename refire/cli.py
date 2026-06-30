@@ -66,12 +66,18 @@ def main(argv: list[str] | None = None) -> None:
     mk.add_argument("vod_id", help="Twitch VOD number (auto-downloaded + cached)")
     mk.add_argument("--brief", required=True, help="free text: the subject + vibe you want")
     mk.add_argument("--duration", required=True, help="target runtime: 20m / 20:00 / 1200")
-    mk.add_argument("--run-dir", default="run", help="artifact/output directory")
+    mk.add_argument("--run-dir", default=None,
+                    help="artifact/output directory (default: run/<vod_id>, isolated per VOD)")
     mk.add_argument("--model", default=DEFAULT_MODEL, help="Ollama model for scoring")
     mk.add_argument("--game", default="", help="game name; LLM-builds a glossary for "
                     "proper-noun mistranscriptions (e.g. \"Genshin Impact\")")
+    mk.add_argument("--transcriber", choices=["local", "deepgram"], default="local",
+                    help="speech-to-text backend: local faster-whisper (default, free) or "
+                         "deepgram (cloud; needs DEEPGRAM_API_KEY in .env)")
     mk.add_argument("--zoom-sens", type=float, default=1.0,
                     help="zoom amount: >1 more/earlier punches, <1 fewer (default 1.0)")
+    mk.add_argument("--no-motion-zoom", action="store_true",
+                    help="skip OpenCV motion scanning and render/static-fit clips without punch zooms")
     mk.add_argument("--words-per-line", type=int, default=3, help="caption grouping")
     mk.add_argument("--tol", type=float, default=0.25, help="duration tolerance band (0-1)")
     mk.add_argument("--cache-dir", default="vods", help="VOD download cache directory")
@@ -85,9 +91,15 @@ def main(argv: list[str] | None = None) -> None:
                     help="skip the Claude director; use flat brief-relevance selection")
     mk.add_argument("--local-director", action="store_true",
                     help="run the narrative director on local Ollama (--model), no API spend")
+    mk.add_argument("--review-rounds", type=int, default=2,
+                    help="max editor-review revision rounds the Claude critic may make "
+                         "(0 = single-pass; each round adds one Claude call)")
     mk.add_argument("--render", action="store_true",
                     help="also ffmpeg-render a no-AE rough cut to run/rough.mp4 for eyeballing")
     mk.add_argument("--encoder", default="libx264", help="ffmpeg encoder (e.g. h264_nvenc) for --render")
+    mk.add_argument("--silence-pad", type=float, default=0.3,
+                    help="breath (s) left between phrases in the --render rough cut; "
+                         "smaller = tighter (default 0.3)")
     mk.add_argument("--progress-file", default=None,
                     help="write {pct,msg,done} JSON here for a GUI progress bar")
 
@@ -113,6 +125,8 @@ def main(argv: list[str] | None = None) -> None:
     e.add_argument("--encoder", default="libx264", help="e.g. h264_nvenc for GPU")
     e.add_argument("--topic", default="", help="stream subject; groups/orders clips for flow")
     e.add_argument("--model", default=DEFAULT_MODEL, help="Ollama model for --topic grouping")
+    e.add_argument("--no-motion-zoom", action="store_true",
+                   help="render/static-fit clips without the OpenCV punch-zoom pass")
 
     a = sub.add_parser("ae", help="export an After Effects build manifest (for reFire.jsx)")
     a.add_argument("video", help="path to the stream video file")
@@ -125,14 +139,19 @@ def main(argv: list[str] | None = None) -> None:
     a.add_argument("--model", default=DEFAULT_MODEL, help="Ollama model for --topic grouping")
     a.add_argument("--zoom-sens", type=float, default=1.0,
                    help="zoom amount: >1 more/earlier punches, <1 fewer (default 1.0)")
+    a.add_argument("--no-motion-zoom", action="store_true",
+                   help="skip OpenCV motion scanning and write static-fit AE clips")
 
     args = p.parse_args(argv)
 
     if args.cmd == "make":
         file_w = _progress_writer(args.progress_file) if args.progress_file else None
-        last = {"pct": -1}
+        last = {"pct": -1, "frac": 0.0}
 
         def prog(frac, msg, done=False):
+            if not done:
+                frac = max(frac, last["frac"])     # monotonic: never show a backwards %
+            last["frac"] = frac
             pct = max(0, min(100, int(frac * 100)))
             if pct != last["pct"] or done:         # throttle to integer-pct changes
                 last["pct"] = pct
@@ -148,7 +167,11 @@ def main(argv: list[str] | None = None) -> None:
                        assets_dir=args.assets_dir, bgm=args.bgm,
                        title=args.title, claude_model=args.claude_model,
                        flat=args.flat, local_director=args.local_director,
-                       render=args.render, encoder=args.encoder, progress=prog)
+                       review_rounds=args.review_rounds,
+                       render=args.render, encoder=args.encoder,
+                       silence_pad=args.silence_pad,
+                       motion_zoom=not args.no_motion_zoom,
+                       transcriber=args.transcriber, progress=prog)
         except BaseException as e:                 # show the failure in the terminal
             prog(1.0, "error: " + str(e), done=True)
             raise
@@ -167,7 +190,8 @@ def main(argv: list[str] | None = None) -> None:
         out = export_ae(args.video, run_dir=args.run_dir, count=args.count,
                         min_score=args.min_score, order=args.order,
                         words_per_line=args.words_per_line, topic=args.topic,
-                        model=args.model, zoom_sens=args.zoom_sens)
+                        model=args.model, zoom_sens=args.zoom_sens,
+                        motion_zoom=not args.no_motion_zoom)
         jsx = Path(__file__).with_name("ae") / "reFire.jsx"
         print(f"Manifest: {out}")
         print("In After Effects: File > Scripts > Run Script File... ->")
@@ -179,7 +203,7 @@ def main(argv: list[str] | None = None) -> None:
         out = edit(args.video, run_dir=args.run_dir, music=args.music,
                    count=args.count, min_score=args.min_score,
                    order=args.order, encoder=args.encoder, topic=args.topic,
-                   model=args.model)
+                   model=args.model, motion_zoom=not args.no_motion_zoom)
     print(out)
 
 

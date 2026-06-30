@@ -174,11 +174,14 @@ def zoom_track(
     return z
 
 
-def reframe_clip(src, dst, out_w=1280, out_h=720, speech=None):
+def reframe_clip(src, dst, out_w=1280, out_h=720, speech=None,
+                 enter=ENTER, exit=EXIT):
     """Read src video, write a bottom-left punch-zoomed video to dst (no audio).
 
     `speech` is clip-relative [(start, end)] speaking runs; when given, the zoom
-    holds through them and only releases at a pause.
+    holds through them and only releases at a pause. `enter`/`exit` are the motion
+    hysteresis thresholds -- the style pass lowers them on punchy roles (hook/climax)
+    so those clips zoom more readily.
     """
     import cv2  # heavy/optional dep, import lazily
 
@@ -196,7 +199,7 @@ def reframe_clip(src, dst, out_w=1280, out_h=720, speech=None):
         prev = small
     cap.release()
 
-    zoom = zoom_track(inten, fps=fps, speech_intervals=speech)
+    zoom = zoom_track(inten, fps=fps, speech_intervals=speech, enter=enter, exit=exit)
 
     vw = cv2.VideoWriter(str(dst), cv2.VideoWriter_fourcc(*"mp4v"), fps, (out_w, out_h))
     cap = cv2.VideoCapture(str(src))
