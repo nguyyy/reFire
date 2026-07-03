@@ -124,6 +124,7 @@ def make(
     bgm: str | Path | None = None,
     title: str = "",
     claude_model: str = "claude-opus-4-8",
+    director_backend: str = "cli",   # "cli" = claude -p on the subscription; "api" = SDK key
     flat: bool = False,
     local_director: bool = False,
     review_rounds: int = 2,
@@ -195,7 +196,8 @@ def make(
             ol = (director.outline_local(smap, brief, title, duration_s, model=model)
                   if local_director
                   else director.outline(smap, brief, title, duration_s,
-                                        model=claude_model, trace=trace))
+                                        model=claude_model, trace=trace,
+                                        backend=director_backend))
             # Editor-review loop: cast the outline, let a Claude critic read the REALIZED
             # cut and either approve or return a revised outline, re-cast, repeat. This is
             # what turns a relevant-but-reel cut into a story (see okay-refer-to-memories).
@@ -214,7 +216,8 @@ def make(
                     break
                 try:
                     rv = director.review(smap, brief, title, outline_log, duration_s,
-                                         model=claude_model, trace=trace)
+                                         model=claude_model, trace=trace,
+                                         backend=director_backend)
                 except Exception as re:   # a review failure must NOT discard a good cast
                     print(f"[review] round {rnd + 1} unavailable ({re}); keeping current cut")
                     break

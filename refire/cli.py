@@ -88,6 +88,9 @@ def main(argv: list[str] | None = None) -> None:
     mk.add_argument("--claude-model", default="claude-opus-4-8",
                     help="Claude model for the narrative director pass "
                          "(claude-sonnet-4-6 = cheaper fallback)")
+    mk.add_argument("--director-backend", choices=["cli", "api"], default="cli",
+                    help="cli = Claude Code headless on your subscription (~$0, default; "
+                         "auto-falls back to api); api = ANTHROPIC_API_KEY pay-as-you-go")
     mk.add_argument("--flat", action="store_true",
                     help="skip the Claude director; use flat brief-relevance selection")
     mk.add_argument("--local-director", action="store_true",
@@ -167,6 +170,7 @@ def main(argv: list[str] | None = None) -> None:
                        tol=args.tol, cache_dir=args.cache_dir,
                        assets_dir=args.assets_dir, bgm=args.bgm,
                        title=args.title, claude_model=args.claude_model,
+                       director_backend=args.director_backend,
                        flat=args.flat, local_director=args.local_director,
                        review_rounds=args.review_rounds,
                        render=args.render, encoder=args.encoder,

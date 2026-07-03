@@ -359,6 +359,95 @@ def _complete(client, model, system, user_content, model_cls, tag="claude", trac
     return model_cls.model_validate(json.loads(_extract_json(text)))
 
 
+def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=None):
+    """Same contract as `_complete`, but through Claude Code headless mode (`claude -p`)
+    instead of the SDK -- the call bills the user's Claude SUBSCRIPTION, not the pay-as-you-
+    go API key (~$1.2/video on Opus otherwise). Raises RuntimeError when the CLI is missing
+    or fails, so the caller falls through to the API path.
+
+    Wire notes (verified live): user text goes via stdin (the ~180KB stream map blows past
+    Windows' arg limit), `--tools "" --setting-sources ""` make it a pure completion (no
+    tools, and no user-level hooks injecting their context into every call), cwd is a temp
+    dir so Claude Code doesn't walk up into a repo and load its CLAUDE.md persona, and
+    ANTHROPIC_API_KEY is stripped from the env or the CLI would bill the key -- defeating
+    the point. stream-json deltas mirror the SDK's, so the live console view is identical.
+    ponytail: subscription 5h-window rate limits are the ceiling (3 Opus calls x ~45k tok
+    per video); --review-rounds 1 or --director-backend api are the pressure valves.
+    """
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+    import time
+
+    exe = shutil.which("claude")
+    if not exe:
+        raise RuntimeError("claude CLI not on PATH")
+    user_text = "\n\n".join(b.get("text", "") for b in user_content)
+    stamp = time.strftime("%H%M%S")
+    print(f"[{tag}] -> {model} via claude CLI (subscription): system {len(system):,} chars, "
+          f"user {len(user_text):,} chars (~{len(user_text) // 4000}k tok)")
+    if trace:
+        _trace_write(trace, f"{stamp}-{tag}-request.txt",
+                     f"MODEL: {model} (claude CLI)\n\n=== SYSTEM ===\n{system}\n\n"
+                     f"=== USER ===\n{user_text}")
+        print(f"[{tag}] full prompt -> {trace}\\{stamp}-{tag}-request.txt")
+
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    cmd = [exe, "-p", "--model", model, "--tools", "", "--setting-sources", "",
+           "--system-prompt", system, "--output-format", "stream-json",
+           "--include-partial-messages", "--verbose"]
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,   # non-JSON stderr lines are skipped by the parser
+        text=True, encoding="utf-8", errors="replace",
+        env=env, cwd=tempfile.gettempdir())
+    proc.stdin.write(user_text)
+    proc.stdin.close()
+
+    phase = ""
+    thought: list[str] = []
+    text, stop, is_err = "", None, False
+    for line in proc.stdout:
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if ev.get("type") == "stream_event":
+            d = (ev.get("event") or {}).get("delta") or {}
+            kind = d.get("type", "")
+            if kind == "thinking_delta" and d.get("thinking"):
+                chunk = d["thinking"]
+                thought.append(chunk)
+            elif kind == "text_delta" and d.get("text"):
+                chunk = d["text"]
+            else:
+                continue
+            label = "thinking" if kind == "thinking_delta" else "writing"
+            if phase != label:
+                print(f"\n[{tag}] --- {label} ---")
+                phase = label
+            print(chunk, end="", flush=True)
+        elif ev.get("type") == "result":
+            text = ev.get("result") or ""
+            stop = ev.get("stop_reason") or ev.get("subtype")
+            is_err = bool(ev.get("is_error"))
+    proc.wait()
+    if phase:
+        print(flush=True)
+    print(f"[{tag}] <- stop_reason={stop}, {len(text):,} chars")
+    if trace:
+        _trace_write(trace, f"{stamp}-{tag}-response.txt",
+                     f"STOP_REASON: {stop}\n\n=== THINKING (summarized) ===\n"
+                     f"{''.join(thought)}\n\n=== ANSWER ===\n{text}")
+    if proc.returncode != 0 or is_err:
+        raise RuntimeError(f"claude CLI failed (exit {proc.returncode}, "
+                           f"stop_reason={stop}): {text[:200]}")
+    if not text.strip():
+        raise RuntimeError(f"claude CLI gave no answer text (stop_reason={stop})")
+    return model_cls.model_validate(json.loads(_extract_json(text)))
+
+
 def _header(brief: str, title: str, target_s: float) -> str:
     return (
         f"STREAM TITLE: {title or '(none given)'}\n"
@@ -368,17 +457,17 @@ def _header(brief: str, title: str, target_s: float) -> str:
 
 
 def outline(stream_map_text: str, brief: str, title: str, target_s: float,
-            model: str = CLAUDE_MODEL, examples=None, trace=None) -> Outline:
+            model: str = CLAUDE_MODEL, examples=None, trace=None,
+            backend: str = "cli") -> Outline:
     """One Claude call: stream map + brief -> story outline (central idea + beats).
 
     `examples` is the deferred reference-video few-shot hook (prior edits' beat
-    breakdowns); unused in v1. Raises on missing key / API error so the caller falls
-    back to the flat pipeline. The map block is cache-marked so the retry-without-thinking
-    guard (same prefix) reads it warm instead of re-paying the whole map.
+    breakdowns); unused in v1. `backend="cli"` (default) runs on the Claude Code CLI
+    (subscription, ~$0) and falls through to the API key if the CLI is missing or fails;
+    `"api"` goes straight to the SDK. Raises on no-backend-available / API error so the
+    caller falls back to the flat pipeline. The map block is cache-marked so the API
+    path's retry-without-thinking guard (same prefix) reads it warm.
     """
-    import anthropic  # optional heavy dep; missing key raises -> caller falls back
-
-    client = anthropic.Anthropic()             # reads ANTHROPIC_API_KEY
     system = _SYSTEM.format(n=_n_beats(target_s)) + _OUTLINE_INSTR
     user_content = [{
         "type": "text",
@@ -386,24 +475,32 @@ def outline(stream_map_text: str, brief: str, title: str, target_s: float,
                  + f"STREAM MAP (timestamp -> what was said):\n{stream_map_text}"),
         "cache_control": {"type": "ephemeral"},
     }]
+    if backend == "cli":
+        try:
+            return _complete_cli(model, system, user_content, Outline,
+                                 tag="director", trace=trace)
+        except (RuntimeError, OSError) as e:
+            print(f"[director] claude CLI unavailable ({e}); using API key")
+    import anthropic  # optional heavy dep; missing key raises -> caller falls back
+
+    client = anthropic.Anthropic()             # reads ANTHROPIC_API_KEY
     return _complete(client, model, system, user_content, Outline,
                      tag="director", trace=trace)
 
 
 def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
-           target_s: float, model: str = CLAUDE_MODEL, trace=None) -> Review:
+           target_s: float, model: str = CLAUDE_MODEL, trace=None,
+           backend: str = "cli") -> Review:
     """Critic pass: read the realized rough cut + stream map, approve or return a revised
-    Outline. One Claude call. Raises on missing key / API error so the caller keeps the
+    Outline. One Claude call; same `backend` semantics as `outline()` (CLI-first, API
+    fallthrough). Raises on no-backend-available / API error so the caller keeps the
     current cut. The closed-loop signal is `_realized_script` -- the critic judges what the
     video ACTUALLY says, in order, not the original plan.
 
     The stream map comes FIRST (cache-marked, stable across rounds); the realized cut --
-    the part that changes every round -- comes after, so review round 2 reads round 1's
-    cached map at ~0.1x input price instead of re-paying a multi-hour stream each round.
+    the part that changes every round -- comes after, so an API-path review round 2 reads
+    round 1's cached map at ~0.1x input price instead of re-paying a multi-hour stream.
     """
-    import anthropic  # optional heavy dep; missing key raises -> caller keeps current cut
-
-    client = anthropic.Anthropic()
     system = _REVIEW_SYSTEM.format(n=_n_beats(target_s)) + _REVIEW_INSTR
     user_content = [
         {
@@ -419,6 +516,15 @@ def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
                      f"{_realized_script(outline_log)}"),
         },
     ]
+    if backend == "cli":
+        try:
+            return _complete_cli(model, system, user_content, Review,
+                                 tag="review", trace=trace)
+        except (RuntimeError, OSError) as e:
+            print(f"[review] claude CLI unavailable ({e}); using API key")
+    import anthropic  # optional heavy dep; missing key raises -> caller keeps current cut
+
+    client = anthropic.Anthropic()
     return _complete(client, model, system, user_content, Review,
                      tag="review", trace=trace)
 

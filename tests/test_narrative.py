@@ -156,9 +156,14 @@ def _fake_anthropic(monkeypatch, responses, output_format=None):
     endpoint 400s on the editorial schema's depth) over a streamed call (large max_tokens
     needs streaming), so a None response = an empty text block (thinking ate the budget),
     and a model = its `model_dump_json()`.
+
+    Also hides the `claude` binary so the default `backend="cli"` takes its real
+    CLI-missing fallthrough to this API stub instead of shelling out for real.
     """
     anthropic = pytest.importorskip("anthropic")
     from refire import director  # noqa: F401
+
+    monkeypatch.setattr("shutil.which", lambda name: None)
 
     calls = []
     seq = iter(responses)
@@ -233,6 +238,64 @@ def test_director_raises_when_no_outline(monkeypatch):
     _fake_anthropic(monkeypatch, [(None, "max_tokens"), (None, "max_tokens")])
     with pytest.raises(RuntimeError, match="max_tokens"):
         director.outline("[00:00] hi", "brief", "title", 600.0)
+
+
+def test_complete_cli_parses_stream_json(monkeypatch):
+    """The claude-CLI backend drives `claude -p`, streams deltas, parses the final
+    `result` event's JSON (tolerating fences + interleaved non-JSON stderr lines),
+    and never leaks ANTHROPIC_API_KEY into the subprocess env."""
+    import io
+    import json as _json
+
+    from refire import director
+    want = director.Outline(central_idea="x", beats=[
+        director.Beat(title="A", intent="i", query="q", start_s=1.0, end_s=2.0)])
+    lines = [
+        _json.dumps({"type": "stream_event", "event": {
+            "type": "content_block_delta",
+            "delta": {"type": "thinking_delta", "thinking": "hm"}}}),
+        _json.dumps({"type": "stream_event", "event": {
+            "type": "content_block_delta",
+            "delta": {"type": "text_delta", "text": "{"}}}),
+        "claude: some stderr noise",   # stderr merges into stdout; parser must skip it
+        _json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                     "stop_reason": "end_turn",
+                     "result": "```json\n" + want.model_dump_json() + "\n```"}),
+    ]
+    seen = {}
+
+    class _FakeProc:
+        def __init__(self):
+            self.stdin = io.StringIO()
+            self.stdout = iter(ln + "\n" for ln in lines)
+            self.returncode = 0
+
+        def wait(self):
+            return self.returncode
+
+    def fake_popen(cmd, **kw):
+        seen["cmd"], seen["env"] = cmd, kw.get("env")
+        return _FakeProc()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr("shutil.which", lambda name: "claude")
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    got = director.outline("[0s] hi", "brief", "title", 600.0, backend="cli")
+    assert got.beats[0].title == "A"
+    assert "-p" in seen["cmd"] and "--system-prompt" in seen["cmd"]
+    assert "--tools" in seen["cmd"] and "--setting-sources" in seen["cmd"]
+    assert "ANTHROPIC_API_KEY" not in seen["env"]   # bill the subscription, not the key
+
+
+def test_cli_backend_falls_through_to_api_when_missing(monkeypatch, capsys):
+    """No `claude` on PATH -> the default cli backend quietly uses the API path."""
+    from refire import director
+    want = director.Outline(central_idea="x", beats=[
+        director.Beat(title="A", intent="i", query="q", start_s=1.0, end_s=2.0)])
+    calls = _fake_anthropic(monkeypatch, [(want, "end_turn")])   # also hides the CLI
+    got = director.outline("[0s] hi", "brief", "title", 600.0)   # default backend="cli"
+    assert got.beats[0].title == "A" and len(calls) == 1
+    assert "claude CLI unavailable" in capsys.readouterr().out
 
 
 def test_cast_reports_progress_per_beat(stubbed):
