@@ -6,18 +6,42 @@ setup", "first crack", "the kill", "the reaction"). `narrative.cast` then fills 
 beat with the single best real clip. This is the comprehension step that the local
 embed/score pipeline can't do: it judges the stream as a story, not clips in isolation.
 
-Runs on Claude Sonnet via ANTHROPIC_API_KEY; raises if the key/SDK is missing so the
+Runs on Claude via ANTHROPIC_API_KEY; raises if the key/SDK is missing so the
 caller (`pipeline.make`) can fall back to the flat retrieval path. Embeddings and
 per-clip scoring stay local -- only this whole-stream reasoning call goes to the cloud.
 """
 from __future__ import annotations
 
-from pydantic import BaseModel
+import json
 
-CLAUDE_MODEL = "claude-sonnet-4-6"
+from pydantic import BaseModel, model_validator
+
+CLAUDE_MODEL = "claude-opus-4-8"
+MAX_TOKENS = 32000   # adaptive thinking + the largest outline JSON both fit comfortably
 
 
-class Beat(BaseModel):
+class _JsonModel(BaseModel):
+    """Base for the director's JSON payloads. In JSON mode Claude/Ollama emit `null` for
+    optional fields; drop them so pydantic applies our defaults instead of rejecting None on
+    a str-typed field (the strict output_format endpoint used to coerce these for us)."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_nulls(cls, data):
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items() if v is not None}
+        return data
+
+
+class Segment(_JsonModel):
+    """One kept sub-span of a beat: an exact line (or run of lines) the final cut contains.
+    Multiple segments per beat = jump cuts within the moment -- the human-editor move that
+    drops rambling between the lines that matter."""
+    start_s: float
+    end_s: float
+
+
+class Beat(_JsonModel):
     """A story slot, tagged like an editor's notebook entry (not "an interesting clip").
 
     Everything past `title`/`start_s`/`end_s` is defaulted so older outlines and the test
@@ -37,10 +61,11 @@ class Beat(BaseModel):
     reaction_end_s: float | None = None  # tail after the payoff, so the cut doesn't feel abrupt
     start_s: float                  # clip in-point (seconds) -- where this beat's moment begins
     end_s: float                    # clip out-point (seconds) -- right after its payoff lands
+    segments: list[Segment] = []    # the EDIT: exact kept lines within the beat (jump cuts)
     query: str = ""                 # fallback retrieval text if start_s/end_s come out unusable
 
 
-class Outline(BaseModel):
+class Outline(_JsonModel):
     central_idea: str
     story_shape: str = ""           # the ONE shape this VOD supports (e.g. "confidence -> chaos")
     viewer_promise: str = ""        # what the viewer is promised they're watching
@@ -48,16 +73,41 @@ class Outline(BaseModel):
     beats: list[Beat]
 
 
-class Review(BaseModel):
+class Review(_JsonModel):
     approved: bool   # true = the rough cut already tells a cohesive story, ship it
     notes: str       # what's wrong (or why it's approved) -- logged to outline.json
     outline: Outline # the revised plan (full re-plan: reorder/drop/merge/add/rebound)
 
 
+# The editorial Outline/Review schema is too deep for Claude's strict `output_format`
+# structured-output endpoint (it 400s "Schema is too complex"), so we prompt for JSON and
+# validate it ourselves -- same approach the local Ollama director already uses. One shared
+# shape string keeps the Claude + local directors in lockstep.
+_OUTLINE_JSON = (
+    '{"central_idea": "<str>", "story_shape": "<str>", "viewer_promise": "<str>", '
+    '"ending_needed": "<str>", "beats": [{"title": "<str>", "role": '
+    '"<hook|setup|escalation|reversal|climax|payoff|button>", "intent": "<str>", '
+    '"viewer_question": "<str>", "turn": "<str>", "transition_in": "<str>", '
+    '"texture": "<str>", "energy": <1-5>, "setup_start_s": <number|null>, '
+    '"payoff_start_s": <number|null>, "reaction_end_s": <number|null>, '
+    '"start_s": <number>, "end_s": <number>, '
+    '"segments": [{"start_s": <number>, "end_s": <number>}, ...], '
+    '"query": "<str>"}]}'
+)
+_OUTLINE_INSTR = (
+    " Reply ONLY with a single JSON object (no markdown, no prose) of this shape: "
+    + _OUTLINE_JSON)
+_REVIEW_INSTR = (
+    ' Reply ONLY with a single JSON object (no markdown, no prose) of this shape: '
+    '{"approved": <true|false>, "notes": "<str>", "outline": ' + _OUTLINE_JSON + "}")
+
+
 _SYSTEM = (
     "You are a video editor cutting a Twitch gaming stream into one focused, cohesive "
     "short. You are given the stream's title, the editor's brief (the subject and vibe "
-    "to capture), and a time-stamped map of everything said. Do NOT list interesting "
+    "to capture), and a time-stamped map of everything said. Each map line begins with "
+    "its start time IN SECONDS, like `[546s]` (that is 546 seconds, i.e. 9m06s, into the "
+    "stream). Streams run for hours, so these values get large. Do NOT list interesting "
     "moments -- find the STORY this VOD can actually support.\n"
     "First decide three things about the whole cut:\n"
     "- story_shape: the single shape this footage supports, e.g. 'confidence collapses "
@@ -79,9 +129,17 @@ _SYSTEM = (
     "- transition_in: why this beat follows the previous one (the connective tissue).\n"
     "- texture: funny, tense, awkward, triumphant, chaotic, or sincere.\n"
     "- energy: 1-5 pacing value; vary it across beats so the cut isn't monotone.\n"
-    "- start_s and end_s: the exact in/out timestamps (seconds, from the stream map). "
-    "Set start_s where the moment begins and end_s RIGHT AFTER its payoff or punchline "
-    "lands, on a natural pause. Keep clips tight -- trim dead air.\n"
+    "- start_s and end_s: the exact in/out timestamps IN SECONDS, copied from the `[Ns]` "
+    "labels in the stream map (e.g. a moment on the `[546s]` line has start_s near 546, "
+    "NOT 9.06). Set start_s where the moment begins and end_s RIGHT AFTER its payoff or "
+    "punchline lands, on a natural pause.\n"
+    "- segments: the EDIT. A beat is edited footage, not a raw span: within start_s..end_s, "
+    "list ONLY the lines the final video should contain, as tight sub-spans copied from the "
+    "map's `[Ns]` labels. Jump-cut the rambling, tangents, and off-topic filler between "
+    "them -- jump cuts within a moment are natural and expected. Each segment should be at "
+    "least ~3 seconds; a beat's kept footage should usually total 15-60 seconds and NEVER "
+    "exceed ~90 -- if the moment sprawls, keep only its best lines as separate segments. "
+    "A single segment equal to the whole span means 'keep everything'.\n"
     "- setup_start_s: if the context the joke needs starts earlier than start_s, put it "
     "here (else omit).\n"
     "- payoff_start_s: where the joke/reveal/win/fail actually lands. NEVER cut before "
@@ -91,10 +149,17 @@ _SYSTEM = (
     "- query: a few words to find the footage as a fallback if the timestamps fail.\n"
     "Shape the beats into an ARC -- open on a hook, set up, escalate, hit a climax, and "
     "land the ending_needed as a closing button -- NOT a flat list of equally-strong "
-    "moments (that is a highlight reel, not a story). Make each beat follow from the one "
+    "moments (that is a highlight reel, not a story). Give the ENDING as much deliberate "
+    "construction as the hook: the closing button must BREATHE, not stop dead on the "
+    "payoff. Set its end_s AFTER the reaction/aftermath (the laugh, the sigh, the 'what "
+    "just happened' beat), and always give the final beat a reaction_end_s so the cut "
+    "winds down instead of cutting off mid-breath. A strong open and a soft, abrupt close "
+    "wastes the whole story. Make each beat follow from the one "
     "before via its transition_in, and never repeat the same kind of moment twice. "
     "Only include beats the footage can actually support. "
-    "Aim for about {n} beats so the cut lands near the target runtime."
+    "Aim for about {n} beats whose in/out spans TOTAL roughly the target runtime -- keep "
+    "each beat tight so the whole cut lands near target without a later pass having to drop "
+    "story beats to fit."
 )
 
 
@@ -113,9 +178,17 @@ _REVIEW_SYSTEM = (
     "answer, twist, or escalate that expectation, or does it ignore it (a jarring jump)?\n"
     "- CONNECTIVE TISSUE: does each beat follow from the one before (transition_in)?\n"
     "- REDUNDANCY: do two beats make the same point or land the same kind of joke? Cut one.\n"
+    "- DEAD WEIGHT: read each beat's realized transcript. If it contains rambling, "
+    "tangents, or off-topic filler (a low score/reason often says so), re-cut the beat "
+    "with `segments` keeping ONLY the lines that serve its intent -- jump cuts within a "
+    "moment are natural. Flag any beat whose kept footage exceeds ~90 seconds.\n"
     "- PAYOFF COMPLETION: does any clip end BEFORE its payoff or reaction lands "
     "(cut off mid-joke)? Extend its end / payoff_start_s / reaction_end_s if so.\n"
-    "- ENDING: does the central idea land by the end on a strong closing button?\n"
+    "- ENDING: give the last beats the SAME scrutiny as the hook. Does the central idea "
+    "land on a strong closing button, and does that button BREATHE -- holding on the "
+    "reaction/aftermath -- rather than cutting off the instant the payoff lands (an abrupt "
+    "ending)? If it stops dead, extend the final beat's end_s / reaction_end_s or add a "
+    "short wind-down button beat.\n"
     "- PACING: does the energy vary, or is every beat the same intensity (monotony)?\n"
     "If the cut already tells a cohesive story, set approved=true and briefly say why in "
     "notes. Otherwise set approved=false, name the main problems in notes, and return a "
@@ -127,12 +200,14 @@ _REVIEW_SYSTEM = (
 
 
 def stream_map(words: list[dict]) -> str:
-    """Render the transcript as a compact `[mm:ss] sentence` map for the director.
+    """Render the transcript as a compact `[<seconds>s] sentence` map for the director.
 
     Sentence-level (break on .?!) so the director can choose precise in/out timestamps;
-    each line's timestamp is that sentence's first word. ponytail: the whole-stream map
-    fits Sonnet's context for normal VODs; for multi-hour streams this can blow the token
-    budget -- window the stream or fall back to a chunk-level map if it ever truncates.
+    each line's timestamp is that sentence's first word, in SECONDS. Seconds (not mm:ss) so
+    the director copies them straight into start_s/end_s -- a `[09:06]` colon form gets
+    misread as 9.06s and collapses a multi-hour stream's cut into its first minute.
+    ponytail: the whole-stream map fits Sonnet's context for normal VODs; for multi-hour
+    streams this can blow the token budget -- window the stream if it ever truncates.
     """
     lines: list[str] = []
     cur: list[str] = []
@@ -142,10 +217,10 @@ def stream_map(words: list[dict]) -> str:
             sent_start = int(w["start"])
         cur.append(w["text"])
         if w["text"][-1:] in ".?!":
-            lines.append(f"[{sent_start // 60:02d}:{sent_start % 60:02d}] {' '.join(cur)}")
+            lines.append(f"[{sent_start}s] {' '.join(cur)}")
             cur = []
     if cur:   # trailing words with no terminal punctuation
-        lines.append(f"[{sent_start // 60:02d}:{sent_start % 60:02d}] {' '.join(cur)}")
+        lines.append(f"[{sent_start}s] {' '.join(cur)}")
     return "\n".join(lines)
 
 
@@ -166,7 +241,10 @@ def _realized_script(outline_log: dict) -> str:
     lines.append("")
     for i, b in enumerate(outline_log.get("beats", []), 1):
         a, z = b.get("start"), b.get("end")
-        ts = (f"[{int(a) // 60:02d}:{int(a) % 60:02d}-{int(z) // 60:02d}:{int(z) % 60:02d}]"
+        segs = b.get("segments") or []
+        cut = (f", {len(segs)} cuts, {int(b.get('dur') or 0)}s kept" if len(segs) > 1 else "")
+        ts = (f"[{int(a) // 60:02d}:{int(a) % 60:02d}-"
+              f"{int(z) // 60:02d}:{int(z) % 60:02d}{cut}]"
               if a is not None and z is not None else "[--]")
         role = b.get("role") or "?"
         lines.append(f"{i}. {b.get('title', '')} [{role}] "
@@ -178,6 +256,14 @@ def _realized_script(outline_log: dict) -> str:
             lines.append(f"   leaves viewer wondering: {b['viewer_question']}")
         lines.append(f"   {ts} {str(b.get('text', '')).strip()}")
         lines.append("")
+    dropped = outline_log.get("dropped") or []
+    if dropped:
+        # tell the critic WHY beats vanished, or it re-adds them at full length every
+        # round and the budget trimmer deletes them again (an invisible tug-of-war).
+        lines.append("NOTE: these beats were dropped to fit the runtime budget: "
+                     + ", ".join(str(d.get("title", "?")) for d in dropped)
+                     + ". Tighten other beats with segments instead of re-adding these "
+                       "at full length.")
     return "\n".join(lines).strip()
 
 
@@ -185,108 +271,156 @@ def _n_beats(target_s: float) -> int:
     return max(2, round(target_s / 45.0))   # ~45s of finished footage per beat
 
 
-THINK_BUDGET = 10000   # explicit thinking cap so the JSON answer always has room after it
+def _extract_json(txt: str) -> str:
+    """Slice the JSON object out of a model reply (tolerates prose / ``` fences)."""
+    a, b = txt.find("{"), txt.rfind("}")
+    if a == -1 or b <= a:
+        raise ValueError(f"no JSON object in reply: {txt[:200]!r}")
+    return txt[a:b + 1]
 
 
-def _out_room(target_s: float) -> int:
-    """Tokens reserved for the outline JSON itself (~N beats of structured output)."""
-    return max(4000, _n_beats(target_s) * 300)
+def _trace_write(trace, name: str, text: str) -> None:
+    """Full-fidelity request/response dumps -- the console shows the live stream, these
+    files hold EVERYTHING (the whole stream map is too big to scroll a terminal)."""
+    from pathlib import Path
+    d = Path(trace)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text(text, encoding="utf-8")
 
 
-def _max_tokens(target_s: float) -> int:
-    """Total output budget = thinking budget + reserved room for the answer.
+def _complete(client, model, system, user_content, model_cls, tag="claude", trace=None):
+    """One JSON-mode Claude call (streamed live to the console) with a retry guard.
 
-    The first failure was adaptive thinking consuming the whole budget so no answer text
-    block was emitted (parsed_output None -> silent flat fallback). Capping thinking
-    explicitly and adding `_out_room` on top guarantees the JSON always fits. 24000 stays
-    under Sonnet 4.x's output ceiling (no beta header needed).
+    Shared by the director and the review pass. The system prompt already asks for a single
+    JSON object (the strict structured-output endpoint 400s on this schema's depth -- even
+    more so now that beats carry `segments`), so we take the text block and validate it into
+    `model_cls`. Adaptive thinking self-budgets; `MAX_TOKENS` leaves the answer plenty of
+    room. Streaming because the SDK refuses non-streaming calls with max_tokens this large
+    -- and it lets the terminal watch the model think and write the outline in real time
+    (`display: "summarized"`; the raw chain of thought is never returned). `trace` = a dir
+    that receives the full request/response text per call. If thinking somehow ate the
+    whole budget so no text block was emitted, retry once with thinking off; still empty ->
+    raise so the caller falls back instead of silently degrading.
     """
-    return min(24000, THINK_BUDGET + _out_room(target_s))
+    import time
 
+    user_text = "\n\n".join(b.get("text", "") for b in user_content)
+    stamp = time.strftime("%H%M%S")
+    print(f"[{tag}] -> {model}: system {len(system):,} chars, "
+          f"user {len(user_text):,} chars (~{len(user_text) // 4000}k tok)")
+    if trace:
+        _trace_write(trace, f"{stamp}-{tag}-request.txt",
+                     f"MODEL: {model}\n\n=== SYSTEM ===\n{system}\n\n"
+                     f"=== USER ===\n{user_text}")
+        print(f"[{tag}] full prompt -> {trace}\\{stamp}-{tag}-request.txt")
 
-def _complete(client, model, system, user, output_format, target_s, out_extra=0):
-    """One structured Claude call with the thinking-budget + retry-without-thinking dance.
-
-    Shared by the director and the review pass. Explicit thinking budget with answer room
-    reserved AFTER it (`out_extra` adds room for the review's notes on top of the outline);
-    if thinking ate the whole budget so no answer block was emitted (parsed_output None),
-    retry once with thinking off (the JSON always emits then); still None -> raise so the
-    caller falls back instead of silently degrading.
-    """
     def _call(thinking):
-        kw = dict(model=model, system=system,
-                  messages=[{"role": "user", "content": user}],
-                  output_format=output_format)
-        if thinking:
-            kw["thinking"] = {"type": "enabled", "budget_tokens": THINK_BUDGET}
-            kw["max_tokens"] = min(24000, _max_tokens(target_s) + out_extra)
-        else:
-            kw["max_tokens"] = _out_room(target_s) + out_extra   # no thinking -> all answer
-        return client.messages.parse(**kw)
+        kw = dict(model=model, system=system, max_tokens=MAX_TOKENS,
+                  thinking=({"type": "adaptive", "display": "summarized"} if thinking
+                            else {"type": "disabled"}),
+                  messages=[{"role": "user", "content": user_content}])
+        phase = ""
+        thought: list[str] = []
+        with client.messages.stream(**kw) as s:
+            for ev in s:
+                if getattr(ev, "type", "") != "content_block_delta":
+                    continue
+                d = ev.delta
+                kind = getattr(d, "type", "")
+                if kind == "thinking_delta" and getattr(d, "thinking", ""):
+                    chunk = d.thinking
+                    thought.append(chunk)
+                elif kind == "text_delta" and getattr(d, "text", ""):
+                    chunk = d.text
+                else:
+                    continue
+                label = "thinking" if kind == "thinking_delta" else "writing"
+                if phase != label:
+                    print(f"\n[{tag}] --- {label} ---")
+                    phase = label
+                print(chunk, end="", flush=True)
+            resp = s.get_final_message()
+        if phase:
+            print(flush=True)
+        text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+        return text, resp.stop_reason, "".join(thought)
 
-    resp = _call(thinking=True)
-    if resp.parsed_output is None:
-        resp = _call(thinking=False)
-    if resp.parsed_output is None:
-        raise RuntimeError(f"no structured output (stop_reason={resp.stop_reason})")
-    return resp.parsed_output
+    text, stop, thought = _call(thinking=True)
+    if not text.strip():
+        print(f"[{tag}] empty answer (stop_reason={stop}); retrying without thinking")
+        text, stop, thought = _call(thinking=False)
+    print(f"[{tag}] <- stop_reason={stop}, {len(text):,} chars")
+    if trace:
+        _trace_write(trace, f"{stamp}-{tag}-response.txt",
+                     f"STOP_REASON: {stop}\n\n=== THINKING (summarized) ===\n{thought}\n\n"
+                     f"=== ANSWER ===\n{text}")
+    if not text.strip():
+        raise RuntimeError(f"no answer text (stop_reason={stop})")
+    return model_cls.model_validate(json.loads(_extract_json(text)))
 
 
-def _user_prompt(stream_map_text: str, brief: str, title: str, target_s: float) -> str:
+def _header(brief: str, title: str, target_s: float) -> str:
     return (
         f"STREAM TITLE: {title or '(none given)'}\n"
         f"EDITOR'S BRIEF: {brief}\n"
         f"TARGET RUNTIME: {int(target_s)}s\n\n"
-        f"STREAM MAP (timestamp -> what was said):\n{stream_map_text}"
     )
 
 
 def outline(stream_map_text: str, brief: str, title: str, target_s: float,
-            model: str = CLAUDE_MODEL, examples=None) -> Outline:
+            model: str = CLAUDE_MODEL, examples=None, trace=None) -> Outline:
     """One Claude call: stream map + brief -> story outline (central idea + beats).
 
     `examples` is the deferred reference-video few-shot hook (prior edits' beat
     breakdowns); unused in v1. Raises on missing key / API error so the caller falls
-    back to the flat pipeline.
+    back to the flat pipeline. The map block is cache-marked so the retry-without-thinking
+    guard (same prefix) reads it warm instead of re-paying the whole map.
     """
     import anthropic  # optional heavy dep; missing key raises -> caller falls back
 
     client = anthropic.Anthropic()             # reads ANTHROPIC_API_KEY
-    # ponytail: no prompt cache -- v1 makes exactly one director call per run, so a
-    # cached prefix would only pay the write premium. Add cache_control on the stream
-    # map when the phase-2 editor pass makes a second call against the same map.
-    system = _SYSTEM.format(n=_n_beats(target_s))
-    user = _user_prompt(stream_map_text, brief, title, target_s)
-    return _complete(client, model, system, user, Outline, target_s)
+    system = _SYSTEM.format(n=_n_beats(target_s)) + _OUTLINE_INSTR
+    user_content = [{
+        "type": "text",
+        "text": (_header(brief, title, target_s)
+                 + f"STREAM MAP (timestamp -> what was said):\n{stream_map_text}"),
+        "cache_control": {"type": "ephemeral"},
+    }]
+    return _complete(client, model, system, user_content, Outline,
+                     tag="director", trace=trace)
 
 
 def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
-           target_s: float, model: str = CLAUDE_MODEL) -> Review:
+           target_s: float, model: str = CLAUDE_MODEL, trace=None) -> Review:
     """Critic pass: read the realized rough cut + stream map, approve or return a revised
     Outline. One Claude call. Raises on missing key / API error so the caller keeps the
     current cut. The closed-loop signal is `_realized_script` -- the critic judges what the
     video ACTUALLY says, in order, not the original plan.
 
-    ponytail: re-sends the stream map each round (no prompt cache yet). The director call
-    is cheap and rounds are capped, so a cached-map prefix isn't worth the risk of
-    restructuring the verified `outline()` call -- add cache_control on a shared map block
-    if multi-hour streams make the re-send bite.
+    The stream map comes FIRST (cache-marked, stable across rounds); the realized cut --
+    the part that changes every round -- comes after, so review round 2 reads round 1's
+    cached map at ~0.1x input price instead of re-paying a multi-hour stream each round.
     """
     import anthropic  # optional heavy dep; missing key raises -> caller keeps current cut
 
     client = anthropic.Anthropic()
-    system = _REVIEW_SYSTEM.format(n=_n_beats(target_s))
-    user = (
-        f"STREAM TITLE: {title or '(none given)'}\n"
-        f"EDITOR'S BRIEF: {brief}\n"
-        f"TARGET RUNTIME: {int(target_s)}s\n\n"
-        f"CURRENT ROUGH CUT (what the video says, in order):\n"
-        f"{_realized_script(outline_log)}\n\n"
-        f"FULL STREAM MAP (anchor any new or retimed beats to these timestamps):\n"
-        f"{stream_map_text}"
-    )
-    # out_extra reserves answer room for the review's notes on top of the outline JSON.
-    return _complete(client, model, system, user, Review, target_s, out_extra=1500)
+    system = _REVIEW_SYSTEM.format(n=_n_beats(target_s)) + _REVIEW_INSTR
+    user_content = [
+        {
+            "type": "text",
+            "text": (_header(brief, title, target_s)
+                     + "FULL STREAM MAP (anchor any new or retimed beats to these "
+                       f"timestamps):\n{stream_map_text}"),
+            "cache_control": {"type": "ephemeral"},
+        },
+        {
+            "type": "text",
+            "text": ("CURRENT ROUGH CUT (what the video says, in order):\n"
+                     f"{_realized_script(outline_log)}"),
+        },
+    ]
+    return _complete(client, model, system, user_content, Review,
+                     tag="review", trace=trace)
 
 
 def outline_local(stream_map_text: str, brief: str, title: str, target_s: float,
@@ -294,24 +428,14 @@ def outline_local(stream_map_text: str, brief: str, title: str, target_s: float,
     """Free local-Ollama director (no API spend). Coarser outlines than Claude; best on
     shorter streams since the whole map must fit the model's context. Same `Outline`.
     """
-    import json
-
     import ollama  # already a project dep
-    system = _SYSTEM.format(n=_n_beats(target_s)) + (
-        ' Reply ONLY with JSON of this shape: {"central_idea": "<str>", '
-        '"story_shape": "<str>", "viewer_promise": "<str>", "ending_needed": "<str>", '
-        '"beats": [{"title": "<str>", "role": "<hook|setup|escalation|reversal|climax|'
-        'payoff|button>", "intent": "<str>", "viewer_question": "<str>", "turn": "<str>", '
-        '"transition_in": "<str>", "texture": "<str>", "energy": <1-5>, '
-        '"setup_start_s": <number|null>, "payoff_start_s": <number|null>, '
-        '"reaction_end_s": <number|null>, "start_s": <number>, "end_s": <number>, '
-        '"query": "<str>"}]}.'
-    )
+    system = _SYSTEM.format(n=_n_beats(target_s)) + _OUTLINE_INSTR
+    user = (_header(brief, title, target_s)
+            + f"STREAM MAP (timestamp -> what was said):\n{stream_map_text}")
     resp = ollama.chat(
         model=model, format="json",
         messages=[{"role": "system", "content": system},
-                  {"role": "user",
-                   "content": _user_prompt(stream_map_text, brief, title, target_s)}],
+                  {"role": "user", "content": user}],
         options={"num_ctx": 8192},   # ponytail: bump for long streams if it truncates
     )
     return Outline.model_validate(json.loads(resp["message"]["content"]))

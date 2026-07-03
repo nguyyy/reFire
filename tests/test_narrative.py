@@ -55,12 +55,14 @@ def test_under_budget_warns_never_pads(stubbed):
 
 
 def test_over_budget_trims_lowest_score(stubbed):
-    # 180s of material, target 100s -> trim lowest-scored beats under budget
+    # 180s of material, target 100s (ceiling 125 at tol .25) -> shed the lowest-scored beat
+    # down to the tolerance ceiling, not the bare target (the goal, not a hard cap)
     sections, log, warning = narrative.cast(_outline("A", "B", "C"), _chunks(), [],
                                             target_s=100.0, model="m", tol=0.25)
     total = sum(s["clips"][0]["end"] - s["clips"][0]["start"] for s in sections)
-    assert total <= 100.0 and len(sections) < 3
-    assert "A" in [s["title"] for s in sections]   # highest-scored beat survives
+    assert total <= 125.0 and len(sections) == 2   # one 60s beat dropped, 120s ships
+    titles = [s["title"] for s in sections]
+    assert "A" in titles and "C" not in titles     # highest-scored survives, lowest dropped
 
 
 # --- primary path: the director picked explicit in/out timestamps ---
@@ -97,40 +99,98 @@ def test_invalid_bounds_falls_back_to_retrieval(stubbed):
     assert log["beats"][0]["dir_start"] is None      # logged as a fallback
 
 
+def test_trim_to_budget_protects_the_arc_spine():
+    """Over budget -> shed redundant low-score escalations, NOT the spine or the connective
+    setup, even though the setup scores lowest of all."""
+    from refire import narrative
+    beats = [
+        {"role": "hook", "score": 5.0, "start": 0.0, "end": 30.0},
+        {"role": "setup", "score": 3.0, "start": 30.0, "end": 60.0},   # lowest score
+        {"role": "escalation", "score": 9.0, "start": 60.0, "end": 90.0},
+        {"role": "escalation", "score": 4.0, "start": 90.0, "end": 120.0},
+        {"role": "climax", "score": 8.0, "start": 120.0, "end": 150.0},
+        {"role": "button", "score": 6.0, "start": 150.0, "end": 180.0},
+    ]  # 180s total, target 100 (ceiling 125 at tol .25) -> must drop 2x 30s beats
+    kept, dropped = narrative._trim_to_budget(beats, target_s=100.0, tol=0.25)
+    roles = [b["role"] for b in kept]
+    assert roles.count("escalation") == 0        # both escalations shed first
+    assert {"hook", "setup", "climax", "button"} <= set(roles)   # spine + setup survive
+    assert sum(b["end"] - b["start"] for b in kept) <= 125.0     # within ceiling
+    assert all(d["role"] == "escalation" for d in dropped)       # the shed beats surface
+
+
+def test_trim_to_budget_ships_overshoot_within_tolerance():
+    """A cut modestly over target is NOT trimmed -- the target is a goal, not a hard cap."""
+    from refire import narrative
+    beats = [{"role": "escalation", "score": 1.0, "start": s, "end": s + 20.0}
+             for s in (0.0, 20.0, 40.0, 60.0, 80.0, 100.0)]   # 120s
+    kept, dropped = narrative._trim_to_budget(beats, target_s=100.0, tol=0.25)  # ceiling 125
+    assert len(kept) == 6 and not dropped   # 120 <= 125, nothing dropped despite low scores
+
+
 def test_stream_map_is_sentence_level():
     from refire import director
     words = [{"text": t, "start": s, "end": s + 0.4} for t, s in
              [("Hello", 0.0), ("world.", 0.5), ("Next", 65.0), ("one.", 65.5)]]
-    assert director.stream_map(words) == "[00:00] Hello world.\n[01:05] Next one."
+    # Timestamps are labelled in SECONDS (with an 's'), never mm:ss -- the director must
+    # copy them straight into start_s/end_s, and [09:06] would be misread as 9.06s.
+    assert director.stream_map(words) == "[0s] Hello world.\n[65s] Next one."
+
+
+def test_stream_map_uses_seconds_past_an_hour():
+    """A 2h+ moment must read as its second value, not a colon form that collapses to ~9s
+    (the bug that made a 3.5h stream's cut land in the first 48s)."""
+    from refire import director
+    words = [{"text": "late.", "start": 8097.0, "end": 8097.4}]   # 2h14m57s
+    assert director.stream_map(words) == "[8097s] late."
 
 
 # --- director backends parse into the new Beat schema ---
 
-def test_max_tokens_reserves_room_after_thinking():
-    from refire import director
-    # always thinking budget + reserved answer room, monotonic, capped
-    assert director._max_tokens(90.0) > director.THINK_BUDGET
-    assert director._max_tokens(2700.0) >= director._max_tokens(1200.0)
-    assert director._max_tokens(99999.0) <= 24000           # capped
-    assert director._out_room(90.0) >= 4000                 # answer always gets room
-
 
 def _fake_anthropic(monkeypatch, responses, output_format=None):
-    """Stub anthropic.Anthropic; parse() yields `responses` (parsed_output, stop_reason)
-    in order and records each call's kwargs into the returned `calls` list."""
+    """Stub anthropic.Anthropic; stream() yields `responses` ((pydantic|None), stop_reason)
+    in order as JSON text blocks and records each call's kwargs into the returned `calls`.
+
+    The director prompts for JSON and validates it itself (the strict structured-output
+    endpoint 400s on the editorial schema's depth) over a streamed call (large max_tokens
+    needs streaming), so a None response = an empty text block (thinking ate the budget),
+    and a model = its `model_dump_json()`.
+    """
     anthropic = pytest.importorskip("anthropic")
-    from refire import director
-    expected = output_format or director.Outline
+    from refire import director  # noqa: F401
 
     calls = []
     seq = iter(responses)
 
+    class _Block:
+        type = "text"
+
+        def __init__(self, text):
+            self.text = text
+
+    class FakeStream:
+        def __init__(self, msg):
+            self._msg = msg
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def __iter__(self):   # _complete streams deltas live; no events = silent stream
+            return iter(())
+
+        def get_final_message(self):
+            return self._msg
+
     class FakeMessages:
-        def parse(self, **kw):
-            assert kw["output_format"] is expected
+        def stream(self, **kw):
             calls.append(kw)
             parsed, stop = next(seq)
-            return SimpleNamespace(parsed_output=parsed, stop_reason=stop)
+            text = "" if parsed is None else parsed.model_dump_json()
+            return FakeStream(SimpleNamespace(content=[_Block(text)], stop_reason=stop))
 
     monkeypatch.setattr(anthropic, "Anthropic",
                         lambda *a, **k: SimpleNamespace(messages=FakeMessages()))
@@ -138,15 +198,20 @@ def _fake_anthropic(monkeypatch, responses, output_format=None):
 
 
 def test_director_outline_plumbing(monkeypatch):
-    """outline() returns the parsed Outline and passes a target-scaled max_tokens."""
+    """outline() returns the parsed Outline via a streamed adaptive-thinking call, with
+    the stream map cache-marked (the retry + review rounds read it warm)."""
     from refire import director
     want = director.Outline(central_idea="x", beats=[
         director.Beat(title="A", intent="i", query="q", start_s=1.0, end_s=2.0)])
     calls = _fake_anthropic(monkeypatch, [(want, "end_turn")])
     got = director.outline("[00:00] hi", "brief", "title", 1800.0)   # 30-min target
-    assert got is want and got.beats[0].title == "A"
-    assert calls[0]["max_tokens"] == director._max_tokens(1800.0)
-    assert calls[0]["thinking"]["type"] == "enabled"      # explicit budget, not adaptive
+    assert got.central_idea == want.central_idea and got.beats[0].title == "A"
+    assert calls[0]["max_tokens"] == director.MAX_TOKENS
+    # Opus 4.8: adaptive only; summarized display streams thinking to the console
+    assert calls[0]["thinking"] == {"type": "adaptive", "display": "summarized"}
+    blocks = calls[0]["messages"][0]["content"]
+    assert "[00:00] hi" in blocks[0]["text"]              # map in the first block
+    assert blocks[0]["cache_control"] == {"type": "ephemeral"}
 
 
 def test_director_retries_without_thinking_on_none(monkeypatch):
@@ -156,9 +221,10 @@ def test_director_retries_without_thinking_on_none(monkeypatch):
         director.Beat(title="A", intent="i", query="q", start_s=1.0, end_s=2.0)])
     calls = _fake_anthropic(monkeypatch, [(None, "max_tokens"), (want, "end_turn")])
     got = director.outline("[00:00] hi", "brief", "title", 600.0)
-    assert got is want
+    assert got.beats[0].title == "A"
     assert len(calls) == 2
-    assert "thinking" in calls[0] and "thinking" not in calls[1]   # retry drops thinking
+    assert calls[0]["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert calls[1]["thinking"] == {"type": "disabled"}   # retry turns thinking off
 
 
 def test_director_raises_when_no_outline(monkeypatch):
@@ -216,9 +282,9 @@ def test_realized_script_renders_beats_in_order():
     assert "the idea" in s
 
 
-def test_review_returns_revised_outline_and_reserves_notes_room(monkeypatch):
-    """review() parses a Review, feeds the realized transcript, and reserves answer room
-    for its notes on top of the outline budget."""
+def test_review_returns_revised_outline_with_cached_map_first(monkeypatch):
+    """review() parses a Review; the stream map is the FIRST (cache-marked) block so
+    round 2 reads round 1's cache, and the realized cut follows in the second block."""
     from refire import director
     revised = director.Outline(central_idea="y", beats=[
         director.Beat(title="B", intent="i", query="q", start_s=1.0, end_s=2.0)])
@@ -228,10 +294,13 @@ def test_review_returns_revised_outline_and_reserves_notes_room(monkeypatch):
     log = {"central_idea": "x", "beats": [
         {"title": "A", "intent": "i", "start": 3.0, "end": 5.0, "score": 9.0,
          "text": "hi there"}]}
-    got = director.review("[00:00] hi there", "brief", "title", log, 600.0)
-    assert got is want and got.outline.beats[0].title == "B"
-    assert calls[0]["max_tokens"] == min(24000, director._max_tokens(600.0) + 1500)
-    assert "hi there" in calls[0]["messages"][0]["content"]   # critic reads the realized cut
+    got = director.review("[0s] the map", "brief", "title", log, 600.0)
+    assert got.approved is False and got.outline.beats[0].title == "B"
+    assert calls[0]["max_tokens"] == director.MAX_TOKENS
+    blocks = calls[0]["messages"][0]["content"]
+    assert "[0s] the map" in blocks[0]["text"]                # stable map first...
+    assert blocks[0]["cache_control"] == {"type": "ephemeral"}
+    assert "hi there" in blocks[1]["text"]                    # ...realized cut after
 
 
 def test_local_director_parses_ollama_json(monkeypatch):
@@ -339,3 +408,81 @@ def test_cut_plan_md_renders_beats():
     assert "02:14-02:36" in md                          # mm:ss clip bounds
     assert "confidence -> chaos" in md
     assert "Round 1 (approved): tight" in md
+
+
+# --- line-level cutting: the director's segments become jump cuts within a beat ---
+
+def _seg(a, b):
+    return SimpleNamespace(start_s=a, end_s=b)
+
+
+def test_beat_segments_parse_and_default_empty():
+    from refire import director
+    b = director.Beat(title="T", start_s=1.0, end_s=9.0,
+                      segments=[{"start_s": 1.0, "end_s": 3.0},
+                                {"start_s": 7.0, "end_s": 9.0}])
+    assert b.segments[1].end_s == 9.0
+    assert director.Beat(title="T", start_s=1.0, end_s=2.0).segments == []
+
+
+def test_cast_segments_make_multiple_clips_and_cut_the_filler(monkeypatch):
+    """A beat with segments renders as several tight clips (jump cuts); the rambling
+    between them is gone from the kept text, and `dur` counts kept footage only."""
+    _fixed_score(monkeypatch)
+    words = _words("a b c. d e f. g h i. j k l. m n o.")   # terminators 2.8/5.8/8.8/11.8/14.8
+    ol = SimpleNamespace(central_idea="x", beats=[
+        _ed_beat(start_s=0.0, end_s=14.8,
+                 segments=[_seg(0.0, 2.8), _seg(12.0, 14.8)])])
+    sections, log, warning = narrative.cast(ol, [], words, target_s=1000.0, model="m")
+    clips = sections[0]["clips"]
+    assert len(clips) == 2
+    assert clips[0]["end"] == pytest.approx(2.8)
+    assert clips[1]["start"] == pytest.approx(12.0)
+    b = log["beats"][0]
+    assert b["dur"] == pytest.approx(5.6)                  # 2.8s + 2.8s kept, not 14.8s
+    assert "d e f" not in b["text"]                        # the middle ramble is cut
+    assert "a b c." in b["text"] and "m n o." in b["text"]
+
+
+def test_cast_merges_segments_that_touch_after_snapping(monkeypatch):
+    """Segments that snap to (near-)adjacent bounds fuse into one clip -- no stutter cut."""
+    _fixed_score(monkeypatch)
+    words = _words("a b c. d e f. g h i.")
+    ol = SimpleNamespace(central_idea="x", beats=[
+        _ed_beat(start_s=0.0, end_s=5.8,
+                 segments=[_seg(0.0, 2.8), _seg(3.0, 5.8)])])   # 0.2s apart after snap
+    sections, log, warning = narrative.cast(ol, [], words, target_s=1000.0, model="m")
+    clips = sections[0]["clips"]
+    assert len(clips) == 1
+    assert clips[0]["end"] == pytest.approx(5.8)
+
+
+def test_anchor_widening_is_clamped(monkeypatch):
+    """A stray reaction_end_s can't silently re-inflate a deliberately tight cut: widening
+    caps at WIDEN_SLOP past the director's own out-point (final beat gets more room)."""
+    _fixed_score(monkeypatch)
+    words = [{"text": "w", "start": float(i), "end": i + 0.8} for i in range(60)]
+    ol = SimpleNamespace(central_idea="x", beats=[
+        _ed_beat(start_s=0.0, end_s=10.0, reaction_end_s=40.0),   # wants +30s of "reaction"
+        _ed_beat(start_s=50.0, end_s=55.0)])                      # final beat
+    sections, log, warning = narrative.cast(ol, [], words, target_s=1000.0, model="m")
+    assert sections[0]["clips"][0]["end"] == pytest.approx(10.0 + narrative.WIDEN_SLOP)
+
+
+def test_realized_script_shows_cuts_and_dropped_beats():
+    from refire import director
+    log = {"central_idea": "i", "beats": [
+        {"title": "T", "role": "hook", "intent": "i", "start": 0.0, "end": 30.0,
+         "segments": [[0.0, 5.0], [20.0, 30.0]], "dur": 15.0, "score": 9.0, "text": "x"}],
+        "dropped": [{"title": "Ley-Line Grind", "role": "escalation", "dur": 45.0}]}
+    s = director._realized_script(log)
+    assert "2 cuts" in s and "15s kept" in s        # the critic sees the edit, not the span
+    assert "Ley-Line Grind" in s and "dropped" in s  # ...and what the budget trim shed
+
+
+def test_cut_plan_md_shows_segment_cuts():
+    log = {"central_idea": "i", "beats": [
+        {"title": "T", "role": "climax", "intent": "i", "start": 0.0, "end": 60.0,
+         "segments": [[0.0, 10.0], [40.0, 60.0]], "dur": 30.0, "score": 9.0}]}
+    md = narrative.cut_plan_md(log)
+    assert "2 segments, 30s kept" in md

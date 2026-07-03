@@ -85,8 +85,9 @@ def main(argv: list[str] | None = None) -> None:
                     help="folder with bgm/ sfx/ overlays/ for music + emote punch-ins")
     mk.add_argument("--bgm", default=None, help="music-bed track (overrides a random pick from assets/bgm)")
     mk.add_argument("--title", default="", help="stream title; helps the director understand the story")
-    mk.add_argument("--claude-model", default="claude-sonnet-4-6",
-                    help="Claude model for the narrative director pass")
+    mk.add_argument("--claude-model", default="claude-opus-4-8",
+                    help="Claude model for the narrative director pass "
+                         "(claude-sonnet-4-6 = cheaper fallback)")
     mk.add_argument("--flat", action="store_true",
                     help="skip the Claude director; use flat brief-relevance selection")
     mk.add_argument("--local-director", action="store_true",

@@ -123,7 +123,7 @@ def make(
     assets_dir: str | Path = "assets",
     bgm: str | Path | None = None,
     title: str = "",
-    claude_model: str = "claude-sonnet-4-6",
+    claude_model: str = "claude-opus-4-8",
     flat: bool = False,
     local_director: bool = False,
     review_rounds: int = 2,
@@ -183,18 +183,19 @@ def make(
             smap = director.stream_map(words)
             map_tok = len(smap) // 4   # ~4 chars/token; rough but enough to size the call
             print(f"[director] stream map ~{map_tok // 1000}k tokens, "
-                  f"~{director._n_beats(duration_s)} beats, "
-                  f"max_tokens={director._max_tokens(duration_s)}")
-            if map_tok > 150_000:
+                  f"~{director._n_beats(duration_s)} beats")
+            if map_tok > 800_000:
                 # ponytail: single-pass director reads the whole stream in one call; past
-                # ~150k tokens it risks overflowing Sonnet's context (run flat-falls-back
-                # if it does). Upgrade path for multi-hour streams = a windowed/two-pass
+                # ~800k tokens it risks overflowing Opus's 1M context (run flat-falls-back
+                # if it does). Upgrade path for marathon streams = a windowed/two-pass
                 # coarse->fine director.
                 print(f"[director] WARNING: stream map ~{map_tok // 1000}k tokens may not "
                       f"fit context; will fall back to flat selection if the call overflows.")
+            trace = run_dir / "trace"   # full prompt/response dumps per Claude call
             ol = (director.outline_local(smap, brief, title, duration_s, model=model)
                   if local_director
-                  else director.outline(smap, brief, title, duration_s, model=claude_model))
+                  else director.outline(smap, brief, title, duration_s,
+                                        model=claude_model, trace=trace))
             # Editor-review loop: cast the outline, let a Claude critic read the REALIZED
             # cut and either approve or return a revised outline, re-cast, repeat. This is
             # what turns a relevant-but-reel cut into a story (see okay-refer-to-memories).
@@ -206,11 +207,14 @@ def make(
                 sections, outline_log, warning = narrative.cast(
                     ol, chunks, words, duration_s, model=model, tol=tol,
                     progress=lambda f, m: report(0.66 + 0.24 * f, m))
+                if outline_log.get("dropped"):
+                    print("[cast] dropped for budget: "
+                          + ", ".join(d["title"] for d in outline_log["dropped"]))
                 if rnd == rounds or not sections:
                     break
                 try:
                     rv = director.review(smap, brief, title, outline_log, duration_s,
-                                         model=claude_model)
+                                         model=claude_model, trace=trace)
                 except Exception as re:   # a review failure must NOT discard a good cast
                     print(f"[review] round {rnd + 1} unavailable ({re}); keeping current cut")
                     break
