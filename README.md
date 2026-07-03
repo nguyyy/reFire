@@ -1,87 +1,150 @@
-# reFire
+# refire: automated narrative-driven video editor
 
-Automated long-form video editor. **Stage 1 (this repo): segment detection** —
-given a long Twitch gaming stream and its chat replay, it outputs a ranked
-`segments.json` of clip-worthy moments. Cutting, effects, subtitles, and music
-are later stages.
+refire is an automated video editor that analyzes twitch vods, structures a story outline, selects relevant clips, refines cuts, reviews the draft script, and compiles the final video or after effects project.
 
-Everything runs locally: ffmpeg + faster-whisper (GPU) + a local Ollama LLM.
-Zero per-run cost.
+---
 
-## Prerequisites
+## key features
 
-- **ffmpeg** on PATH (system install).
-- **NVIDIA GPU + CUDA** for faster-whisper.
-- **Ollama** running locally with a chat model (`ollama pull llama3.1:8b`) and,
-  for `refire make`, an embedding model (`ollama pull nomic-embed-text`).
-- **TwitchDownloaderCLI.exe** in the repo root (for `refire make`'s auto-download).
-- Python 3.10+.
+### 1. narrative storyboarding (claude director)
+- **story shape selection**: an llm reads the stream transcript map to identify a central story shape (e.g., confidence collapses into chaos) and viewer promise.
+- **beat planning**: the director structures the video into sequential beats with roles (hook, setup, escalation, reversal, climax, payoff, button).
+- **closed-loop critic pass**: an iterative review loop (up to --review-rounds passes, default 2) reads the transcript of the drafted clips. the critic flags issues with context, pacing, redundancy, or endings, and revises the outline.
+- **headless cli execution**: the narrative pass can run via the claude cli (`--director-backend cli`) using a claude subscription, the anthropic api (`--director-backend api`), or locally (`--local-director`) on ollama.
 
-## Install
+### 2. clip boundaries and cuts
+- **sentence alignment**: clips are snapped to sentence boundaries to prevent mid-word cuts.
+- **silence compression**: internal silences inside clips are removed using `compress_silence` with a configurable padding buffer.
+- **payoff preservation**: cuts are anchored to explicit setups, payoffs, and reaction times defined by the storyboard.
 
+### 3. formatting and styling
+- **motion-triggered punch zooms**: opencv detects frame-to-frame motion bursts to apply camera reframing (webcam corner anchor, 100% to 200% zoom) that holds through speech and releases on pauses.
+- **karaoke subtitles**: builds ass subtitle tracks with word-by-word highlighting. subtitle text defaults to lowercase and switches to uppercase on excitement (detected via rms audio amplitude analysis or keywords like lol, pog, wtf).
+- **overlays and sound effects**: maps sound effects and emotes (using assets/ or betterttv search query) to keywords in excitement intervals.
+- **music mixing**: loops background music and ducks it during speech.
+
+### 4. compilation rendering
+- **ffmpeg local rendering**: concats clips and mixes music into a finished mp4 draft (`run/<vod_id>/rough.mp4`).
+- **after effects export**: writes a build manifest (`run/<vod_id>/ae/manifest.json`). the script `refire/ae/reFire.jsx` imports the manifest, builds the timeline with keyframed zoom steps, sections, caption styles, sfx tracks, and overlays.
+
+---
+
+## prerequisites
+
+- **python 3.10+**
+- **ffmpeg** on the system path.
+- **nvidia gpu and cuda** for local transcription acceleration.
+- **ollama** running locally with:
+  - embedding model: `ollama pull nomic-embed-text`
+  - chat model: e.g., `ollama pull llama3.1:8b` or `qwen2.5:14b` (refire falls back to the largest installed chat model).
+- **twitchdownloadercli.exe** in the root directory.
+- (optional) **claude cli** (`npm install -g @anthropic-ai/claude-code`) for subscription completions.
+- (optional) **.env file** in the root directory:
+  ```env
+  ANTHROPIC_API_KEY=key_here
+  DEEPGRAM_API_KEY=key_here
+  ```
+
+---
+
+## installation
+
+install the package in editable mode:
 ```bash
+# default install
 pip install -e .
+
+# developer install with dev dependencies
+pip install -e ".[dev]"
 ```
 
-## Usage
+---
 
-### Hands-off: VOD# + brief + duration → AE manifest
+## usage
+
+### the main pipeline: `refire make`
+downloads the vod, processes chat logs, transcribes, storyboard and casts the beats, then generates the after effects manifest.
 
 ```bash
-refire make 1762930614 --brief "the funniest Hu Tao gacha pulls and rage moments" \
-  --duration 20m --model llama3.1:8b --game "Genshin Impact"
+refire make 1762930614 \
+  --brief "the funniest hu tao gacha pulls and rage moments" \
+  --duration 20m \
+  --game "genshin impact" \
+  --render
 ```
 
-Downloads the VOD (cached in `vods/`), transcribes + embeds it once, then the
-brief drives selection: candidates are retrieved by relevance to the brief,
-LLM-scored against it, and packed chronologically into a duration budget
-(±`--tol`, default 25%; warns instead of padding if short). Output:
-`run/ae/manifest.json` → open `refire/ae/reFire.jsx` in After Effects and Build.
+#### arguments and options:
+- `vod_id`: twitch vod number (downloaded and cached in `vods/`).
+- `--brief`: brief defining the vibe and topic.
+- `--duration`: target compilation length (e.g., `20m`, `20:00`, or `1200`).
+- `--game`: name of the game (used to build a proper-noun spelling dictionary).
+- `--render`: immediately renders the video draft locally to `run/<vod_id>/rough.mp4`.
+- `--director-backend <cli|api>`: use `cli` for subscription completions via the claude cli, or `api` for pay-as-you-go anthropic key usage.
+- `--local-director`: runs the narrative planner on local ollama instead of claude.
+- `--review-rounds <n>`: maximum critic iterations (default `2`).
+- `--transcriber <local|deepgram>`: choose between local `faster-whisper` and cloud `deepgram`.
+- `--no-motion-zoom`: disables dynamic reframing zooms.
+- `--progress-file <path>`: logs execution progress to a json file.
 
-### Lower-level: detect → edit/ae from local files
+---
 
+### utility commands
+run individual pipeline steps:
+
+#### 1. highlight detection
+scans video and chat logs to output `segments.json`.
 ```bash
 refire detect stream.mp4 chat.json --run-dir run --top-n 30
-# or:  python -m refire detect stream.mp4 chat.json
 ```
 
-`chat.json` is a [TwitchDownloader](https://github.com/lay295/TwitchDownloader)
-chat export (the format with a `comments` array, each having
-`content_offset_seconds`).
-
-Output: `run/segments.json` —
-```json
-[
-  { "start": 1423.5, "end": 1467.0, "score": 8.7, "reason": "clutch 1v3, chat exploded" }
-]
-```
-
-### Options
-
-| flag | default | meaning |
-|------|---------|---------|
-| `--model` | `qwen2.5:14b` | Ollama model for scoring |
-| `--top-n` | none | keep only the top N segments |
-| `--threshold` | none | drop segments below this final score |
-| `--w-llm` / `--w-chat` | 0.6 / 0.4 | blend weights (LLM vs chat spike) |
-
-Audio and transcript are cached in the run dir, so reruns skip the expensive
-ffmpeg/Whisper steps.
-
-## How it works
-
-1. ffmpeg → mono 16kHz wav
-2. faster-whisper → word-level transcript
-3. chat replay → message-rate z-score over time (spikes = excitement)
-4. transcript chunked into ~30–90s windows, each tagged with its chat spike
-5. local LLM scores each chunk 1–10 for clip-worthiness
-6. blend LLM + chat scores, rank, select → `segments.json`
-
-No chat log? Detection falls back to transcript-only scoring automatically.
-
-## Test
-
+#### 2. assemble clips locally
+renders selected segment clips into a single video compilation.
 ```bash
-pip install -e ".[dev]"
+refire edit stream.mp4 --run-dir run --music music.mp3
+```
+
+#### 3. after effects manifest export
+compiles segment data into the manifest file.
+```bash
+refire ae stream.mp4 --run-dir run --words-per-line 3
+```
+
+---
+
+## project artifacts
+
+output files are saved under `run/<vod_id>/`:
+- `clips/` - temporary sub-clips and subtitle files.
+- `trace/` - prompt and response text records from claude passes.
+- `audio.wav` - extracted audio file.
+- `transcript.json` - transcribed word list cache.
+- `transcript.glossary.json` / `transcript.source.json` - cache validation files.
+- `chunks.json` - video segment transcription chunks and embeddings.
+- `outline.json` - story planning outlines and beat metadata.
+- `cut_plan.md` - markdown file of storyboard logs and dialogue segments.
+- `rough.mp4` - rendered video compilation.
+- `ae/manifest.json` - manifest structure read by the after effects script.
+
+---
+
+## after effects script execution
+
+1. open after effects.
+2. run **file > scripts > run script file...** and pick `refire/ae/reFire.jsx`.
+3. select `manifest.json` from the vod output folder.
+4. click **build** to generate the timeline compositions.
+5. edit styles in the **caption style** comp layer and click **update** in the panel to apply changes across all segments.
+
+---
+
+## testing
+
+run the test suite:
+```bash
 pytest
 ```
+
+---
+
+## architectural documentation
+detailed notes on the editor's mechanics are located in the [ai editor workflow memory](file:///c:/deving/reFire/docs/ai-editor-workflow-memory.md) file.
