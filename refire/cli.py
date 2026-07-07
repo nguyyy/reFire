@@ -64,7 +64,9 @@ def main(argv: list[str] | None = None) -> None:
 
     mk = sub.add_parser("make", help="VOD# + brief + duration -> focused AE manifest (hands-off)")
     mk.add_argument("vod_id", help="Twitch VOD number (auto-downloaded + cached)")
-    mk.add_argument("--brief", required=True, help="free text: the subject + vibe you want")
+    mk.add_argument("--brief", default=None,
+                    help="free text: the subject + vibe you want; omit to let the "
+                         "director mine the stream's own best story")
     mk.add_argument("--duration", required=True, help="target runtime: 20m / 20:00 / 1200")
     mk.add_argument("--run-dir", default=None,
                     help="artifact/output directory (default: run/<vod_id>, isolated per VOD)")
@@ -85,9 +87,9 @@ def main(argv: list[str] | None = None) -> None:
                     help="folder with bgm/ sfx/ overlays/ for music + emote punch-ins")
     mk.add_argument("--bgm", default=None, help="music-bed track (overrides a random pick from assets/bgm)")
     mk.add_argument("--title", default="", help="stream title; helps the director understand the story")
-    mk.add_argument("--claude-model", default="claude-opus-4-8",
+    mk.add_argument("--claude-model", default="claude-sonnet-5",
                     help="Claude model for the narrative director pass "
-                         "(claude-sonnet-4-6 = cheaper fallback)")
+                         "(claude-opus-4-8 = pricier/higher quality)")
     mk.add_argument("--director-backend", choices=["cli", "api"], default="cli",
                     help="cli = Claude Code headless on your subscription (~$0, default; "
                          "auto-falls back to api); api = ANTHROPIC_API_KEY pay-as-you-go")
@@ -95,6 +97,15 @@ def main(argv: list[str] | None = None) -> None:
                     help="skip the Claude director; use flat brief-relevance selection")
     mk.add_argument("--local-director", action="store_true",
                     help="run the narrative director on local Ollama (--model), no API spend")
+    mk.add_argument("--no-vision", action="store_true",
+                    help="text-only director: skip frame sampling, VLM scene captions, "
+                         "and contact sheets")
+    mk.add_argument("--vlm-model", default="qwen2.5vl:3b",
+                    help="local Ollama vision model for scene captions "
+                         "(not installed -> captions skipped)")
+    mk.add_argument("--scout", choices=["local", "off"], default="local",
+                    help="chapterize scout pass before the story pass: local Ollama "
+                         "(free, default) or off (single-shot; short VODs only)")
     mk.add_argument("--review-rounds", type=int, default=2,
                     help="max editor-review revision rounds the Claude critic may make "
                          "(0 = single-pass; each round adds one Claude call)")
@@ -172,7 +183,8 @@ def main(argv: list[str] | None = None) -> None:
                        title=args.title, claude_model=args.claude_model,
                        director_backend=args.director_backend,
                        flat=args.flat, local_director=args.local_director,
-                       review_rounds=args.review_rounds,
+                       review_rounds=args.review_rounds, scout=args.scout,
+                       vision=not args.no_vision, vlm_model=args.vlm_model,
                        render=args.render, encoder=args.encoder,
                        silence_pad=args.silence_pad,
                        motion_zoom=not args.no_motion_zoom,

@@ -17,6 +17,10 @@ def _noop(*_a, **_k):
     pass
 
 
+# past this the story pass gets a chapter digest instead of the raw map (rough 4 chars/tok)
+FULL_MAP_TOK_LIMIT = 150_000
+
+
 def _resolve_ollama_model(requested: str) -> str:
     """Keep `requested` if it's installed, else auto-pick the largest installed chat model.
 
@@ -51,7 +55,7 @@ def _detect_core(video, chat, run_dir, model=DEFAULT_MODEL, game="", tx_progress
     """Brief-agnostic, cached front half: audio -> transcribe -> chat -> chunks.
 
     Shared by `run` (legacy detect) and `make` (brief pipeline). Returns
-    (words, chunks); words is [] when the transcript is empty. `tx_progress(frac)`
+    (words, chunks, chat_z); words is [] when the transcript is empty. `tx_progress(frac)`
     is forwarded to transcription. `transcriber` picks the STT backend plugin.
     """
     run_dir = Path(run_dir)
@@ -63,9 +67,9 @@ def _detect_core(video, chat, run_dir, model=DEFAULT_MODEL, game="", tx_progress
     words = transcribe(wav, cache_path=run_dir / "transcript.json",
                        hotwords=hotwords, progress=tx_progress, backend=transcriber)
     if not words:
-        return [], []
+        return [], [], []
     signal = chat_signal(chat, words[-1]["end"])
-    return words, make_chunks(words, signal)
+    return words, make_chunks(words, signal), signal
 
 
 def run(
@@ -82,7 +86,7 @@ def run(
     """Run detection end-to-end; return path to segments.json."""
     run_dir = Path(run_dir)
     out = run_dir / "segments.json"
-    words, chunks = _detect_core(video, chat, run_dir, model=model, game=game)
+    words, chunks, _sig = _detect_core(video, chat, run_dir, model=model, game=game)
     if not words:
         run_dir.mkdir(parents=True, exist_ok=True)
         out.write_text("[]", encoding="utf-8")
@@ -110,7 +114,7 @@ def _ensure_embeddings(chunks, run_dir):
 
 def make(
     vod_id,
-    brief: str,
+    brief: str | None,
     duration_s: float,
     run_dir: str | Path | None = None,
     model: str = DEFAULT_MODEL,
@@ -123,11 +127,14 @@ def make(
     assets_dir: str | Path = "assets",
     bgm: str | Path | None = None,
     title: str = "",
-    claude_model: str = "claude-opus-4-8",
+    claude_model: str = "claude-sonnet-5",
     director_backend: str = "cli",   # "cli" = claude -p on the subscription; "api" = SDK key
     flat: bool = False,
     local_director: bool = False,
     review_rounds: int = 2,
+    scout: str = "local",   # chapterize backend: "local" (free Ollama) or "off"
+    vision: bool = True,    # frames + VLM captions + contact sheets (the pipeline's eyes)
+    vlm_model: str = "qwen2.5vl:3b",
     render: bool = False,
     encoder: str = "libx264",
     motion_zoom: bool = True,
@@ -148,6 +155,7 @@ def make(
     from .emphasis import annotate_emphasis
     from .ingest import ensure_vod
     from .overlay import pick_bgm, pick_overlays
+    from .rank import select_by_signal
     from .reframe import ENTER, EXIT
     from .retrieve import retrieve
     from .select import budget_select, snap_to_sentences
@@ -163,14 +171,38 @@ def make(
     video, chat = ensure_vod(vod_id, cache_dir)
     # transcription is the long pole -> map its segment progress into 0.10..0.55
     report(0.10, "transcribing")
-    words, chunks = _detect_core(
+    words, chunks, chat_z = _detect_core(
         video, chat, run_dir, model=model, game=game, transcriber=transcriber,
         tx_progress=lambda f: report(0.10 + 0.45 * f, "transcribing"))
     if not words:
         raise SystemExit("Empty transcript -- nothing to edit.")
     print(f"[transcribe] {len(words)} words, ~{words[-1]['end'] / 60:.0f} min of speech, "
           f"{len(chunks)} chunks")
-    report(0.55, "embedding chunks")
+
+    # Perception: fuse chat + loudness + scene captions into the enriched moment map the
+    # director reads; signals.json doubles as an inspectable artifact. Frames + VLM run
+    # NOW -- whisper has released the GPU and the scoring LLM isn't loaded yet, so the
+    # vision model doesn't thrash against either.
+    report(0.56, "fusing perception signals")
+    from . import perception
+    audio_z = perception.loudness_signal(run_dir / "audio.wav")
+    perception.save_signals(run_dir / "signals.json", chat_z, audio_z)
+    captions: dict[float, str] = {}
+    frame_index: list[dict] = []
+    if vision:
+        from . import frames as frames_mod
+        from .vlm import caption_frames
+        report(0.56, "sampling frames")
+        fdir = Path(cache_dir) / f"{vod_id}.frames"
+        frame_index = frames_mod.sample_frames(video, fdir)
+        if frame_index:
+            captions = caption_frames(
+                frame_index, fdir / f"captions.{vlm_model.replace(':', '_')}.json",
+                model=vlm_model, game=game,
+                progress=lambda f, m: report(0.56 + 0.02 * f, m))
+            print(f"[vlm] {len(captions)} scene captions")
+
+    report(0.58, "embedding chunks")
     chunks = _ensure_embeddings(chunks, run_dir)
 
     # Narrative path: a Claude director pass writes the story outline, then we cast the
@@ -181,23 +213,68 @@ def make(
         try:
             from . import director, narrative
             report(0.60, "writing story outline")
-            smap = director.stream_map(words)
+            smap = perception.moment_map(words, chat_z=chat_z, audio_z=audio_z,
+                                         captions=captions)
+            (run_dir / "map_v2.txt").write_text(smap, encoding="utf-8")
             map_tok = len(smap) // 4   # ~4 chars/token; rough but enough to size the call
             print(f"[director] stream map ~{map_tok // 1000}k tokens, "
                   f"~{director._n_beats(duration_s)} beats")
-            if map_tok > 800_000:
-                # ponytail: single-pass director reads the whole stream in one call; past
-                # ~800k tokens it risks overflowing Opus's 1M context (run flat-falls-back
-                # if it does). Upgrade path for marathon streams = a windowed/two-pass
-                # coarse->fine director.
+
+            # Scout pass (free, local): chapterize the stream so the story pass reads a
+            # guided map -- and, past the context ceiling, a digest instead of the raw map.
+            chapters = []
+            if scout != "off":
+                report(0.61, "scouting chapters")
+                chapters = director.chapterize(
+                    smap, model=model, cache_path=run_dir / "chapters.json",
+                    progress=lambda f, m: report(0.61 + 0.03 * f, m))
+                print(f"[scout] {len(chapters)} chapters")
+                # full-res per-chapter map files, for the director's Read drill-down
+                map_dir = run_dir / "map"
+                map_dir.mkdir(exist_ok=True)
+                for i, c in enumerate(chapters, 1):
+                    (map_dir / f"chapter_{i:02d}.txt").write_text(
+                        perception.excerpt(smap, c.start_s, c.end_s), encoding="utf-8")
+            if map_tok <= FULL_MAP_TOK_LIMIT:
+                director_input = (perception.chapter_guide(chapters) + "\n\n" + smap
+                                  if chapters else smap)
+            elif chapters:
+                wins = perception.top_windows(chat_z, audio_z)
+                director_input = perception.digest(chapters, smap, windows=wins)
+                print(f"[director] map too big for one call; sending digest "
+                      f"~{len(director_input) // 4000}k tokens")
+            else:
+                director_input = smap
                 print(f"[director] WARNING: stream map ~{map_tok // 1000}k tokens may not "
-                      f"fit context; will fall back to flat selection if the call overflows.")
+                      f"fit context (--scout off); will fall back to flat selection if "
+                      f"the call overflows.")
+
+            # The director's eyes: contact-sheet the top-signal windows so the story
+            # pass can look at the actual footage before committing beats.
+            sheets: list = []
+            if vision and frame_index:
+                from . import frames as frames_mod
+                wins = perception.top_windows(chat_z, audio_z) or []
+                for (a, b) in wins:
+                    tiles = [f for f in frame_index if a <= f["t"] <= b]
+                    # a quiet window may hold no sampled frames; pad from neighbors
+                    if not tiles:
+                        continue
+                    sheet = frames_mod.contact_sheet(
+                        tiles, run_dir / "sheets" / f"window_{int(a)}.jpg")
+                    if sheet:
+                        sheets.append(sheet)
+                if sheets:
+                    print(f"[frames] {len(sheets)} contact sheets for the director")
+
             trace = run_dir / "trace"   # full prompt/response dumps per Claude call
-            ol = (director.outline_local(smap, brief, title, duration_s, model=model)
+            ol = (director.outline_local(director_input, brief, title, duration_s,
+                                         model=model)
                   if local_director
-                  else director.outline(smap, brief, title, duration_s,
+                  else director.outline(director_input, brief, title, duration_s,
                                         model=claude_model, trace=trace,
-                                        backend=director_backend))
+                                        backend=director_backend,
+                                        images=sheets, run_dir=run_dir))
             # Editor-review loop: cast the outline, let a Claude critic read the REALIZED
             # cut and either approve or return a revised outline, re-cast, repeat. This is
             # what turns a relevant-but-reel cut into a story (see okay-refer-to-memories).
@@ -214,10 +291,24 @@ def make(
                           + ", ".join(d["title"] for d in outline_log["dropped"]))
                 if rnd == rounds or not sections:
                     break
+                # Visual critic: on the LAST scheduled review only (cost), render a fast
+                # 480p proxy of the current cast and let the critic SEE the actual cut.
+                cut_sheets: list = []
+                if vision and rnd == rounds - 1:
+                    try:
+                        from . import frames as frames_mod
+                        flatc = [c for s in sections for c in s["clips"]]
+                        proxy = frames_mod.render_proxy(
+                            video, run_dir / "proxy.mp4", flatc, encoder=encoder)
+                        cut_sheets = frames_mod.cut_sheet(proxy, run_dir / "sheets")
+                        print(f"[review] visual critic: {len(cut_sheets)} cut sheets")
+                    except Exception as pe:   # proxy problems must not cost the review
+                        print(f"[review] proxy render failed ({pe}); text-only review")
                 try:
-                    rv = director.review(smap, brief, title, outline_log, duration_s,
-                                         model=claude_model, trace=trace,
-                                         backend=director_backend)
+                    rv = director.review(director_input, brief, title, outline_log,
+                                         duration_s, model=claude_model, trace=trace,
+                                         backend=director_backend,
+                                         images=cut_sheets, run_dir=run_dir)
                 except Exception as re:   # a review failure must NOT discard a good cast
                     print(f"[review] round {rnd + 1} unavailable ({re}); keeping current cut")
                     break
@@ -245,12 +336,14 @@ def make(
     if not sections:
         # Flat fallback: candidate pool ~3x the budget worth of ~60s chunks, floored so
         # short briefs still get headroom for the LLM scorer; one untitled section.
+        # No brief -> nothing to embed against, so rank by raw excitement instead.
         report(0.62, "retrieving candidates")
         k = max(40, int(duration_s / 60.0 * 3))
-        candidates = retrieve(brief, chunks, k)
+        candidates = (retrieve(brief, chunks, k) if brief
+                      else select_by_signal(chunks, k, audio_z=audio_z))
         scored = []
         for i, c in enumerate(candidates):
-            res = score_chunk(c, brief=brief, model=model)
+            res = score_chunk(c, brief=brief or "", model=model)
             scored.append({"start": c["start"], "end": c["end"],
                            "score": res["llm_score"], "reason": res["reason"]})
             report(0.66 + 0.24 * (i + 1) / len(candidates),

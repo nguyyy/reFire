@@ -16,7 +16,7 @@ import json
 
 from pydantic import BaseModel, model_validator
 
-CLAUDE_MODEL = "claude-opus-4-8"
+CLAUDE_MODEL = "claude-sonnet-5"
 MAX_TOKENS = 32000   # adaptive thinking + the largest outline JSON both fit comfortably
 
 
@@ -71,6 +71,32 @@ class Outline(_JsonModel):
     viewer_promise: str = ""        # what the viewer is promised they're watching
     ending_needed: str = ""         # what kind of ending the story has to land
     beats: list[Beat]
+
+
+class Notable(_JsonModel):
+    """One moment in a chapter worth an editor's attention, with its map timestamp."""
+    t_s: float
+    why: str = ""
+
+
+class Chapter(_JsonModel):
+    """A scout-pass chapter: what one ~20-minute stretch of the stream is about.
+
+    The story pass reads the chapter guide instead of (or alongside) the raw map, which is
+    how a 7-hour VOD fits the director's context: comprehension is built coarse-to-fine.
+    """
+    title: str
+    start_s: float
+    end_s: float
+    summary: str = ""
+    notable_moments: list[Notable] = []
+
+
+class _ChapterOut(_JsonModel):
+    """The scout model's per-window reply (bounds come from the window, not the model)."""
+    title: str = ""
+    summary: str = ""
+    notable_moments: list[Notable] = []
 
 
 class Review(_JsonModel):
@@ -163,6 +189,37 @@ _SYSTEM = (
 )
 
 
+_MAP_LEGEND = (
+    "\nThe map may carry extra perception signals -- use them as an editor uses their "
+    "eyes and ears, as evidence of where the real moments are: `(chat!)`/`(chat!!)` = "
+    "the live chat spiked (mild/huge), `(loud)`/`(LOUD)` = the streamer's audio spiked "
+    "(raised voice / outright yelling), and standalone `[scene: ...]` lines are "
+    "APPROXIMATE machine descriptions of what was on screen at that moment -- treat "
+    "them as weak hints of the visual context, never as exact facts."
+)
+
+
+_SYSTEM_STREAM_INTRO = (
+    "You are a video editor cutting a Twitch gaming stream into one focused, cohesive "
+    "short. NO editorial brief was given: your job is to find the ONE story this stream "
+    "actually tells and cut that. Read the whole time-stamped map -- what was said, where "
+    "chat exploded, where the streamer got loud, what was on screen -- and mine the "
+    "stream's own best arc: its running joke, its slow-burn disaster, its comeback, "
+    "whatever the footage genuinely supports. Do not average across everything fun; "
+    "commit to the strongest single through-line. "
+)
+
+
+def pick_system(brief: str | None) -> str:
+    """The outline system prompt for this mode: brief-driven (default) or stream-driven
+    (no brief -> mine the stream's own best story). Pure, so mode selection is testable."""
+    if brief:
+        return _SYSTEM + _MAP_LEGEND
+    # same beat schema + arc rules; only the opening framing changes
+    intro_end = _SYSTEM.index("Do NOT list interesting")
+    return _SYSTEM_STREAM_INTRO + _SYSTEM[intro_end:] + _MAP_LEGEND
+
+
 _REVIEW_SYSTEM = (
     "You are a senior video editor reviewing a ROUGH CUT of a Twitch gaming short for "
     "STORY, not individual moments. You are given the cut's central idea, the editor's "
@@ -206,25 +263,108 @@ def stream_map(words: list[dict]) -> str:
     each line's timestamp is that sentence's first word, in SECONDS. Seconds (not mm:ss) so
     the director copies them straight into start_s/end_s -- a `[09:06]` colon form gets
     misread as 9.06s and collapses a multi-hour stream's cut into its first minute.
-    ponytail: the whole-stream map fits Sonnet's context for normal VODs; for multi-hour
-    streams this can blow the token budget -- window the stream if it ever truncates.
+    Enriched-map runs go through `perception.moment_map` instead (same splitter, plus
+    chat/loudness marks and scene lines); this stays as the bare-transcript form.
     """
-    lines: list[str] = []
+    from .perception import _sentences
+    return "\n".join(f"[{a}s] {text}" for a, _b, text in _sentences(words))
+
+
+_SCOUT_SYSTEM = (
+    "You are logging a Twitch gaming stream for a video editor. You are given one window "
+    "of a time-stamped map of the stream (each line starts with `[Ns]` = seconds into the "
+    "stream; `(chat!)`/`(LOUD)` marks and `[scene: ...]` lines are perception signals). "
+    "Reply ONLY with a single JSON object (no markdown, no prose) of this shape: "
+    '{"title": "<3-6 word chapter title>", "summary": "<2-4 sentences: what happens, '
+    'what the streamer is trying to do, how it goes>", "notable_moments": '
+    '[{"t_s": <number, copied from a [Ns] label>, "why": "<one line: why an editor '
+    'would care>"}, ...]}. List at most 5 notable moments; strong reactions, fails, '
+    "wins, running jokes, and chat/loudness spikes are what count."
+)
+
+
+def _parse_stamp(line: str) -> float | None:
+    """The leading `[Ns]` timestamp of a map line, or None."""
+    if line.startswith("[") and "s]" in line[:12]:
+        try:
+            return float(line[1:line.index("s]")])
+        except ValueError:
+            return None
+    return None
+
+
+def _windows(map_text: str, window_s: float = 1200.0) -> list[tuple[float, float, str]]:
+    """Split a stream map into (t0, t1, text) windows of ~window_s by line timestamps.
+
+    Pure. Lines without a parseable stamp ride with the current window. Empty map -> [].
+    """
+    out: list[tuple[float, float, str]] = []
     cur: list[str] = []
-    sent_start = 0
-    for w in words:
-        if not cur:
-            sent_start = int(w["start"])
-        cur.append(w["text"])
-        if w["text"][-1:] in ".?!":
-            lines.append(f"[{sent_start}s] {' '.join(cur)}")
-            cur = []
-    if cur:   # trailing words with no terminal punctuation
-        lines.append(f"[{sent_start}s] {' '.join(cur)}")
-    return "\n".join(lines)
+    w0 = 0.0
+    last = 0.0
+    for line in map_text.splitlines():
+        t = _parse_stamp(line)
+        if t is not None:
+            if cur and t >= w0 + window_s:
+                out.append((w0, t, "\n".join(cur)))
+                cur = []
+                w0 = t
+            last = t
+        cur.append(line)
+    if cur:
+        out.append((w0, max(last, w0), "\n".join(cur)))
+    return out
 
 
-def _realized_script(outline_log: dict) -> str:
+def chapterize(map_text: str, window_s: float = 1200.0, model: str = "llama3.1:8b",
+               cache_path=None, progress=None) -> list[Chapter]:
+    """Scout pass: one local-Ollama call per ~20-min window -> chapter guide.
+
+    Free (no Claude), so it always runs before the story pass. A failed window degrades to
+    a stub chapter built from its first line (never crashes the run). `cache_path` =
+    run/<vod>/chapters.json, skip-if-exists (keyed to nothing else -- delete to re-scout).
+    """
+    from pathlib import Path
+    if cache_path and Path(cache_path).exists():
+        try:
+            data = json.loads(Path(cache_path).read_text(encoding="utf-8"))
+            return [Chapter.model_validate(c) for c in data]
+        except (ValueError, TypeError):
+            pass   # corrupt cache -> re-scout
+    import ollama
+    wins = _windows(map_text, window_s)
+    chapters: list[Chapter] = []
+    for i, (a, b, text) in enumerate(wins):
+        if progress:
+            progress((i + 1) / max(1, len(wins)), f"scouting chapter {i + 1}/{len(wins)}")
+        try:
+            resp = ollama.chat(
+                model=model, format="json",
+                messages=[{"role": "system", "content": _SCOUT_SYSTEM},
+                          {"role": "user", "content": text}],
+                options={"num_ctx": 16384})
+            got = _ChapterOut.model_validate(json.loads(resp["message"]["content"]))
+        except Exception as e:   # any window failure -> stub, keep scouting
+            print(f"[scout] window {i + 1} failed ({e}); using stub chapter")
+            got = _ChapterOut()
+        first = next((ln for ln in text.splitlines() if ln.strip()), "")
+        chapters.append(Chapter(
+            title=got.title or first[:60] or f"chapter {i + 1}",
+            start_s=a, end_s=b, summary=got.summary,
+            # clamp hallucinated stamps into the window
+            notable_moments=[n for n in got.notable_moments if a <= n.t_s <= b][:5]))
+    if cache_path:
+        Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(cache_path).write_text(
+            json.dumps([c.model_dump() for c in chapters], indent=2), encoding="utf-8")
+    return chapters
+
+
+def _fmt_mmss(t: float) -> str:
+    return f"{int(t) // 60:02d}:{int(t) % 60:02d}"
+
+
+def _realized_script(outline_log: dict, cut_times: bool = False) -> str:
     """Render the CAST cut as the script the critic reads: central idea + story shape +
     each beat in order with its editorial intent (role/intent/viewer_question/transition)
     AND the ACTUAL transcript of the chosen span.
@@ -239,6 +379,7 @@ def _realized_script(outline_log: dict) -> str:
     if outline_log.get("viewer_promise"):
         lines.append(f"VIEWER PROMISE: {outline_log['viewer_promise']}")
     lines.append("")
+    t_cut = 0.0   # running CUT-timeline position, so the critic can match sheets to beats
     for i, b in enumerate(outline_log.get("beats", []), 1):
         a, z = b.get("start"), b.get("end")
         segs = b.get("segments") or []
@@ -254,6 +395,11 @@ def _realized_script(outline_log: dict) -> str:
             lines.append(f"   transition_in: {b['transition_in']}")
         if b.get("viewer_question"):
             lines.append(f"   leaves viewer wondering: {b['viewer_question']}")
+        if cut_times:
+            d = float(b.get("dur") or (z - a if a is not None and z is not None else 0))
+            lines.append(f"   in the cut: {_fmt_mmss(t_cut)}-{_fmt_mmss(t_cut + d)} "
+                         "(match this against the sheet tile labels)")
+            t_cut += d
         lines.append(f"   {ts} {str(b.get('text', '')).strip()}")
         lines.append("")
     dropped = outline_log.get("dropped") or []
@@ -359,7 +505,8 @@ def _complete(client, model, system, user_content, model_cls, tag="claude", trac
     return model_cls.model_validate(json.loads(_extract_json(text)))
 
 
-def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=None):
+def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=None,
+                  tools: str = "", cwd=None, timeout_s: float = 1200.0):
     """Same contract as `_complete`, but through Claude Code headless mode (`claude -p`)
     instead of the SDK -- the call bills the user's Claude SUBSCRIPTION, not the pay-as-you-
     go API key (~$1.2/video on Opus otherwise). Raises RuntimeError when the CLI is missing
@@ -394,14 +541,24 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
         print(f"[{tag}] full prompt -> {trace}\\{stamp}-{tag}-request.txt")
 
     env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
-    cmd = [exe, "-p", "--model", model, "--tools", "", "--setting-sources", "",
+    # tools="" = pure completion (default). tools="Read" = vision/drill-down mode: the
+    # model may Read contact sheets + per-chapter map files, relative to cwd (the run
+    # dir); --allowedTools pre-permits them so headless mode never hangs on a prompt
+    # (verified live: -p --tools Read --allowedTools Read reads relative paths fine).
+    cmd = [exe, "-p", "--model", model, "--tools", tools, "--setting-sources", "",
            "--system-prompt", system, "--output-format", "stream-json",
            "--include-partial-messages", "--verbose"]
+    if tools:
+        cmd += ["--allowedTools", tools]
     proc = subprocess.Popen(
         cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,   # non-JSON stderr lines are skipped by the parser
         text=True, encoding="utf-8", errors="replace",
-        env=env, cwd=tempfile.gettempdir())
+        env=env, cwd=str(cwd) if cwd else tempfile.gettempdir())
+    # belt-and-braces: a wedged CLI (auth prompt, network stall) must not hang the run
+    import threading
+    killer = threading.Timer(timeout_s, lambda: proc.kill())
+    killer.start()
     proc.stdin.write(user_text)
     proc.stdin.close()
 
@@ -433,6 +590,7 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
             stop = ev.get("stop_reason") or ev.get("subtype")
             is_err = bool(ev.get("is_error"))
     proc.wait()
+    killer.cancel()
     if phase:
         print(flush=True)
     print(f"[{tag}] <- stop_reason={stop}, {len(text):,} chars")
@@ -448,17 +606,55 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
     return model_cls.model_validate(json.loads(_extract_json(text)))
 
 
-def _header(brief: str, title: str, target_s: float) -> str:
+MAX_READS = 3   # each Read turn reprocesses the whole context -- the hidden cost cap
+
+
+def _vision_note(images, run_dir, what: str) -> str:
+    """The CLI-backend vision paragraph: which sheet files exist and how to use them."""
+    from pathlib import Path
+    rels = []
+    for p in images:
+        p = Path(p)
+        try:
+            rels.append(p.relative_to(run_dir).as_posix() if run_dir else str(p))
+        except ValueError:
+            rels.append(str(p))
+    return (
+        f"\n\nCONTACT SHEETS ({what}; each tile is labeled with its timestamp):\n"
+        + "\n".join(f"- {r}" for r in rels)
+        + f"\nUse the Read tool to LOOK at up to {MAX_READS} of these image files "
+          "before finalizing -- they show what was actually on screen. Also available: "
+          "map/chapter_NN.txt hold the FULL-resolution transcript per chapter; Read one "
+          "before anchoring beats inside it if the excerpts above are too coarse. "
+          f"Do not exceed {MAX_READS} Reads total."
+    )
+
+
+def _image_blocks(images, cap: int = 8) -> list[dict]:
+    """API-path image content blocks (base64 jpg), capped."""
+    import base64
+    from pathlib import Path
+    out = []
+    for p in list(images)[:cap]:
+        data = Path(p).read_bytes()
+        out.append({"type": "image", "source": {
+            "type": "base64", "media_type": "image/jpeg",
+            "data": base64.standard_b64encode(data).decode()}})
+    return out
+
+
+def _header(brief: str | None, title: str, target_s: float) -> str:
+    what = brief or "(none -- find the stream's own best story)"
     return (
         f"STREAM TITLE: {title or '(none given)'}\n"
-        f"EDITOR'S BRIEF: {brief}\n"
+        f"EDITOR'S BRIEF: {what}\n"
         f"TARGET RUNTIME: {int(target_s)}s\n\n"
     )
 
 
 def outline(stream_map_text: str, brief: str, title: str, target_s: float,
             model: str = CLAUDE_MODEL, examples=None, trace=None,
-            backend: str = "cli") -> Outline:
+            backend: str = "cli", images=(), run_dir=None) -> Outline:
     """One Claude call: stream map + brief -> story outline (central idea + beats).
 
     `examples` is the deferred reference-video few-shot hook (prior edits' beat
@@ -468,7 +664,7 @@ def outline(stream_map_text: str, brief: str, title: str, target_s: float,
     caller falls back to the flat pipeline. The map block is cache-marked so the API
     path's retry-without-thinking guard (same prefix) reads it warm.
     """
-    system = _SYSTEM.format(n=_n_beats(target_s)) + _OUTLINE_INSTR
+    system = pick_system(brief).format(n=_n_beats(target_s)) + _OUTLINE_INSTR
     user_content = [{
         "type": "text",
         "text": (_header(brief, title, target_s)
@@ -477,20 +673,34 @@ def outline(stream_map_text: str, brief: str, title: str, target_s: float,
     }]
     if backend == "cli":
         try:
-            return _complete_cli(model, system, user_content, Outline,
-                                 tag="director", trace=trace)
+            cli_content = user_content
+            if images:
+                cli_content = user_content + [{
+                    "type": "text",
+                    "text": _vision_note(images, run_dir,
+                                         "sampled from the stream's loudest moments")}]
+            return _complete_cli(model, system, cli_content, Outline,
+                                 tag="director", trace=trace,
+                                 tools="Read" if images or run_dir else "",
+                                 cwd=run_dir)
         except (RuntimeError, OSError) as e:
             print(f"[director] claude CLI unavailable ({e}); using API key")
     import anthropic  # optional heavy dep; missing key raises -> caller falls back
 
     client = anthropic.Anthropic()             # reads ANTHROPIC_API_KEY
+    if images:
+        user_content = user_content + _image_blocks(images) + [{
+            "type": "text",
+            "text": ("The attached contact sheets show frames sampled from the "
+                     "stream's highest-signal windows, timestamp labels burned in -- "
+                     "use them to ground your beat choices in what was on screen.")}]
     return _complete(client, model, system, user_content, Outline,
                      tag="director", trace=trace)
 
 
 def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
            target_s: float, model: str = CLAUDE_MODEL, trace=None,
-           backend: str = "cli") -> Review:
+           backend: str = "cli", images=(), run_dir=None) -> Review:
     """Critic pass: read the realized rough cut + stream map, approve or return a revised
     Outline. One Claude call; same `backend` semantics as `outline()` (CLI-first, API
     fallthrough). Raises on no-backend-available / API error so the caller keeps the
@@ -501,7 +711,11 @@ def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
     the part that changes every round -- comes after, so an API-path review round 2 reads
     round 1's cached map at ~0.1x input price instead of re-paying a multi-hour stream.
     """
-    system = _REVIEW_SYSTEM.format(n=_n_beats(target_s)) + _REVIEW_INSTR
+    system = _REVIEW_SYSTEM.format(n=_n_beats(target_s)) + _MAP_LEGEND
+    if not brief:
+        system += ("\nNo editorial brief was given: judge the cut against its own "
+                   "central idea and the stream's strongest through-line.")
+    system += _REVIEW_INSTR
     user_content = [
         {
             "type": "text",
@@ -513,18 +727,35 @@ def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
         {
             "type": "text",
             "text": ("CURRENT ROUGH CUT (what the video says, in order):\n"
-                     f"{_realized_script(outline_log)}"),
+                     f"{_realized_script(outline_log, cut_times=bool(images))}"),
         },
     ]
+    if images:
+        system += ("\nContact sheets of the ACTUAL rendered cut are attached/listed "
+                   "(labels are CUT time, not stream time; the realized script maps "
+                   "beats to cut time). Also judge what's ON SCREEN: visual variety "
+                   "between beats, whether the footage supports each beat's claim, "
+                   "dead visuals (menus, loading screens, an AFK cam), and whether "
+                   "the very first tiles make a strong hook frame.")
     if backend == "cli":
         try:
-            return _complete_cli(model, system, user_content, Review,
-                                 tag="review", trace=trace)
+            cli_content = user_content
+            if images:
+                cli_content = user_content + [{
+                    "type": "text",
+                    "text": _vision_note(images, run_dir,
+                                         "the rendered rough cut, in order")}]
+            return _complete_cli(model, system, cli_content, Review,
+                                 tag="review", trace=trace,
+                                 tools="Read" if images or run_dir else "",
+                                 cwd=run_dir)
         except (RuntimeError, OSError) as e:
             print(f"[review] claude CLI unavailable ({e}); using API key")
     import anthropic  # optional heavy dep; missing key raises -> caller keeps current cut
 
     client = anthropic.Anthropic()
+    if images:
+        user_content = user_content + _image_blocks(images)
     return _complete(client, model, system, user_content, Review,
                      tag="review", trace=trace)
 
@@ -535,7 +766,7 @@ def outline_local(stream_map_text: str, brief: str, title: str, target_s: float,
     shorter streams since the whole map must fit the model's context. Same `Outline`.
     """
     import ollama  # already a project dep
-    system = _SYSTEM.format(n=_n_beats(target_s)) + _OUTLINE_INSTR
+    system = pick_system(brief).format(n=_n_beats(target_s)) + _OUTLINE_INSTR
     user = (_header(brief, title, target_s)
             + f"STREAM MAP (timestamp -> what was said):\n{stream_map_text}")
     resp = ollama.chat(
