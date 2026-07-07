@@ -12,5 +12,7 @@ assets/**/_cache/
 chat.json
 COPYRIGHT.txt
 THIRD-PARTY-LICENSES.txt
+.claude
 
 .env
+*.jpg
