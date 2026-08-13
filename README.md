@@ -25,7 +25,7 @@ refire is an automated video editor that analyzes twitch vods, structures a stor
 
 ### 4. compilation rendering
 - **ffmpeg local rendering**: concats clips and mixes music into a finished mp4 draft (`run/<vod_id>/rough.mp4`).
-- **after effects export**: writes a build manifest (`run/<vod_id>/ae/manifest.json`). the script `refire/ae/reFire.jsx` imports the manifest, builds the timeline with keyframed zoom steps, sections, caption styles, sfx tracks, and overlays.
+- **after effects export**: writes a build manifest (`run/<vod_id>/ae/manifest.json`). the reFire cep panel (`refire/ae/`) imports the manifest, builds the timeline with keyframed zoom steps, sections, caption styles, sfx tracks, and overlays — and can drive the whole pipeline above without leaving after effects.
 
 ---
 
@@ -83,31 +83,17 @@ refire make 1762930614 \
 - `--local-director`: runs the narrative planner on local ollama instead of claude.
 - `--review-rounds <n>`: maximum critic iterations (default `2`).
 - `--transcriber <local|deepgram>`: choose between local `faster-whisper` and cloud `deepgram`.
+- `--whisper-model <name>`: faster-whisper model (default `large-v3-turbo`; `large-v3` is slower for a marginal accuracy gain).
+- `--batch-size <n>`: transcription batch size (default `8`); raise it if you have the vram.
+- `--compute-type <type>`: `float16` (default) or `int8_float16` to free vram for a bigger batch.
 - `--no-motion-zoom`: disables dynamic reframing zooms.
+- `--no-emotes`: no emote/gif overlay punch-ins (drops their sfx too).
+- `--no-sfx`: emote punch-ins stay, but land silently.
+- `--no-cards`: no section title cards in the AE Master — the cut runs clip to clip.
+- `--no-deadspace`: keep each clip's internal silence instead of jump-cutting it out (on by default; `--silence-pad` sets the breath left around each phrase).
 - `--progress-file <path>`: logs execution progress to a json file.
 
----
-
-### utility commands
-run individual pipeline steps:
-
-#### 1. highlight detection
-scans video and chat logs to output `segments.json`.
-```bash
-refire detect stream.mp4 chat.json --run-dir run --top-n 30
-```
-
-#### 2. assemble clips locally
-renders selected segment clips into a single video compilation.
-```bash
-refire edit stream.mp4 --run-dir run --music music.mp3
-```
-
-#### 3. after effects manifest export
-compiles segment data into the manifest file.
-```bash
-refire ae stream.mp4 --run-dir run --words-per-line 3
-```
+every progress line carries elapsed minutes, so a run tells you which stage it spent them in.
 
 ---
 
@@ -127,13 +113,30 @@ output files are saved under `run/<vod_id>/`:
 
 ---
 
-## after effects script execution
+## after effects panel
 
-1. open after effects.
-2. run **file > scripts > run script file...** and pick `refire/ae/reFire.jsx`.
-3. select `manifest.json` from the vod output folder.
-4. click **build** to generate the timeline compositions.
-5. edit styles in the **caption style** comp layer and click **update** in the panel to apply changes across all segments.
+a cep panel (local html/js in an embedded chromium view, talking to extendscript)
+lives in `refire/ae/`. install it once:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File refire\ae\install.ps1
+```
+
+that junctions the folder into `%APPDATA%\Adobe\CEP\extensions\` and enables
+`PlayerDebugMode` so after effects will load the unsigned extension. restart ae,
+then **window > extensions > refire**.
+
+1. **01 source / 02 direction** — vod number, an optional brief, a target duration.
+   press **make**: the panel spawns `python -m refire make`, streams its progress
+   into the panel, and auto-loads the manifest it writes. **03 tuning** exposes the
+   rest of the cli (director backend, scout, transcriber, slack, zoom, rough cut).
+2. **04 build** — generates the timeline compositions and queues the master.
+3. edit the **caption style**, **zoom style** or **overlay style** layers, or the
+   **section card** comp, and click **update** to apply across all segments.
+
+already have a manifest? skip make and hit **load** in 04.
+
+panel misbehaving? with it open, browse to `http://localhost:8088` for devtools.
 
 ---
 

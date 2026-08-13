@@ -185,11 +185,12 @@ def pick_bgm(assets_dir, override=None):
     return random.choice(files) if files else None
 
 
-def pick_overlays(words, clips, assets_dir, model=DEFAULT_MODEL):
+def pick_overlays(words, clips, assets_dir, model=DEFAULT_MODEL, sfx: bool = True):
     """Per-clip overlay lists aligned with `clips` (empty = no overlay for that clip).
 
     Each overlay is {start (clip-relative s), duration, asset (abs posix), sfx (abs posix
     or None)}. Only the top ~1-per-30s clips that contain a keyword beat get one.
+    `sfx=False` places the emotes silently (no impact hits).
     """
     assets_dir = Path(assets_dir)
     emote_dirs = _emote_dirs(assets_dir)
@@ -197,7 +198,7 @@ def pick_overlays(words, clips, assets_dir, model=DEFAULT_MODEL):
     pool = [p for d in emote_dirs for p in _scan(d, _IMG_EXTS)]
     pool_names = {p.stem for p in pool}
     # impact SFX = everything under assets/sfx that isn't a music/background track
-    sfx_files = _scan(assets_dir / "sfx", _AUDIO_EXTS, exclude_hint=_BGM_HINT)
+    sfx_files = _scan(assets_dir / "sfx", _AUDIO_EXTS, exclude_hint=_BGM_HINT) if sfx else []
 
     cand = [_clip_keyword_moment(words, c["start"], c["end"]) for c in clips]
     total_s = sum(c["end"] - c["start"] for c in clips)

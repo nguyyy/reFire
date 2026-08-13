@@ -76,33 +76,19 @@ def test_excerpt_selects_stamped_range():
     assert ex == "[120s] line at 120.\n[180s] line at 180."
 
 
-def test_vision_note_relative_paths_and_read_cap(tmp_path):
-    imgs = [tmp_path / "sheets" / "window_100.jpg", tmp_path / "sheets" / "window_200.jpg"]
-    note = director._vision_note(imgs, tmp_path, "test sheets")
-    assert "- sheets/window_100.jpg" in note
-    assert f"up to {director.MAX_READS}" in note
+def test_read_note_points_at_chapter_files():
+    note = director._read_note()
     assert "map/chapter_NN.txt" in note
+    assert f"{director.MAX_READS} Reads" in note
 
 
-def test_image_blocks_base64_and_cap(tmp_path):
-    p = tmp_path / "a.jpg"
-    p.write_bytes(b"\xff\xd8fakejpg")
-    blocks = director._image_blocks([p] * 10, cap=3)
-    assert len(blocks) == 3
-    b = blocks[0]
-    assert b["type"] == "image" and b["source"]["media_type"] == "image/jpeg"
-    import base64
-    assert base64.standard_b64decode(b["source"]["data"]) == b"\xff\xd8fakejpg"
-
-
-def test_realized_script_cut_times():
+def test_realized_script_renders_beats_without_cut_times():
     log = {"central_idea": "x", "beats": [
         {"title": "A", "start": 100.0, "end": 130.0, "dur": 30.0, "text": "hi."},
         {"title": "B", "start": 400.0, "end": 407.0, "dur": 7.0, "text": "yo."}]}
-    s = director._realized_script(log, cut_times=True)
-    assert "in the cut: 00:00-00:30" in s
-    assert "in the cut: 00:30-00:37" in s
-    assert "in the cut" not in director._realized_script(log)
+    s = director._realized_script(log)
+    assert "A" in s and "hi." in s and "B" in s
+    assert "in the cut" not in s
 
 
 def test_digest_contains_guide_and_bounded_excerpts():

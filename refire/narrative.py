@@ -59,8 +59,8 @@ def _valid_bounds(s0, e0, stream_end: float) -> bool:
     return stream_end == 0.0 or s0 < stream_end
 
 
-def cast(outline, chunks: list[dict], words: list[dict], target_s: float,
-         model: str, tol: float = 0.25, progress=None):
+def cast(outline, chunks, words: list[dict], target_s: float,
+         model: str, tol: float = 0.35, progress=None):
     """Outline -> (sections, outline_log, warning).
 
     Primary path: the director chose explicit in/out timestamps per beat, so we just snap
@@ -71,10 +71,21 @@ def cast(outline, chunks: list[dict], words: list[dict], target_s: float,
     lowest-scored beats; under the tolerance band -> return a shortfall warning (never pad
     with filler). `sections` feeds `ae_export.build_manifest` unchanged; `outline_log` is
     the inspectable comprehension artifact written to run/outline.json.
+
+    `chunks` may be a list, or a zero-arg callable returning one -- only the fallback
+    branch below needs chunk embeddings, and computing them costs a full local embedding
+    pass over the VOD, so the caller can defer that until a beat actually needs it.
     """
     from .retrieve import embed, retrieve_with_vec
     from .score import score_chunk
     from .select import snap_to_sentences
+
+    resolved: list[list[dict]] = []       # 1-slot memo so we embed at most once per cast
+
+    def get_chunks() -> list[dict]:
+        if not resolved:
+            resolved.append(chunks() if callable(chunks) else chunks)
+        return resolved[0]
 
     stream_end = words[-1]["end"] if words else 0.0
 
@@ -143,7 +154,7 @@ def cast(outline, chunks: list[dict], words: list[dict], target_s: float,
             sc, reason = res["llm_score"], res.get("reason", "")
         else:
             # Fallback: no usable bounds -> retrieve footage for this beat by its query.
-            pool = [c for c in chunks if c["start"] not in used]
+            pool = [c for c in get_chunks() if c["start"] not in used]
             if not pool:
                 break
             qv = embed([beat.query])[0]

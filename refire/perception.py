@@ -1,11 +1,12 @@
-"""Fuse what the stream SAYS with how it FEELS and LOOKS into one moment map.
+"""Fuse what the stream SAYS with how it FEELS into one moment map.
 
-The v1 director read a bare transcript. A human editor also hears the room get loud,
-sees chat explode, and watches the screen. This module fuses those channels -- transcript
-sentences, chat-rate z-score (chat.py), audio-loudness z-score (RMS over the run's wav),
-and optional local-VLM scene captions (vlm.py) -- into the "moment map v2" text the
-director reads, plus `top_windows` (the highest-signal spans, used to pick which footage
-gets contact-sheeted for Claude's eyes).
+The v1 director read a bare transcript. A human editor also hears the room get loud.
+This module fuses those channels -- transcript sentences + audio-loudness z-score (RMS
+over the run's wav) -- into the "moment map v2" text the director reads, plus
+`top_windows` (the highest-loudness spans). Chat-rate signal and image/VLM scene
+captioning were both dropped from the director's inputs (loudness only); `moment_map`
+still accepts a `captions` dict and will interleave `[scene: ...]` lines if given one,
+but nothing populates it now.
 
 Everything here is pure fusion over precomputed signals: no models, no ffmpeg, so it's
 unit-testable. Empty/missing signals degrade the map to exactly the v1 transcript map.
@@ -18,8 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-# z-score thresholds for the (chat!)/(chat!!) and (loud)/(LOUD) line marks
-CHAT_HI = (1.5, 3.0)
+# z-score thresholds for the (loud)/(LOUD) line marks
 LOUD_HI = (1.5, 3.0)
 
 
@@ -94,14 +94,9 @@ class _ZLookup:
         return max(self.z[lo:hi], default=0.0)
 
 
-def _marks(chat: _ZLookup, loud: _ZLookup, a: float, b: float) -> str:
+def _marks(loud: _ZLookup, a: float, b: float) -> str:
     """The line-prefix marks for a sentence spanning [a, b]. '' when nothing spikes."""
     out = ""
-    cz = chat.max_in(a, b)
-    if cz >= CHAT_HI[1]:
-        out += "(chat!!)"
-    elif cz >= CHAT_HI[0]:
-        out += "(chat!)"
     lz = loud.max_in(a, b)
     if lz >= LOUD_HI[1]:
         out += "(LOUD)"
@@ -112,17 +107,15 @@ def _marks(chat: _ZLookup, loud: _ZLookup, a: float, b: float) -> str:
 
 def moment_map(
     words: list[dict],
-    chat_z: list[tuple[float, float]] | None = None,
     audio_z: list[tuple[float, float]] | None = None,
     captions: dict[float, str] | None = None,
 ) -> str:
-    """The moment map v2: the v1 transcript map enriched with signal marks + scene lines.
+    """The moment map v2: the v1 transcript map enriched with loudness marks + scene lines.
 
-    Lines look like `[546s] (chat!!)(LOUD) NO WAY dude`; VLM scene captions interleave in
-    time order as their own `[550s] [scene: player dies to boss]` lines. With no signals
-    and no captions this returns exactly `director.stream_map(words)`.
+    Lines look like `[546s] (LOUD) NO WAY dude`; VLM scene captions interleave in time
+    order as their own `[550s] [scene: player dies to boss]` lines. With no signal and no
+    captions this returns exactly `director.stream_map(words)`.
     """
-    chat = _ZLookup(chat_z)
     loud = _ZLookup(audio_z)
     scenes = sorted((captions or {}).items())   # [(t, caption)]
     si = 0
@@ -132,7 +125,7 @@ def moment_map(
             t, cap = scenes[si]
             lines.append(f"[{int(t)}s] [scene: {cap}]")
             si += 1
-        m = _marks(chat, loud, a, b)
+        m = _marks(loud, a, b)
         lines.append(f"[{a}s] {m + ' ' if m else ''}{text}")
     for t, cap in scenes[si:]:
         lines.append(f"[{int(t)}s] [scene: {cap}]")
@@ -140,20 +133,18 @@ def moment_map(
 
 
 def top_windows(
-    chat_z: list[tuple[float, float]] | None,
     audio_z: list[tuple[float, float]] | None,
     k: int = 8,
     span_s: float = 120.0,
 ) -> list[tuple[float, float]]:
-    """The k highest-combined-signal non-overlapping (t0, t1) windows, sorted by t0.
+    """The k highest-loudness non-overlapping (t0, t1) windows, sorted by t0.
 
-    Combined per-bucket signal = max(0, chat_z) + max(0, audio_z); each window scores the
-    sum over `span_s`. Greedy pick keeps windows disjoint. Empty signals -> [].
+    Per-bucket signal = max(0, audio_z); each window scores the sum over `span_s`. Greedy
+    pick keeps windows disjoint. Empty signal -> [].
     """
     sig: dict[float, float] = {}
-    for series in (chat_z, audio_z):
-        for t, z in series or []:
-            sig[t] = sig.get(t, 0.0) + max(0.0, z)
+    for t, z in audio_z or []:
+        sig[t] = sig.get(t, 0.0) + max(0.0, z)
     if not sig:
         return []
     ts = sorted(sig)
@@ -239,23 +230,22 @@ def digest(chapters, map_text: str, windows: list[tuple[float, float]] | None = 
     return "\n".join(parts)
 
 
-def save_signals(path: str | Path, chat_z, audio_z) -> None:
-    """Cache both bucket series to run/<vod>/signals.json (cheap to recompute, but the
-    file doubles as an inspectable artifact -- 'did the pipeline hear that scream?')."""
+def save_signals(path: str | Path, audio_z) -> None:
+    """Cache the loudness bucket series to run/<vod>/signals.json (cheap to recompute, but
+    the file doubles as an inspectable artifact -- 'did the pipeline hear that scream?')."""
     import json
     Path(path).write_text(
-        json.dumps({"chat": chat_z or [], "audio": audio_z or []}), encoding="utf-8")
+        json.dumps({"audio": audio_z or []}), encoding="utf-8")
 
 
 def load_signals(path: str | Path):
-    """-> (chat_z, audio_z) from `save_signals`, or (None, None) if absent/corrupt."""
+    """-> audio_z from `save_signals`, or None if absent/corrupt."""
     import json
     p = Path(path)
     if not p.exists():
-        return None, None
+        return None
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
-        return ([tuple(x) for x in d.get("chat", [])],
-                [tuple(x) for x in d.get("audio", [])])
+        return [tuple(x) for x in d.get("audio", [])]
     except (ValueError, TypeError):
-        return None, None
+        return None

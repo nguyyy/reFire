@@ -183,19 +183,21 @@ _SYSTEM = (
     "wastes the whole story. Make each beat follow from the one "
     "before via its transition_in, and never repeat the same kind of moment twice. "
     "Only include beats the footage can actually support. "
-    "Aim for about {n} beats whose in/out spans TOTAL roughly the target runtime -- keep "
-    "each beat tight so the whole cut lands near target without a later pass having to drop "
-    "story beats to fit."
+    "TARGET RUNTIME IS A ROUGH GUIDE, NOT A HARD LIMIT: aim for about {n} beats whose "
+    "in/out spans TOTAL somewhere in the neighborhood of the target, but let the story's "
+    "own shape decide the real length. Never stretch a beat with slow, padded, or repeated "
+    "footage just to fill time, and never gut a beat's setup or cut off its payoff just to "
+    "shave seconds -- a complete, well-paced story that lands moderately over or under "
+    "target beats a mangled one that hits the number exactly."
 )
 
 
 _MAP_LEGEND = (
     "\nThe map may carry extra perception signals -- use them as an editor uses their "
-    "eyes and ears, as evidence of where the real moments are: `(chat!)`/`(chat!!)` = "
-    "the live chat spiked (mild/huge), `(loud)`/`(LOUD)` = the streamer's audio spiked "
-    "(raised voice / outright yelling), and standalone `[scene: ...]` lines are "
-    "APPROXIMATE machine descriptions of what was on screen at that moment -- treat "
-    "them as weak hints of the visual context, never as exact facts."
+    "eyes and ears, as evidence of where the real moments are: `(loud)`/`(LOUD)` = the "
+    "streamer's audio spiked (raised voice / outright yelling), and standalone "
+    "`[scene: ...]` lines are APPROXIMATE machine descriptions of what was on screen at "
+    "that moment -- treat them as weak hints of the visual context, never as exact facts."
 )
 
 
@@ -251,8 +253,10 @@ _REVIEW_SYSTEM = (
     "notes. Otherwise set approved=false, name the main problems in notes, and return a "
     "REVISED outline: reorder, drop, merge, or ADD connective beats, re-tag roles, and "
     "retighten each beat's in/out (start_s/end_s from the stream map, ending right after "
-    "the payoff + reaction lands). Only include beats the footage supports. Keep it near "
-    "the target runtime (about {n} beats)."
+    "the payoff + reaction lands). Only include beats the footage supports. The target "
+    "runtime (about {n} beats) is a rough guide, not a hard limit -- only add/drop/trim "
+    "beats for the STORY reasons above; don't chase the exact number by padding a thin cut "
+    "or gutting a beat's setup/payoff to shave seconds."
 )
 
 
@@ -273,7 +277,7 @@ def stream_map(words: list[dict]) -> str:
 _SCOUT_SYSTEM = (
     "You are logging a Twitch gaming stream for a video editor. You are given one window "
     "of a time-stamped map of the stream (each line starts with `[Ns]` = seconds into the "
-    "stream; `(chat!)`/`(LOUD)` marks and `[scene: ...]` lines are perception signals). "
+    "stream; `(loud)`/`(LOUD)` marks and `[scene: ...]` lines are perception signals). "
     "Reply ONLY with a single JSON object (no markdown, no prose) of this shape: "
     '{"title": "<3-6 word chapter title>", "summary": "<2-4 sentences: what happens, '
     'what the streamer is trying to do, how it goes>", "notable_moments": '
@@ -360,11 +364,7 @@ def chapterize(map_text: str, window_s: float = 1200.0, model: str = "llama3.1:8
     return chapters
 
 
-def _fmt_mmss(t: float) -> str:
-    return f"{int(t) // 60:02d}:{int(t) % 60:02d}"
-
-
-def _realized_script(outline_log: dict, cut_times: bool = False) -> str:
+def _realized_script(outline_log: dict) -> str:
     """Render the CAST cut as the script the critic reads: central idea + story shape +
     each beat in order with its editorial intent (role/intent/viewer_question/transition)
     AND the ACTUAL transcript of the chosen span.
@@ -379,7 +379,6 @@ def _realized_script(outline_log: dict, cut_times: bool = False) -> str:
     if outline_log.get("viewer_promise"):
         lines.append(f"VIEWER PROMISE: {outline_log['viewer_promise']}")
     lines.append("")
-    t_cut = 0.0   # running CUT-timeline position, so the critic can match sheets to beats
     for i, b in enumerate(outline_log.get("beats", []), 1):
         a, z = b.get("start"), b.get("end")
         segs = b.get("segments") or []
@@ -395,11 +394,6 @@ def _realized_script(outline_log: dict, cut_times: bool = False) -> str:
             lines.append(f"   transition_in: {b['transition_in']}")
         if b.get("viewer_question"):
             lines.append(f"   leaves viewer wondering: {b['viewer_question']}")
-        if cut_times:
-            d = float(b.get("dur") or (z - a if a is not None and z is not None else 0))
-            lines.append(f"   in the cut: {_fmt_mmss(t_cut)}-{_fmt_mmss(t_cut + d)} "
-                         "(match this against the sheet tile labels)")
-            t_cut += d
         lines.append(f"   {ts} {str(b.get('text', '')).strip()}")
         lines.append("")
     dropped = outline_log.get("dropped") or []
@@ -541,12 +535,21 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
         print(f"[{tag}] full prompt -> {trace}\\{stamp}-{tag}-request.txt")
 
     env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
-    # tools="" = pure completion (default). tools="Read" = vision/drill-down mode: the
-    # model may Read contact sheets + per-chapter map files, relative to cwd (the run
-    # dir); --allowedTools pre-permits them so headless mode never hangs on a prompt
+    # The system prompt goes through a temp FILE (--system-prompt-file), never --system-prompt:
+    # a multi-line value in argv gets split on the newline by Windows command-line parsing,
+    # which silently corrupts every flag after it -- stream-json is dropped and the CLI
+    # answers in plain text, so our JSON parser sees nothing (0 chars, stop_reason=None).
+    # ponytail: temp file leaks only if the call crashes before the unlink below; the OS
+    # temp dir mops that up.
+    sp = tempfile.NamedTemporaryFile("w", suffix=".txt", encoding="utf-8", delete=False)
+    sp.write(system)
+    sp.close()
+    # tools="" = pure completion (default). tools="Read" = drill-down mode: the model may
+    # Read per-chapter map files, relative to cwd (the run dir); --allowedTools pre-permits
+    # them so headless mode never hangs on a prompt
     # (verified live: -p --tools Read --allowedTools Read reads relative paths fine).
     cmd = [exe, "-p", "--model", model, "--tools", tools, "--setting-sources", "",
-           "--system-prompt", system, "--output-format", "stream-json",
+           "--system-prompt-file", sp.name, "--output-format", "stream-json",
            "--include-partial-messages", "--verbose"]
     if tools:
         cmd += ["--allowedTools", tools]
@@ -591,6 +594,7 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
             is_err = bool(ev.get("is_error"))
     proc.wait()
     killer.cancel()
+    os.unlink(sp.name)
     if phase:
         print(flush=True)
     print(f"[{tag}] <- stop_reason={stop}, {len(text):,} chars")
@@ -609,38 +613,13 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
 MAX_READS = 3   # each Read turn reprocesses the whole context -- the hidden cost cap
 
 
-def _vision_note(images, run_dir, what: str) -> str:
-    """The CLI-backend vision paragraph: which sheet files exist and how to use them."""
-    from pathlib import Path
-    rels = []
-    for p in images:
-        p = Path(p)
-        try:
-            rels.append(p.relative_to(run_dir).as_posix() if run_dir else str(p))
-        except ValueError:
-            rels.append(str(p))
+def _read_note() -> str:
+    """The CLI-backend drill-down paragraph: the model may Read full-res chapter files."""
     return (
-        f"\n\nCONTACT SHEETS ({what}; each tile is labeled with its timestamp):\n"
-        + "\n".join(f"- {r}" for r in rels)
-        + f"\nUse the Read tool to LOOK at up to {MAX_READS} of these image files "
-          "before finalizing -- they show what was actually on screen. Also available: "
-          "map/chapter_NN.txt hold the FULL-resolution transcript per chapter; Read one "
-          "before anchoring beats inside it if the excerpts above are too coarse. "
-          f"Do not exceed {MAX_READS} Reads total."
+        "\n\nAlso available via the Read tool: map/chapter_NN.txt hold the "
+        "FULL-resolution transcript per chapter. Read one before anchoring beats inside "
+        f"it if the excerpts above are too coarse. Do not exceed {MAX_READS} Reads total."
     )
-
-
-def _image_blocks(images, cap: int = 8) -> list[dict]:
-    """API-path image content blocks (base64 jpg), capped."""
-    import base64
-    from pathlib import Path
-    out = []
-    for p in list(images)[:cap]:
-        data = Path(p).read_bytes()
-        out.append({"type": "image", "source": {
-            "type": "base64", "media_type": "image/jpeg",
-            "data": base64.standard_b64encode(data).decode()}})
-    return out
 
 
 def _header(brief: str | None, title: str, target_s: float) -> str:
@@ -648,13 +627,13 @@ def _header(brief: str | None, title: str, target_s: float) -> str:
     return (
         f"STREAM TITLE: {title or '(none given)'}\n"
         f"EDITOR'S BRIEF: {what}\n"
-        f"TARGET RUNTIME: {int(target_s)}s\n\n"
+        f"TARGET RUNTIME: ~{int(target_s)}s (rough guide, not a hard limit)\n\n"
     )
 
 
 def outline(stream_map_text: str, brief: str, title: str, target_s: float,
             model: str = CLAUDE_MODEL, examples=None, trace=None,
-            backend: str = "cli", images=(), run_dir=None) -> Outline:
+            backend: str = "cli", run_dir=None) -> Outline:
     """One Claude call: stream map + brief -> story outline (central idea + beats).
 
     `examples` is the deferred reference-video few-shot hook (prior edits' beat
@@ -674,33 +653,24 @@ def outline(stream_map_text: str, brief: str, title: str, target_s: float,
     if backend == "cli":
         try:
             cli_content = user_content
-            if images:
-                cli_content = user_content + [{
-                    "type": "text",
-                    "text": _vision_note(images, run_dir,
-                                         "sampled from the stream's loudest moments")}]
+            if run_dir:
+                cli_content = user_content + [{"type": "text", "text": _read_note()}]
             return _complete_cli(model, system, cli_content, Outline,
                                  tag="director", trace=trace,
-                                 tools="Read" if images or run_dir else "",
+                                 tools="Read" if run_dir else "",
                                  cwd=run_dir)
         except (RuntimeError, OSError) as e:
             print(f"[director] claude CLI unavailable ({e}); using API key")
     import anthropic  # optional heavy dep; missing key raises -> caller falls back
 
     client = anthropic.Anthropic()             # reads ANTHROPIC_API_KEY
-    if images:
-        user_content = user_content + _image_blocks(images) + [{
-            "type": "text",
-            "text": ("The attached contact sheets show frames sampled from the "
-                     "stream's highest-signal windows, timestamp labels burned in -- "
-                     "use them to ground your beat choices in what was on screen.")}]
     return _complete(client, model, system, user_content, Outline,
                      tag="director", trace=trace)
 
 
 def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
            target_s: float, model: str = CLAUDE_MODEL, trace=None,
-           backend: str = "cli", images=(), run_dir=None) -> Review:
+           backend: str = "cli", run_dir=None) -> Review:
     """Critic pass: read the realized rough cut + stream map, approve or return a revised
     Outline. One Claude call; same `backend` semantics as `outline()` (CLI-first, API
     fallthrough). Raises on no-backend-available / API error so the caller keeps the
@@ -727,35 +697,23 @@ def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
         {
             "type": "text",
             "text": ("CURRENT ROUGH CUT (what the video says, in order):\n"
-                     f"{_realized_script(outline_log, cut_times=bool(images))}"),
+                     f"{_realized_script(outline_log)}"),
         },
     ]
-    if images:
-        system += ("\nContact sheets of the ACTUAL rendered cut are attached/listed "
-                   "(labels are CUT time, not stream time; the realized script maps "
-                   "beats to cut time). Also judge what's ON SCREEN: visual variety "
-                   "between beats, whether the footage supports each beat's claim, "
-                   "dead visuals (menus, loading screens, an AFK cam), and whether "
-                   "the very first tiles make a strong hook frame.")
     if backend == "cli":
         try:
             cli_content = user_content
-            if images:
-                cli_content = user_content + [{
-                    "type": "text",
-                    "text": _vision_note(images, run_dir,
-                                         "the rendered rough cut, in order")}]
+            if run_dir:
+                cli_content = user_content + [{"type": "text", "text": _read_note()}]
             return _complete_cli(model, system, cli_content, Review,
                                  tag="review", trace=trace,
-                                 tools="Read" if images or run_dir else "",
+                                 tools="Read" if run_dir else "",
                                  cwd=run_dir)
         except (RuntimeError, OSError) as e:
             print(f"[review] claude CLI unavailable ({e}); using API key")
     import anthropic  # optional heavy dep; missing key raises -> caller keeps current cut
 
     client = anthropic.Anthropic()
-    if images:
-        user_content = user_content + _image_blocks(images)
     return _complete(client, model, system, user_content, Review,
                      tag="review", trace=trace)
 

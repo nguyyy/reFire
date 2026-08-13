@@ -1,24 +1,22 @@
-// reFire — After Effects caption panel (ExtendScript, ES3).
+// reFire â€” After Effects automation (ExtendScript, ES3).
 //
-// Launch as a dockable panel (drop in AE's "ScriptUI Panels" folder, then
-// Window > reFire) or as a floating palette (File > Scripts > Run Script File...).
+// This file is the AE half of the reFire CEP panel; the UI lives next door in
+// index.html and calls in here via evalScript. Install the panel with
+// `refire/ae/install.ps1`, then Window > Extensions > reFire.
 //
-//   Make (one click)    the hands-off flow: pick an Output folder, type a VOD #,
-//                        a free-text Brief (what video you want), and a target
-//                        Duration (e.g. 20m). Shells `python -m refire make` ->
-//                        downloads the VOD, transcribes/embeds (cached), retrieves
-//                        + LLM-scores clips against the brief, packs them to the
-//                        duration budget chronologically, writes the manifest, and
-//                        auto-loads it. Tuning row: zoom amount / words-per-line /
-//                        duration tolerance. Needs python + ollama on PATH. Then Build.
-//   Load manifest...    (alt) point Build at an existing run/ae/manifest.json
-//                        instead of running Make.
-//   Build               import footage + build one comp per clip (footage trim,
-//                        bottom-left zoom keyframes, captions) + a Master comp.
-//   Update              re-apply captions + footage zoom on the already-built
-//                        comps from the current templates and manifest, without
-//                        re-importing footage. Use after tweaking either template
-//                        or re-exporting the manifest; a new source needs Build.
+// API (everything else in here is private):
+//   reFire.build(manifestPath)    import footage + build one comp per clip (footage
+//                                 trim, bottom-left zoom keyframes, captions, emote
+//                                 overlays + sfx) + a Master comp, queued to render.
+//   reFire.shift(manifestPath, s) slide ONLY the captions by s seconds (+ = later,
+//                                 - = earlier). Fast enough to nudge live when the
+//                                 transcript's word timings read off.
+//   reFire.update(manifestPath)   re-apply captions, zoom, overlays and section cards
+//                                 on the already-built comps from the current
+//                                 templates and manifest, without re-importing
+//                                 footage. Use after tweaking a template or
+//                                 re-exporting the manifest; new source needs build.
+// Both return a human-readable status string, which the panel shows and logs.
 //
 // STYLE + ANIMATION: every caption is a clone of the text layer named
 // "Caption Style" in the "Caption Template" comp. Restyle AND animate that ONE
@@ -26,6 +24,10 @@
 // Update -- the look and the motion propagate to every caption. The template
 // animation is stretched to fit each caption (first keyframe -> first word, last
 // keyframe -> last word), plus a short fade-out at the last word.
+//
+// Each clip's captions are precomposed into a nested comp named "cc", so the whole
+// caption track is one layer: drag it in the timeline (or use the panel's offset /
+// reFire.shift) to slide every caption in that clip against the audio.
 //
 // ZOOM: the punch SHAPE comes from the "Zoom Style" null's Scale in the "Zoom
 // Template" comp (default 100 -> 190 -> 200 -> 100); WHERE it fires comes from each
@@ -42,14 +44,13 @@
 // title text) is copied onto each card, with the title set on "Section Style".
 // Restyle or add layers there, then Build or Update and they propagate to all cards.
 
-(function (thisObj) {
-    var manifestPath = null;   // remembered for the panel's lifetime
+var reFire = (function () {
     var CARD_S = 1.5;          // section title-card duration (seconds)
     var XFADE_S = 0.25;        // crossfade between master layers (seconds)
 
     // --- manifest ----------------------------------------------------------
 
-    function readManifest() {
+    function readManifest(manifestPath) {
         if (!manifestPath) { return null; }
         var f = new File(manifestPath);
         if (!f.exists) { return null; }
@@ -68,6 +69,18 @@
             if (it instanceof CompItem && it.name === name) { return it; }
         }
         return null;
+    }
+
+    function templateLayer(comp, name) {
+        // The named style layer, else the topmost one. NULL if the comp is empty --
+        // AE throws "unable to call 'layer' ... the range has no elements" on
+        // comp.layer(1) with zero layers, so every caller must re-stamp its default
+        // instead of assuming a comp it found is still populated.
+        if (!comp || comp.numLayers === 0) { return null; }
+        for (var i = 1; i <= comp.numLayers; i++) {
+            if (comp.layer(i).name === name) { return comp.layer(i); }
+        }
+        return comp.layer(1);
     }
 
     function findFootage(path) {
@@ -93,14 +106,13 @@
 
     function ensureTemplate(M) {
         var comp = findComp("Caption Template");
-        if (comp) {
-            for (var i = 1; i <= comp.numLayers; i++) {
-                if (comp.layer(i).name === "Caption Style") { return comp.layer(i); }
-            }
-            return comp.layer(1);
+        var found = templateLayer(comp, "Caption Style");
+        if (found) { return found; }
+        // no comp yet, or its contents were deleted -> stamp a sane static default
+        // back in (into the existing comp if there is one) for the user to restyle.
+        if (!comp) {
+            comp = app.project.items.addComp("Caption Template", M.out_w, M.out_h, 1, 5, M.fps);
         }
-        // first run: a sane static default the user then restyles + animates
-        comp = app.project.items.addComp("Caption Template", M.out_w, M.out_h, 1, 5, M.fps);
         var t = comp.layers.addText("Caption Style");
         t.name = "Caption Style";
         var sp = t.property("Source Text");
@@ -122,15 +134,11 @@
     function ensureZoomTemplate(M) {
         // returns the Scale property whose keyframes define the punch shape (%).
         var comp = findComp("Zoom Template");
-        if (comp) {
-            var layer = null;
-            for (var i = 1; i <= comp.numLayers; i++) {
-                if (comp.layer(i).name === "Zoom Style") { layer = comp.layer(i); break; }
-            }
-            if (!layer) { layer = comp.layer(1); }
-            return layer.property("Transform").property("Scale");
+        var found = templateLayer(comp, "Zoom Style");
+        if (found) { return found.property("Transform").property("Scale"); }
+        if (!comp) {
+            comp = app.project.items.addComp("Zoom Template", M.out_w, M.out_h, 1, 3, M.fps);
         }
-        comp = app.project.items.addComp("Zoom Template", M.out_w, M.out_h, 1, 3, M.fps);
         var nul = comp.layers.addNull();
         nul.name = "Zoom Style";
         var sc = nul.property("Transform").property("Scale");
@@ -148,8 +156,11 @@
         // onto each title card, and the "Section Style" text layer receives the title.
         // Restyle it / add layers (backgrounds, logos, accents) and they propagate.
         var comp = findComp("Section Card");
-        if (comp) { return comp; }
-        comp = app.project.items.addComp("Section Card", M.out_w, M.out_h, 1, CARD_S, M.fps);
+        if (comp && comp.numLayers > 0) { return comp; }
+        // an emptied card comp would clone nothing onto every title card -> re-stamp
+        if (!comp) {
+            comp = app.project.items.addComp("Section Card", M.out_w, M.out_h, 1, CARD_S, M.fps);
+        }
         // styled default: dark full-frame backdrop + an accent bar behind the title
         comp.layers.addSolid([0.04, 0.04, 0.05], "Section BG", M.out_w, M.out_h, 1, CARD_S);
         var bar = comp.layers.addSolid([0.16, 0.55, 0.95], "Section Accent",
@@ -249,8 +260,16 @@
         op.setTemporalEaseAtKey(n, [ease], [ease]);
     }
 
+    var FOOT_NAME = "reFire footage";
+
     function footageLayer(comp) {
+        // Name first: past the 3h mark the footage layer's source is a shim COMP, not a
+        // FootageItem, and an overlay emote (a FootageItem, stacked on top) would win the
+        // structural check below. That check stays for comps built before the rename.
         for (var i = 1; i <= comp.numLayers; i++) {
+            if (comp.layer(i).name === FOOT_NAME) { return comp.layer(i); }
+        }
+        for (i = 1; i <= comp.numLayers; i++) {
             var L = comp.layer(i);
             if ((L instanceof AVLayer) && !(L instanceof TextLayer) &&
                 L.source instanceof FootageItem) { return L; }
@@ -312,19 +331,75 @@
         }
     }
 
-    function buildCaption(comp, tmpl, cap) {
+    // `off` shifts every caption in time (seconds, +late/-early) to correct word
+    // timestamps that read a touch ahead of or behind the audio. It is ABSOLUTE, not
+    // cumulative: captions are always re-stamped from the manifest, so nudging back
+    // and forth never drifts.
+    function buildCaption(comp, tmpl, cap, off) {
+        off = Number(off) || 0;
+        var inP = Math.max(0, cap.start + off);
+        // linger ~10 frames past the last word so quick dialogue stays readable
+        // and overlaps the next caption; the intro keeps its original timing.
+        var outP = Math.min(comp.duration, cap.end + off + 10 / comp.frameRate);
+        if (outP <= inP) { return; }           // shifted clean off this clip
         tmpl.copyToComp(comp);                 // full clone, pastes as layer(1)
         var L = comp.layer(1);
         var sp = L.property("Source Text");
         var d = sp.value;
         d.text = cap.text;
         sp.setValue(d);                        // keep template char style
-        L.inPoint = Math.max(0, cap.start);
-        // linger ~10 frames past the last word so quick dialogue stays readable
-        // and overlaps the next caption; the intro keeps its original timing.
-        L.outPoint = Math.min(comp.duration, cap.end + 10 / comp.frameRate);
+        L.inPoint = inP;
+        L.outPoint = outP;
         stretchKeys(L, L.inPoint, L.outPoint);  // first kf -> start, last kf -> out
         fadeOut(L, L.outPoint);
+    }
+
+    var CC_NAME = "cc";
+
+    // Every clip's captions get precomposed into their own comp named "cc". The text
+    // is stamped at the manifest times inside it, so the offset is just the "cc"
+    // layer's startTime -- one layer to slide instead of a full re-stamp, and the
+    // caption track stays draggable by hand in the timeline.
+    function buildCaptions(M, comp, tmpl, caps, capOff, folder) {
+        if (!caps || !caps.length) { return; }
+        var cc = app.project.items.addComp(CC_NAME, M.out_w, M.out_h, 1,
+                                           comp.duration, M.fps);
+        if (folder) { cc.parentFolder = folder; }
+        for (var ci = 0; ci < caps.length; ci++) { buildCaption(cc, tmpl, caps[ci], 0); }
+        var L = comp.layers.add(cc);
+        L.name = CC_NAME;
+        shiftCaptions(L, capOff);
+    }
+
+    // `off` is ABSOLUTE (seconds, +late/-early): it is the layer's startTime, so
+    // nudging back and forth never drifts. In/out clamp to the clip -- captions
+    // pushed off either end are simply not shown.
+    function shiftCaptions(L, off) {
+        off = Number(off) || 0;
+        var dur = L.containingComp.duration;
+        var inP = Math.max(0, off), outP = Math.min(dur, off + L.source.duration);
+        if (outP <= inP) { L.enabled = false; return; }   // shifted clean off the clip
+        L.enabled = true;
+        L.startTime = off;
+        L.inPoint = inP;
+        L.outPoint = outP;
+    }
+
+    function captionLayer(comp) {
+        for (var i = 1; i <= comp.numLayers; i++) {
+            if (comp.layer(i).name === CC_NAME) { return comp.layer(i); }
+        }
+        return null;
+    }
+
+    function dropCaptions(comp) {
+        // takes the nested comp with it, else the project fills with orphan "cc"s.
+        // The TextLayer sweep clears captions from comps built before precomping.
+        for (var i = comp.numLayers; i >= 1; i--) {
+            var L = comp.layer(i);
+            if (L.name === CC_NAME) { var src = L.source; L.remove(); if (src) { src.remove(); } }
+            else if (L instanceof TextLayer) { L.remove(); }
+        }
     }
 
     // --- overlays: emote punch-in + impact SFX on funny moments ------------
@@ -334,13 +409,11 @@
         // emote image is swapped onto a clone of it per overlay, keeping the animation.
         // Restyle/move/re-time THIS one layer and Update to re-punch every overlay.
         var comp = findComp("Overlay Template");
-        if (comp) {
-            for (var i = 1; i <= comp.numLayers; i++) {
-                if (comp.layer(i).name === "Overlay Style") { return comp.layer(i); }
-            }
-            return comp.layer(1);
+        var found = templateLayer(comp, "Overlay Style");
+        if (found) { return found; }
+        if (!comp) {
+            comp = app.project.items.addComp("Overlay Template", M.out_w, M.out_h, 1, 3.0, M.fps);
         }
-        comp = app.project.items.addComp("Overlay Template", M.out_w, M.out_h, 1, 3.0, M.fps);
         var sol = comp.layers.addSolid([0.95, 0.85, 0.20], "Overlay Style", 200, 200, 1);
         sol.name = "Overlay Style";
         var tr = sol.property("Transform");
@@ -368,13 +441,51 @@
         L.outPoint = Math.min(comp.duration, natural);
     }
 
+    var XFER = ["Anchor Point", "Position", "Scale", "Rotation", "Opacity"];
+
+    function copyTransform(from, to) {
+        // Carry the template's Transform animation onto another layer. Used when the
+        // template has no source to replace (see buildOverlay).
+        var f = from.property("Transform"), t = to.property("Transform"), i, k;
+        for (i = 0; i < XFER.length; i++) {
+            var src = f.property(XFER[i]), dst = t.property(XFER[i]);
+            if (!src || !dst) { continue; }
+            for (k = dst.numKeys; k >= 1; k--) { dst.removeKey(k); }
+            if (src.numKeys === 0) { try { dst.setValue(src.value); } catch (e) {} continue; }
+            var times = [], vals = [];
+            for (k = 1; k <= src.numKeys; k++) { times.push(src.keyTime(k)); vals.push(src.keyValue(k)); }
+            if (times.length === 1) { dst.setValueAtTime(times[0], vals[0]); }
+            else { dst.setValuesAtTimes(times, vals); }
+            for (k = 1; k <= src.numKeys; k++) {   // keep the authored feel (see remapProp)
+                try { dst.setTemporalEaseAtKey(k, src.keyInTemporalEase(k), src.keyOutTemporalEase(k)); } catch (e) {}
+                try { dst.setInterpolationTypeAtKey(k, src.keyInInterpolationType(k),
+                                                       src.keyOutInterpolationType(k)); } catch (e) {}
+            }
+        }
+    }
+
+    function hasSource(L) {
+        // shape/text/null/adjustment layers (and cameras/lights) have no replaceable
+        // source; AE throws "layer does not have a source" on the property itself.
+        try { return !!L.source; } catch (e) { return false; }
+    }
+
     function buildOverlay(comp, tmpl, ov, folder) {
         if (!ov || !ov.asset) { return; }
         var emote = importSource(ov.asset);      // png/gif punch-in image
         if (folder) { emote.parentFolder = folder; }
         tmpl.copyToComp(comp);                   // clone the animated placeholder -> layer(1)
-        var L = comp.layer(1);
-        L.replaceSource(emote, false);           // swap the emote in, keep the keyframes
+        var clone = comp.layer(1), L;
+        if (hasSource(clone)) {
+            clone.replaceSource(emote, false);   // swap the emote in, keep the keyframes
+            L = clone;
+        } else {
+            // The "Overlay Style" template is a shape/text/null layer -- nothing to
+            // replace. Add the emote and move the template's animation onto it.
+            L = comp.layers.add(emote);
+            copyTransform(clone, L);
+            clone.remove();
+        }
         L.name = "reFire overlay";
         // re-center the anchor on the emote (the placeholder solid was a different size)
         L.property("Transform").property("Anchor Point").setValue([emote.width / 2, emote.height / 2]);
@@ -402,16 +513,73 @@
 
     // --- build -------------------------------------------------------------
 
-    function buildClip(M, clip, src, tmpl, zoomScale, idx, folder, overlayTmpl, ovFolder) {
-        var dur = clip.end - clip.start;
+    // AE clamps EVERY time value -- a layer's startTime, a comp's duration, a Time Remap
+    // value -- to +/-10800s (3h), so a layer cannot reach past the 3-hour mark of a source
+    // at all. `ae_export.split_source` therefore ships a 6h+ VOD as 2.5h parts and tags
+    // each clip with the part holding it; `sources[i].offset` is that part's source time.
+    // Clip times stay ABSOLUTE in the manifest -- subtract the offset here and only here.
+    function partFor(M, clip) {
+        var srcs = M.sources;
+        if (!srcs || !srcs.length) { return { path: M.source, offset: 0 }; }
+        return srcs[Math.min(clip.src || 0, srcs.length - 1)];
+    }
+
+    // Dead-air removal: the manifest's per-clip `keep` lists the source spans worth
+    // playing (clip-relative). Time Remap plays them back-to-back -- a linear key pair
+    // per span, the second landing a frame early so the next span's key reads as a hard
+    // jump cut instead of a ramp. Captions/zoom/overlays are already on this tight
+    // timeline (ae_export retimes them). Returns false when the clip has no `keep`.
+    function applyKeep(foot, clip, part, dur, fps) {
+        var keep = clip.keep;
+        if (!keep || !keep.length) { return false; }
+        var base = clip.start - (part.offset || 0);   // source time of the clip head
+        // startTime 0 so layer time == comp time and the remap keys land where we say
+        foot.startTime = 0;
+        foot.timeRemapEnabled = true;
+        var tr = foot.property("Time Remap"), j, k;
+        // Enabling Time Remap stamps two keys (layer in/out). Thin them to at most the
+        // one at t=0 -- our own first key overwrites it -- rather than emptying the
+        // property, which AE refuses on some layers.
+        for (j = tr.numKeys; j >= 2; j--) { tr.removeKey(j); }
+        if (tr.numKeys === 1 && tr.keyTime(1) > 1e-6) { try { tr.removeKey(1); } catch (e) {} }
+        var f = 1 / fps, t = 0, times = [], vals = [];
+        for (k = 0; k < keep.length; k++) {
+            var len = keep[k][1] - keep[k][0];
+            if (len <= 2 * f) { continue; }            // too short to survive the cut
+            times.push(t);              vals.push(base + keep[k][0]);
+            times.push(t + len - f);    vals.push(base + keep[k][1] - f);
+            t += len;
+        }
+        if (times.length < 2) { foot.timeRemapEnabled = false; return false; }
+        tr.setValuesAtTimes(times, vals);
+        for (k = 1; k <= times.length; k++) {
+            try {
+                tr.setInterpolationTypeAtKey(k, KeyframeInterpolationType.LINEAR,
+                                                KeyframeInterpolationType.LINEAR);
+            } catch (e) {}
+        }
+        foot.inPoint = 0;
+        foot.outPoint = dur;
+        return true;
+    }
+
+    function buildClip(M, clip, srcs, tmpl, zoomScale, idx, folder, overlayTmpl, ovFolder,
+                       capOff) {
+        // `dur` is the tightened length when dead air was cut, else the raw clip span
+        var dur = clip.dur || (clip.end - clip.start);
         var comp = app.project.items.addComp(
             "reFire clip " + idx, M.out_w, M.out_h, 1, dur, M.fps);
         if (folder) { comp.parentFolder = folder; }
 
-        var foot = comp.layers.add(src);
-        foot.startTime = -clip.start;
-        foot.inPoint = 0;
-        foot.outPoint = dur;
+        var src = srcs[0];
+        var part = partFor(M, clip);
+        var foot = comp.layers.add(importSource(part.path));   // cached by path
+        foot.name = FOOT_NAME;                  // how `update` finds it again
+        if (!applyKeep(foot, clip, part, dur, M.fps)) {
+            foot.startTime = -(clip.start - (part.offset || 0));
+            foot.inPoint = 0;
+            foot.outPoint = dur;
+        }
 
         var tr = foot.property("Transform");
         tr.property("Anchor Point").setValue([0, src.height]);
@@ -419,10 +587,7 @@
         applyZoom(zoomScale, tr.property("Scale"), dur,
                   M.out_w / src.width * 100, clip.zoom_episodes);
 
-        var caps = clip.captions || [];
-        for (var ci = 0; ci < caps.length; ci++) {
-            buildCaption(comp, tmpl, caps[ci]);
-        }
+        buildCaptions(M, comp, tmpl, clip.captions, capOff, folder);
         // overlays last so the emote sits on top of the captions
         var ovs = clip.overlays || [];
         for (var oi = 0; oi < ovs.length; oi++) {
@@ -544,10 +709,10 @@
         }
     }
 
-    function doBuild(report) {
-        report = report || function () {};
-        var M = readManifest();
-        if (!M) { return "Pick a manifest first."; }
+    function doBuild(manifestPath, capOff) {
+        var M = readManifest(manifestPath);
+        if (!M) { return "Manifest not found:\n" + manifestPath; }
+        if (!M.clips || !M.clips.length) { return "Manifest has no clips to build."; }
         app.beginUndoGroup("reFire build");
         try {
             var tplF = ensureFolder("reFire templates");   // shared singletons
@@ -555,8 +720,18 @@
             var buildF = nextBuildFolder();                // this build's home
 
             var ovF = ensureFolder("reFire overlays");      // shared emote/sfx/music assets
-            var src = importSource(M.source);
-            src.parentFolder = footF;
+            // one item per source part (just the VOD itself when it's under 2.5h)
+            var srcs = [], paths = [], si;
+            if (M.sources && M.sources.length) {
+                for (si = 0; si < M.sources.length; si++) { paths.push(M.sources[si].path); }
+            } else {
+                paths.push(M.source);
+            }
+            for (si = 0; si < paths.length; si++) {
+                var it = importSource(paths[si]);
+                it.parentFolder = footF;
+                srcs.push(it);
+            }
             var tmpl = ensureTemplate(M);
             var zoomScale = ensureZoomTemplate(M);
             var cardTmpl = ensureSectionTemplate(M);
@@ -567,14 +742,12 @@
             var ovC = findComp("Overlay Template");  if (ovC) { ovC.parentFolder = tplF; }
             if (cardTmpl) { cardTmpl.parentFolder = tplF; }
 
-            var comps = [], N = M.clips.length;
-            for (var c = 0; c < N; c++) {
-                comps.push(buildClip(M, M.clips[c], src, tmpl, zoomScale, c, buildF,
-                                     overlayTmpl, ovF));
-                report(Math.round((c + 1) / N * 95), "building clip " + (c + 1) + "/" + N);
+            var comps = [];
+            for (var c = 0; c < M.clips.length; c++) {
+                comps.push(buildClip(M, M.clips[c], srcs, tmpl, zoomScale, c, buildF,
+                                     overlayTmpl, ovF, capOff));
             }
             buildMaster(M, comps, cardTmpl, buildF);
-            report(100, "master queued");
             return "Built " + comps.length + " clip(s) in '" + buildF.name +
                    "'. Master in render queue.";
         } finally {
@@ -584,9 +757,9 @@
 
     // --- update: refresh captions + zoom, keep footage ---------------------
 
-    function doUpdate() {
-        var M = readManifest();
-        if (!M) { return "Pick a manifest first."; }
+    function doUpdate(manifestPath, capOff) {
+        var M = readManifest(manifestPath);
+        if (!M) { return "Manifest not found:\n" + manifestPath; }
         if (!findComp("Caption Template")) { return "No template yet -- run Build first."; }
         var tmpl = ensureTemplate(M);
         var zoomScale = ensureZoomTemplate(M);
@@ -599,23 +772,21 @@
             for (var c = 0; c < M.clips.length; c++) {
                 var comp = findComp("reFire clip " + c);
                 if (!comp) { continue; }
-                for (var i = comp.numLayers; i >= 1; i--) {   // drop old captions + overlays
+                for (var i = comp.numLayers; i >= 1; i--) {   // drop old overlays
                     var nm = comp.layer(i).name;
-                    if (comp.layer(i) instanceof TextLayer ||
-                        nm === "reFire overlay" || nm === "reFire sfx") {
+                    if (nm === "reFire overlay" || nm === "reFire sfx") {
                         comp.layer(i).remove();
                     }
                 }
+                dropCaptions(comp);
                 var foot = footageLayer(comp);   // re-punch zoom from the template
                 if (foot) {
                     applyZoom(zoomScale, foot.property("Transform").property("Scale"),
                               comp.duration, M.out_w / foot.source.width * 100,
                               M.clips[c].zoom_episodes);
                 }
-                var caps = M.clips[c].captions || [];
-                for (var ci = 0; ci < caps.length; ci++) {
-                    buildCaption(comp, tmpl, caps[ci]);
-                }
+                buildCaptions(M, comp, tmpl, M.clips[c].captions, capOff,
+                              comp.parentFolder);
                 var ovs = M.clips[c].overlays || [];
                 for (var oi = 0; oi < ovs.length; oi++) {
                     buildOverlay(comp, overlayTmpl, ovs[oi], ovF);
@@ -637,233 +808,68 @@
         }
     }
 
-    // --- make: the hands-off pipeline (VOD# + brief + duration -> manifest) --
+    // --- shift: re-stamp captions only, at a new offset ---------------------
 
-    function writeFile(f, text) { f.open("w"); f.write(text); f.close(); }
-
-    function doMake(o) {
-        // Launches `python -m refire make` in a VISIBLE, detached terminal so its live
-        // progress (printed by the CLI) can be monitored, and the AE panel never freezes
-        // (no blocking poll loop). A .bat carries the command, so there are no nested
-        // quotes on the cmd line for cmd.exe to mangle. When it finishes, click
-        // 'Load manifest...'. Needs python + ollama on PATH.
-        if (!o.out) { return "Pick an output folder first."; }
-        if (!o.vod || !o.vod.length) { return "Enter a VOD number."; }
-        if (!o.brief || !o.brief.length) { return "Describe the video you want (Brief)."; }
-        if (!o.duration || !o.duration.length) { return "Set a target Duration (e.g. 20m)."; }
-
-        var runDir = o.out + "/run", vods = o.out + "/vods";
-        new Folder(runDir).create();
-        var batF = new File(runDir + "/reFire_make.bat");
-
-        var brief = o.brief.replace(/"/g, "").replace(/[\r\n]+/g, " ");
-        var py = 'python -m refire make ' + o.vod +
-                 ' --brief "' + brief + '"' +
-                 ' --duration ' + o.duration +
-                 ' --run-dir "' + runDir + '"' +
-                 ' --cache-dir "' + vods + '"';
-        if (o.game && o.game.length) { py += ' --game "' + o.game.replace(/"/g, "") + '"'; }
-        if (o.model && o.model.length) { py += ' --model ' + o.model; }
-        if (o.zoom && o.zoom.length) { py += ' --zoom-sens ' + o.zoom; }
-        if (o.wpl && o.wpl.length) { py += ' --words-per-line ' + o.wpl; }
-        if (o.tol && o.tol.length) { py += ' --tol ' + o.tol; }
-        if (!o.motionZoom) { py += ' --no-motion-zoom'; }
-
-        writeFile(batF,
-            "@echo off\r\n" +
-            "title reFire make " + o.vod + "\r\n" +
-            "echo reFire make -- live progress below. Leave this window open.\r\n" +
-            "echo.\r\n" +
-            py + "\r\n" +
-            "echo.\r\n" +
-            "echo ==== finished (exit %ERRORLEVEL%). Manifest: run\\ae\\manifest.json ====\r\n" +
-            "echo Back in After Effects, click 'Load manifest...' then Build.\r\n" +
-            "pause\r\n");
-
-        // visible + detached: callSystem returns immediately, the terminal shows progress
-        system.callSystem('cmd.exe /c start "reFire make" "' + batF.fsName + '"');
-        return "Make launched in a terminal -- watch progress there.\n" +
-               "When it finishes, click 'Load manifest...' (run/ae/manifest.json).";
-    }
-
-    // --- UI ----------------------------------------------------------------
-
-    function buildUI(thisObj) {
-        var w = (thisObj instanceof Panel)
-            ? thisObj
-            : new Window("palette", "reFire", undefined, { resizeable: true });
-        w.orientation = "column";
-        w.alignChildren = ["fill", "top"];
-        w.spacing = 8;
-        w.margins = 14;
-
-        // "opencode" palette: dark canvas, mono text, one accent, box-rule dividers.
-        // ponytail: native buttons/panel chrome can't be themed in ScriptUI -- the
-        // text, fields, header and dividers carry the look.
-        var INK = [0.86, 0.87, 0.90], MUTE = [0.52, 0.54, 0.60],
-            ACCENT = [0.42, 0.86, 0.62], BG = [0.11, 0.11, 0.13];
-        var LABELW = 78;
-        var texts = [], labels = [], heads = [], rules = [];
-        var outFolder = null;
-
-        function rule(parent) {                            // a thin terminal-style divider
-            var r = parent.add("statictext", undefined, mk("─", 46));
-            r.alignment = ["fill", "top"]; rules.push(r); return r;
-        }
-        function mk(ch, n) { var s = ""; while (n-- > 0) { s += ch; } return s; }
-        function panel(title) {
-            var p = w.add("panel", undefined, title);
-            p.orientation = "column"; p.alignChildren = ["fill", "top"];
-            p.margins = [12, 12, 12, 12]; p.spacing = 6; labels.push(p);
-            return p;
-        }
-        function field(parent, label, def, opts) {         // aligned "label [____]" row
-            opts = opts || {};
-            var grp = parent.add("group");
-            grp.orientation = "row"; grp.spacing = 8;
-            grp.alignChildren = ["left", "center"]; grp.alignment = ["fill", "top"];
-            var l = grp.add("statictext", undefined, label);
-            l.preferredSize = [LABELW, -1]; labels.push(l);
-            var e;
-            if (opts.multiline) {
-                e = grp.add("edittext", undefined, def || "", { multiline: true });
-                e.preferredSize = [-1, opts.h || 50]; e.alignment = ["fill", "center"];
-            } else {
-                e = grp.add("edittext", undefined, def || "");
-                if (opts.chars) { e.characters = opts.chars; }
-                e.alignment = opts.fill ? ["fill", "center"] : ["left", "center"];
-            }
-            texts.push(e); return e;
-        }
-
-        // header
-        var head = w.add("statictext", undefined, "reFire"); heads.push(head);
-        var tag = w.add("statictext", undefined, "vod → brief → edited cut");
-        labels.push(tag);
-        rule(w);
-
-        // MAKE: the autonomous flow
-        var makeP = panel("Make");
-        var outGrp = makeP.add("group"); outGrp.orientation = "row"; outGrp.spacing = 8;
-        outGrp.alignChildren = ["left", "center"]; outGrp.alignment = ["fill", "top"];
-        var outLbl = outGrp.add("statictext", undefined, "Output");
-        outLbl.preferredSize = [LABELW, -1]; labels.push(outLbl);
-        var outTxt = outGrp.add("statictext", undefined, "(no folder)");
-        outTxt.alignment = ["fill", "center"]; texts.push(outTxt);
-        var btnOut = outGrp.add("button", undefined, "Pick…"); btnOut.preferredSize = [56, -1];
-
-        var vodTxt = field(makeP, "VOD #", "", { chars: 14 });
-        var briefTxt = field(makeP, "Brief", "", { multiline: true, h: 46 });
-        var durTxt = field(makeP, "Duration", "20m", { chars: 10 });
-        var gameTxt = field(makeP, "Game", "", { fill: true });
-        var modelTxt = field(makeP, "Model", "llama3.1:8b", { fill: true });
-
-        // advanced knobs on one compact row
-        var advGrp = makeP.add("group"); advGrp.orientation = "row"; advGrp.spacing = 8;
-        advGrp.alignChildren = ["left", "center"]; advGrp.alignment = ["fill", "top"];
-        var advLbl = advGrp.add("statictext", undefined, "Tuning");
-        advLbl.preferredSize = [LABELW, -1]; labels.push(advLbl);
-        function mini(label, def, chars) {
-            var l = advGrp.add("statictext", undefined, label); labels.push(l);
-            var e = advGrp.add("edittext", undefined, def); e.characters = chars;
-            texts.push(e); return e;
-        }
-        var zoomTxt = mini("zoom", "1.0", 4);
-        var wplTxt = mini("words", "3", 3);
-        var tolTxt = mini("tol", "0.25", 5);
-        var motionZoomChk = advGrp.add("checkbox", undefined, "motion zoom");
-        motionZoomChk.value = true; labels.push(motionZoomChk);
-
-        var btnMake = makeP.add("button", undefined, "Make");
-        var note = makeP.add("statictext", undefined,
-            "runs in the background; the bar tracks progress", { multiline: true });
-        note.alignment = ["fill", "top"]; labels.push(note);
-
-        rule(w);
-
-        // BUILD: turn the loaded manifest into AE comps
-        var buildP = panel("Build");
-        var pathTxt = buildP.add("statictext", undefined, "No manifest loaded");
-        pathTxt.alignment = ["fill", "top"]; texts.push(pathTxt);
-        var btnPick = buildP.add("button", undefined, "Load manifest…");
-        var rowB = buildP.add("group"); rowB.orientation = "row"; rowB.spacing = 8;
-        rowB.alignment = ["fill", "top"];
-        var btnBuild = rowB.add("button", undefined, "Build"); btnBuild.alignment = ["fill", "center"];
-        var btnUpd = rowB.add("button", undefined, "Update"); btnUpd.alignment = ["fill", "center"];
-
-        rule(w);
-        var bar = w.add("progressbar", undefined, 0, 100);
-        bar.preferredSize = [-1, 8]; bar.alignment = ["fill", "top"];
-        var status = w.add("statictext", undefined, "ready", { multiline: true });
-        status.minimumSize = [240, 56]; status.alignment = ["fill", "top"];
-
-        // paint the palette + monospace; cosmetic only, wrapped so it never breaks
+    // Word timestamps drift a little against the audio, so the caption timing in the
+    // manifest can read early or late. This slides each clip's "cc" caption comp to
+    // `capOff` seconds (+late / -early), leaving footage, zoom and overlays alone --
+    // so it is fast enough to nudge, look, nudge again. The offset is absolute: it is
+    // the layer's startTime, so it never accumulates.
+    function doShift(manifestPath, capOff) {
+        var M = readManifest(manifestPath);
+        if (!M) { return "Manifest not found:\n" + manifestPath; }
+        if (!findComp("Caption Template")) { return "No template yet -- run Build first."; }
+        var tmpl = ensureTemplate(M);
+        var off = Number(capOff) || 0;
+        app.beginUndoGroup("reFire caption shift");
         try {
-            var g = w.graphics;
-            var mono = ScriptUI.newFont("Consolas", "Regular", 12);
-            var monoH = ScriptUI.newFont("Consolas", ScriptUI.FontStyle.BOLD, 18);
-            w.graphics.backgroundColor = g.newBrush(g.BrushType.SOLID_COLOR, BG);
-            function paint(c, rgb, font) {
-                c.graphics.font = font || mono;
-                c.graphics.foregroundColor = g.newPen(g.PenType.SOLID_COLOR, rgb, 1);
-            }
-            var i;
-            for (i = 0; i < labels.length; i++) { paint(labels[i], MUTE); }
-            for (i = 0; i < texts.length; i++) { paint(texts[i], INK); }
-            for (i = 0; i < rules.length; i++) { paint(rules[i], [0.24, 0.25, 0.29]); }
-            for (i = 0; i < heads.length; i++) { paint(heads[i], ACCENT, monoH); }
-            paint(status, ACCENT);
-        } catch (e) { /* older AE / no Consolas -> default chrome, still works */ }
-
-        function gather() {
-            return { out: outFolder, vod: vodTxt.text, brief: briefTxt.text,
-                     duration: durTxt.text, game: gameTxt.text, model: modelTxt.text,
-                     zoom: zoomTxt.text, wpl: wplTxt.text, tol: tolTxt.text,
-                     motionZoom: motionZoomChk.value };
-        }
-        function report(pct, msg) {                 // drive bar + status, repaint live
-            try {
-                if (pct != null) { bar.value = pct; }
-                if (msg != null) { status.text = (pct != null ? pct + "%  " : "") + msg; }
-                w.update();
-            } catch (e) {}
-        }
-
-        btnOut.onClick = function () {
-            var f = Folder.selectDialog("Choose an output folder for reFire");
-            if (f) { outFolder = f.fsName; outTxt.text = decodeURI(f.name); status.text = "ready"; }
-        };
-        btnMake.onClick = function () {
-            try { status.text = doMake(gather()); }
-            catch (e) { status.text = "Error: " + e.toString(); }
-        };
-        btnPick.onClick = function () {
-            // if Make ran, the manifest is at <out>/run/ae/manifest.json -- auto-load it,
-            // else open a file dialog (start near the output folder for convenience).
-            if (outFolder) {
-                var auto = new File(outFolder + "/run/ae/manifest.json");
-                if (auto.exists) {
-                    manifestPath = auto.fsName; pathTxt.text = "run/ae/manifest.json";
-                    status.text = "manifest loaded -> click Build"; return;
+            var touched = 0;
+            for (var c = 0; c < M.clips.length; c++) {
+                var comp = findComp("reFire clip " + c);
+                if (!comp) { continue; }
+                var L = captionLayer(comp);
+                if (L) { shiftCaptions(L, off); }
+                else {                       // built before captions were precomped
+                    dropCaptions(comp);
+                    buildCaptions(M, comp, tmpl, M.clips[c].captions, off,
+                                  comp.parentFolder);
                 }
+                touched++;
             }
-            var start = outFolder ? new File(outFolder + "/run/ae/manifest.json") : null;
-            var f = start ? start.openDlg("Select reFire manifest.json", "*.json")
-                          : File.openDialog("Select reFire manifest.json", "*.json");
-            if (f) { manifestPath = f.fsName; pathTxt.text = decodeURI(f.name); status.text = "ready"; }
-        };
-        btnBuild.onClick = function () {
-            report(0, "building…");
-            try { status.text = doBuild(report); } catch (e) { status.text = "Error: " + e.toString(); }
-        };
-        btnUpd.onClick = function () {
-            try { status.text = doUpdate(); } catch (e) { status.text = "Error: " + e.toString(); }
-        };
-
-        w.layout.layout(true);
-        return w;
+            if (!touched) { return "No reFire clip comps found -- run Build first."; }
+            return "Captions shifted " + (off >= 0 ? "+" : "") + off.toFixed(2) +
+                   "s across " + touched + " clip(s).";
+        } finally {
+            app.endUndoGroup();
+        }
     }
 
-    var ui = buildUI(thisObj);
-    if (ui instanceof Window) { ui.center(); ui.show(); }
-})(this);
+    // --- public API --------------------------------------------------------
+
+    // CEP collapses ANY uncaught ExtendScript exception into the opaque string
+    // "EvalScript error." (or an empty result), so a real failure -- a missing
+    // source file, a locked comp, a bad template -- would surface in the panel as
+    // nothing useful. Catch at the boundary and hand back the actual message and
+    // line instead. Everything below always resolves to a printable string.
+    function guard(fn) {
+        return function (path, arg) {
+            try {
+                var r = fn(path, arg);
+                return (r === undefined || r === null) ? "Done." : String(r);
+            } catch (e) {
+                var msg = "Error: " + (e.message || e.toString());
+                if (e.line) { msg += "  [reFire.jsx:" + e.line + "]"; }
+                return msg;
+            }
+        };
+    }
+
+    // the panel probes this on load to prove the library reached AE's engine
+    function probe() {
+        return "reFire.jsx ok - AE " + app.version + ", project '" +
+               (app.project.file ? decodeURI(app.project.file.name) : "untitled") + "'";
+    }
+
+    return { build: guard(doBuild), update: guard(doUpdate), shift: guard(doShift),
+             probe: guard(probe) };
+}());

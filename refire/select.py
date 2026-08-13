@@ -1,29 +1,5 @@
-"""Choose and order which detected segments go into the compilation."""
+"""Duration parsing, budget selection, and sentence/silence-aware clip boundaries."""
 from __future__ import annotations
-
-from .rank import Segment
-
-
-def select_segments(
-    segments: list[Segment],
-    count: int | None = None,
-    min_score: float | None = None,
-    order: str = "chrono",
-) -> list[Segment]:
-    """Filter by min_score, keep the top `count` by score, then order output.
-
-    order="chrono" (default) -> ascending by start time (natural recap),
-    order="score"            -> descending by score (best first).
-    """
-    segs = list(segments)
-    if min_score is not None:
-        segs = [s for s in segs if s["score"] >= min_score]
-    segs.sort(key=lambda s: s["score"], reverse=True)
-    if count is not None:
-        segs = segs[:count]
-    if order == "chrono":
-        segs.sort(key=lambda s: s["start"])
-    return segs
 
 
 def parse_duration(text) -> float:
@@ -44,7 +20,7 @@ def parse_duration(text) -> float:
     return float(t) * mult
 
 
-def budget_select(scored, target_s: float, tol: float = 0.25, order: str = "chrono"):
+def budget_select(scored, target_s: float, tol: float = 0.35, order: str = "chrono"):
     """Greedily pick highest-scored clips until total duration reaches target_s.
 
     Items need start/end/score; durations are measured as end-start, so callers

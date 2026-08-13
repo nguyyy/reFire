@@ -8,7 +8,6 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from .rank import Segment
 from .reframe import ENTER, EXIT, reframe_clip
 
 W, H, FPS = 1280, 720, 30
@@ -28,7 +27,7 @@ def _ass_filter_path(ass_path: Path) -> str:
 
 def render_clip(
     video: str | Path,
-    seg: Segment,
+    seg: dict,          # needs start/end; callers also pass role/energy for styling
     ass_path: str | Path,
     out_path: str | Path,
     encoder: str = "libx264",

@@ -90,6 +90,43 @@ def test_cast_uses_director_bounds_without_retrieval(monkeypatch):
     assert log["beats"][0]["dir_start"] == 3.0       # director bounds recorded in the log
 
 
+def test_lazy_chunks_callable_is_not_invoked_on_the_bounds_path(monkeypatch):
+    """`chunks` may be a callable so the caller can defer a full embedding pass.
+
+    On the normal path (director gave usable bounds) nothing needs candidate
+    retrieval, so the provider must never be called -- that deferral is the whole
+    point, and a refactor that eagerly resolves it silently costs a local embedding
+    pass over the entire VOD on every run.
+    """
+    monkeypatch.setattr("refire.score.score_chunk",
+                        lambda c, brief="", model="": {"llm_score": 9.0, "reason": "r"})
+    words = _words("a b c. d e f. g h i.")
+
+    def _boom():
+        raise AssertionError("resolved chunks despite valid director bounds")
+
+    ol = SimpleNamespace(central_idea="x", beats=[
+        SimpleNamespace(title="T", intent="i", query="q", start_s=3.0, end_s=5.8)])
+    sections, _log, _w = narrative.cast(ol, _boom, words, target_s=1000.0, model="m")
+    assert sections[0]["clips"][0]["start"] == pytest.approx(3.0)
+
+
+def test_lazy_chunks_callable_resolves_once_on_the_fallback_path(stubbed):
+    """When a beat DOES need retrieval, the provider is called -- and only once."""
+    calls = {"n": 0}
+
+    def _provider():
+        calls["n"] += 1
+        return _chunks()
+
+    ol = SimpleNamespace(central_idea="x", beats=[
+        SimpleNamespace(title="A", intent="i", query="q", start_s=5.0, end_s=5.0),
+        SimpleNamespace(title="B", intent="i", query="q", start_s=9.0, end_s=1.0)])
+    sections, _log, _w = narrative.cast(ol, _provider, [], target_s=1000.0, model="m")
+    assert len(sections) == 2
+    assert calls["n"] == 1        # memoized across beats, not re-embedded per beat
+
+
 def test_invalid_bounds_falls_back_to_retrieval(stubbed):
     # end_s <= start_s is unusable -> retrieve by query (chunk-based old path)
     ol = SimpleNamespace(central_idea="x", beats=[
@@ -282,7 +319,12 @@ def test_complete_cli_parses_stream_json(monkeypatch):
     monkeypatch.setattr("subprocess.Popen", fake_popen)
     got = director.outline("[0s] hi", "brief", "title", 600.0, backend="cli")
     assert got.beats[0].title == "A"
-    assert "-p" in seen["cmd"] and "--system-prompt" in seen["cmd"]
+    # system prompt goes via --system-prompt-file (a bare --system-prompt with newlines
+    # gets split by Windows argv parsing and silently corrupts the later flags)
+    assert "-p" in seen["cmd"] and "--system-prompt-file" in seen["cmd"]
+    assert "--system-prompt" not in seen["cmd"]
+    sp_path = seen["cmd"][seen["cmd"].index("--system-prompt-file") + 1]
+    assert sp_path.endswith(".txt")
     assert "--tools" in seen["cmd"] and "--setting-sources" in seen["cmd"]
     assert "ANTHROPIC_API_KEY" not in seen["env"]   # bill the subscription, not the key
 

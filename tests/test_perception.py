@@ -25,10 +25,9 @@ def test_moment_map_degrades_to_stream_map():
 
 
 def test_moment_map_marks_thresholds():
-    chat = [(0.5, 3.4)]          # (chat!!) on the first sentence
-    audio = [(65.5, 1.8)]        # (loud) on the second
-    out = perception.moment_map(WORDS, chat_z=chat, audio_z=audio).splitlines()
-    assert out[0] == "[0s] (chat!!) Hello world."
+    audio = [(0.5, 3.4), (65.5, 1.8)]   # (LOUD) on the first sentence, (loud) on the second
+    out = perception.moment_map(WORDS, audio_z=audio).splitlines()
+    assert out[0] == "[0s] (LOUD) Hello world."
     assert out[1] == "[65s] (loud) Next one."
 
 
@@ -61,10 +60,10 @@ def test_loudness_signal_missing_wav_is_empty():
 
 
 def test_top_windows_nonoverlap_and_order():
-    chat = [(t + 2.5, 0.0) for t in range(0, 600, 5)]
-    chat[20] = (102.5, 5.0)      # spike ~100s
-    chat[80] = (402.5, 4.0)      # spike ~400s
-    wins = perception.top_windows(chat, None, k=2, span_s=60.0)
+    audio = [(t + 2.5, 0.0) for t in range(0, 600, 5)]
+    audio[20] = (102.5, 5.0)     # spike ~100s
+    audio[80] = (402.5, 4.0)     # spike ~400s
+    wins = perception.top_windows(audio, k=2, span_s=60.0)
     assert len(wins) == 2
     assert wins == sorted(wins)
     (a0, b0), (a1, b1) = wins
@@ -73,15 +72,14 @@ def test_top_windows_nonoverlap_and_order():
 
 
 def test_top_windows_empty_signals():
-    assert perception.top_windows(None, None) == []
+    assert perception.top_windows(None) == []
 
 
 def test_signals_roundtrip(tmp_path):
     p = tmp_path / "signals.json"
-    perception.save_signals(p, [(2.5, 1.0)], [(2.5, -0.3)])
-    chat, audio = perception.load_signals(p)
-    assert chat == [(2.5, 1.0)] and audio == [(2.5, -0.3)]
-    assert perception.load_signals(tmp_path / "absent.json") == (None, None)
+    perception.save_signals(p, [(2.5, -0.3)])
+    assert perception.load_signals(p) == [(2.5, -0.3)]
+    assert perception.load_signals(tmp_path / "absent.json") is None
 
 
 def test_pick_system_modes():

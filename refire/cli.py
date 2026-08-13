@@ -1,16 +1,16 @@
-"""CLI: `detect` clip-worthy segments, then `edit` them into a compilation."""
+"""CLI: `make` -- VOD number + brief + duration -> a narrative AE build manifest."""
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import time
 from pathlib import Path
 
-from .ae_export import export_ae
-from .assemble import edit
-from .pipeline import make, run
+from .pipeline import make
 from .score import DEFAULT_MODEL
 from .select import parse_duration
+from .transcribe import DEFAULT_BATCH_SIZE, DEFAULT_WHISPER_MODEL
 
 # Anchor to the repo's assets/, not the CWD: the AE "Make" button launches the CLI
 # via a detached `cmd /c start`, whose working dir isn't the repo, so a relative
@@ -69,19 +69,37 @@ def main(argv: list[str] | None = None) -> None:
                          "director mine the stream's own best story")
     mk.add_argument("--duration", required=True, help="target runtime: 20m / 20:00 / 1200")
     mk.add_argument("--run-dir", default=None,
-                    help="artifact/output directory (default: run/<vod_id>, isolated per VOD)")
+                    help="artifact/output directory (default: run/<vod_id>/<vod_id>-<phrase>, "
+                         "a fresh auto-named folder each run; the shared VOD cache -- audio/"
+                         "transcript/embeddings -- still lives in run/<vod_id>)")
     mk.add_argument("--model", default=DEFAULT_MODEL, help="Ollama model for scoring")
     mk.add_argument("--game", default="", help="game name; LLM-builds a glossary for "
                     "proper-noun mistranscriptions (e.g. \"Genshin Impact\")")
+    mk.add_argument("--terms", default="", help="extra names to spell correctly: "
+                    "\"Kinich, Arlecchino\" or a path to a file with one per line. "
+                    "Merged ahead of --game's glossary; use it for anything the local "
+                    "model is too old to know")
     mk.add_argument("--transcriber", choices=["local", "deepgram"], default="local",
                     help="speech-to-text backend: local faster-whisper (default, free) or "
                          "deepgram (cloud; needs DEEPGRAM_API_KEY in .env)")
+    mk.add_argument("--whisper-model", default=DEFAULT_WHISPER_MODEL,
+                    help=f"faster-whisper model (default {DEFAULT_WHISPER_MODEL}; "
+                         "'large-v3' is slower but marginally more accurate)")
+    mk.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
+                    help=f"transcription batch size (default {DEFAULT_BATCH_SIZE}); "
+                         "higher = faster if the VRAM is there")
+    mk.add_argument("--compute-type", default="float16",
+                    help="faster-whisper compute type (float16 default; int8_float16 "
+                         "frees VRAM for a bigger --batch-size)")
     mk.add_argument("--zoom-sens", type=float, default=1.0,
                     help="zoom amount: >1 more/earlier punches, <1 fewer (default 1.0)")
     mk.add_argument("--no-motion-zoom", action="store_true",
                     help="skip OpenCV motion scanning and render/static-fit clips without punch zooms")
     mk.add_argument("--words-per-line", type=int, default=3, help="caption grouping")
-    mk.add_argument("--tol", type=float, default=0.25, help="duration tolerance band (0-1)")
+    mk.add_argument("--tol", type=float, default=0.35,
+                    help="duration slack (0-1): --duration is a target, not a hard cap -- "
+                         "the cut may land anywhere within target*(1-tol)..target*(1+tol) "
+                         "before beats get trimmed/flagged short")
     mk.add_argument("--cache-dir", default="vods", help="VOD download cache directory")
     mk.add_argument("--assets-dir", default=_DEFAULT_ASSETS,
                     help="folder with bgm/ sfx/ overlays/ for music + emote punch-ins")
@@ -97,12 +115,6 @@ def main(argv: list[str] | None = None) -> None:
                     help="skip the Claude director; use flat brief-relevance selection")
     mk.add_argument("--local-director", action="store_true",
                     help="run the narrative director on local Ollama (--model), no API spend")
-    mk.add_argument("--no-vision", action="store_true",
-                    help="text-only director: skip frame sampling, VLM scene captions, "
-                         "and contact sheets")
-    mk.add_argument("--vlm-model", default="qwen2.5vl:3b",
-                    help="local Ollama vision model for scene captions "
-                         "(not installed -> captions skipped)")
     mk.add_argument("--scout", choices=["local", "off"], default="local",
                     help="chapterize scout pass before the story pass: local Ollama "
                          "(free, default) or off (single-shot; short VODs only)")
@@ -112,56 +124,29 @@ def main(argv: list[str] | None = None) -> None:
     mk.add_argument("--render", action="store_true",
                     help="also ffmpeg-render a no-AE rough cut to run/rough.mp4 for eyeballing")
     mk.add_argument("--encoder", default="libx264", help="ffmpeg encoder (e.g. h264_nvenc) for --render")
+    mk.add_argument("--no-emotes", action="store_true",
+                    help="no emote/gif overlay punch-ins (also drops their SFX)")
+    mk.add_argument("--no-sfx", action="store_true",
+                    help="keep the emote punch-ins but place them silently (no impact hits)")
+    mk.add_argument("--no-cards", action="store_true",
+                    help="no section title cards in the AE Master -- the cut runs clip to clip")
+    mk.add_argument("--no-proxy", action="store_true",
+                    help="point AE at the raw VOD instead of cutting all-intra (DNxHR LB) "
+                         "clip proxies -- skips the transcode, but AE previews far slower")
+    mk.add_argument("--no-deadspace", action="store_true",
+                    help="keep each clip's internal silence instead of jump-cutting it out")
     mk.add_argument("--silence-pad", type=float, default=0.3,
-                    help="breath (s) left between phrases in the --render rough cut; "
+                    help="breath (s) left around each phrase when dead space is cut; "
                          "smaller = tighter (default 0.3)")
     mk.add_argument("--progress-file", default=None,
                     help="write {pct,msg,done} JSON here for a GUI progress bar")
-
-    d = sub.add_parser("detect", help="find clip-worthy segments -> segments.json")
-    d.add_argument("video", help="path to the stream video file")
-    d.add_argument("chat", help="path to the TwitchDownloader chat JSON")
-    d.add_argument("--run-dir", default="run", help="artifact/output directory")
-    d.add_argument("--model", default=DEFAULT_MODEL, help="Ollama model name")
-    d.add_argument("--top-n", type=int, default=None, help="keep top N segments")
-    d.add_argument("--threshold", type=float, default=None, help="min final score")
-    d.add_argument("--w-llm", type=float, default=0.6, help="LLM score weight")
-    d.add_argument("--w-chat", type=float, default=0.4, help="chat score weight")
-    d.add_argument("--game", default="", help="game name; LLM-builds a glossary to "
-                   "fix proper-noun mistranscriptions (e.g. \"Genshin Impact\")")
-
-    e = sub.add_parser("edit", help="assemble selected segments -> final.mp4")
-    e.add_argument("video", help="path to the stream video file")
-    e.add_argument("--run-dir", default="run", help="dir with segments/transcript")
-    e.add_argument("--music", default=None, help="royalty-free music track")
-    e.add_argument("--count", type=int, default=None, help="how many segments")
-    e.add_argument("--min-score", type=float, default=None, help="min segment score")
-    e.add_argument("--order", choices=["chrono", "score"], default="chrono")
-    e.add_argument("--encoder", default="libx264", help="e.g. h264_nvenc for GPU")
-    e.add_argument("--topic", default="", help="stream subject; groups/orders clips for flow")
-    e.add_argument("--model", default=DEFAULT_MODEL, help="Ollama model for --topic grouping")
-    e.add_argument("--no-motion-zoom", action="store_true",
-                   help="render/static-fit clips without the OpenCV punch-zoom pass")
-
-    a = sub.add_parser("ae", help="export an After Effects build manifest (for reFire.jsx)")
-    a.add_argument("video", help="path to the stream video file")
-    a.add_argument("--run-dir", default="run", help="dir with segments/transcript")
-    a.add_argument("--count", type=int, default=None, help="how many segments")
-    a.add_argument("--min-score", type=float, default=None, help="min segment score")
-    a.add_argument("--order", choices=["chrono", "score"], default="chrono")
-    a.add_argument("--words-per-line", type=int, default=3, help="caption grouping")
-    a.add_argument("--topic", default="", help="stream subject; groups/orders clips into sections")
-    a.add_argument("--model", default=DEFAULT_MODEL, help="Ollama model for --topic grouping")
-    a.add_argument("--zoom-sens", type=float, default=1.0,
-                   help="zoom amount: >1 more/earlier punches, <1 fewer (default 1.0)")
-    a.add_argument("--no-motion-zoom", action="store_true",
-                   help="skip OpenCV motion scanning and write static-fit AE clips")
 
     args = p.parse_args(argv)
 
     if args.cmd == "make":
         file_w = _progress_writer(args.progress_file) if args.progress_file else None
         last = {"pct": -1, "frac": 0.0}
+        t0 = time.monotonic()
 
         def prog(frac, msg, done=False):
             if not done:
@@ -170,13 +155,19 @@ def main(argv: list[str] | None = None) -> None:
             pct = max(0, min(100, int(frac * 100)))
             if pct != last["pct"] or done:         # throttle to integer-pct changes
                 last["pct"] = pct
-                print("[%3d%%] %s" % (pct, msg), flush=True)
+                # Elapsed minutes on every line: a run self-profiles, so we optimize the
+                # stage that is actually slow instead of the one we assume is. Trails the
+                # message because the AE panel's /^\[ n%\]\s*(.*)$/ shows group 2 as its
+                # status text -- leading with the clock would bury the stage name.
+                print("[%3d%%] %s  (+%.1fm)" % (pct, msg, (time.monotonic() - t0) / 60),
+                      flush=True)
             if file_w:
                 file_w(frac, msg, done)
 
         try:
             out = make(args.vod_id, args.brief, parse_duration(args.duration),
                        run_dir=args.run_dir, model=args.model, game=args.game,
+                       terms=args.terms,
                        zoom_sens=args.zoom_sens, words_per_line=args.words_per_line,
                        tol=args.tol, cache_dir=args.cache_dir,
                        assets_dir=args.assets_dir, bgm=args.bgm,
@@ -184,44 +175,25 @@ def main(argv: list[str] | None = None) -> None:
                        director_backend=args.director_backend,
                        flat=args.flat, local_director=args.local_director,
                        review_rounds=args.review_rounds, scout=args.scout,
-                       vision=not args.no_vision, vlm_model=args.vlm_model,
                        render=args.render, encoder=args.encoder,
                        silence_pad=args.silence_pad,
                        motion_zoom=not args.no_motion_zoom,
-                       transcriber=args.transcriber, progress=prog)
+                       emotes=not args.no_emotes, sfx=not args.no_sfx,
+                       deadspace=not args.no_deadspace, cards=not args.no_cards,
+                       proxy=not args.no_proxy,
+                       transcriber=args.transcriber,
+                       whisper_model=args.whisper_model,
+                       batch_size=args.batch_size,
+                       compute_type=args.compute_type, progress=prog)
         except BaseException as e:                 # show the failure in the terminal
             prog(1.0, "error: " + str(e), done=True)
             raise
         prog(1.0, "done", done=True)
-        jsx = Path(__file__).with_name("ae") / "reFire.jsx"
-        print(f"Manifest: {out}")
-        print("In After Effects: File > Scripts > Run Script File... ->")
-        print(f"  {jsx}")
-        print("In the panel: Choose manifest -> Build.")
-        return
-    if args.cmd == "detect":
-        out = run(args.video, args.chat, args.run_dir, model=args.model,
-                  w_llm=args.w_llm, w_chat=args.w_chat,
-                  top_n=args.top_n, threshold=args.threshold, game=args.game)
-    elif args.cmd == "ae":
-        out = export_ae(args.video, run_dir=args.run_dir, count=args.count,
-                        min_score=args.min_score, order=args.order,
-                        words_per_line=args.words_per_line, topic=args.topic,
-                        model=args.model, zoom_sens=args.zoom_sens,
-                        motion_zoom=not args.no_motion_zoom)
-        jsx = Path(__file__).with_name("ae") / "reFire.jsx"
-        print(f"Manifest: {out}")
-        print("In After Effects: File > Scripts > Run Script File... ->")
-        print(f"  {jsx}")
-        print("In the panel: Choose manifest -> Build. Then restyle/animate the "
-              "'Caption Style' layer and click Update to propagate.")
-        return
-    else:
-        out = edit(args.video, run_dir=args.run_dir, music=args.music,
-                   count=args.count, min_score=args.min_score,
-                   order=args.order, encoder=args.encoder, topic=args.topic,
-                   model=args.model, motion_zoom=not args.no_motion_zoom)
-    print(out)
+        # The AE panel greps this exact line out of stdout to auto-load the manifest.
+        # Absolute: ExtendScript's File() resolves a relative path against AE's own
+        # working directory, not ours, so a relative path here silently finds nothing.
+        print(f"Manifest: {Path(out).resolve()}")
+        print("In After Effects: Window > Extensions > reFire -> Build.")
 
 
 if __name__ == "__main__":

@@ -5,7 +5,9 @@ import json
 
 from .chunk import Chunk
 
-DEFAULT_MODEL = "qwen2.5:14b"
+# ponytail: default to a model that actually fits an 8GB GPU and is installed here.
+# qwen2.5:14b scores better but 404s/OOMs on this box; pass --model to use it.
+DEFAULT_MODEL = "llama3.1:8b"
 
 _SYSTEM = (
     "You rate moments from a Twitch gaming stream for a highlights compilation. "

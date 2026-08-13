@@ -12,8 +12,10 @@ references are given so claims can be checked directly.
 
 ## 0. The one-sentence version
 
-A local speech-to-text + chat/audio/vision fusion pass builds a time-stamped "moment
-map" of the whole stream. A **director** (one LLM call, ideally Claude via the user's
+A local speech-to-text + audio-loudness fusion pass builds a time-stamped "moment map" of
+the whole stream. (Chat-rate signal is no longer fed to the director; it stays on chunks
+only for the legacy flat/detect path. Image/VLM scene detection was removed — it cost
+enormous time + VRAM for negligible director quality.) A **director** (one LLM call, ideally Claude via the user's
 subscription CLI) reads that map and writes a **story outline**: a central idea plus
 an ordered list of **beats**, each a slot in an arc (hook/setup/escalation/reversal/
 climax/payoff/button) with exact in/out timestamps and even which exact sub-spans to
@@ -33,50 +35,55 @@ downloads/caches the VOD (`ingest.ensure_vod`), then runs `_detect_core`:
 1. `audio.py::extract_audio` — ffmpeg → mono 16k WAV, cached at `run/<vod>/audio.wav`.
 2. `glossary.py::game_glossary` — one local-Ollama call → proper-noun list for the
    named game, used as Whisper `hotwords` (biases transcription, doesn't correct it).
-3. `transcribe.py::transcribe` — faster-whisper (local GPU), word-level timestamps,
-   cached at `run/<vod>/transcript.json`. Returns `words: [{text,start,end}, ...]`.
+3. `transcribe.py::transcribe` — faster-whisper (local GPU) via
+   `BatchedInferencePipeline` with `vad_filter`, defaulting to `large-v3-turbo`;
+   word-level timestamps, cached at `run/<vod>/transcript.json`. Returns
+   `words: [{text,start,end}, ...]`. This is the longest single stage in a run, hence
+   the batching + VAD (which skips the dead air a multi-hour stream is full of); the
+   cache key covers glossary **and** backend **and** model, so changing any of them
+   re-transcribes rather than serving the wrong engine's words.
 4. `chat.py::chat_signal` — Twitch chat message-rate **z-score** over time buckets:
    `chat_z: [(t_center, z), ...]`.
 5. `chunk.py::make_chunks` — groups words into ~30-90s windows (`chunks`), each
-   carrying its own `chat_z` for the legacy flat path.
+   carrying its own `chat_z` for the flat fallback path.
 
 Everything downstream is keyed by `run/<vod_id>/` so two VODs never collide.
 
+The expensive per-VOD cache above (audio/transcript/chunks/signals/glossary) is shared
+and reused across runs of the same VOD. Each *invocation* of `make()` then gets its own
+auto-named subfolder, `run/<vod_id>/<vod_id>-<adjective>-<noun>/` (`pipeline._run_name`),
+so re-running the same VOD with a different brief/duration doesn't clobber the previous
+run's outline/manifest/rough cut. Passing an explicit `--run-dir` opts out of the
+auto-naming and writes cache + output to that one folder (used by the AE "Make" button).
+
 ## 2. Perception fusion — building the "moment map"
 
-The director must judge the stream like a human editor: what was said, where chat
-went wild, where the streamer got loud, what was on screen. `perception.py` fuses
-these into one text artifact the director reads.
+The director must judge the stream like a human editor: what was said and where the
+streamer got loud. `perception.py` fuses these into one text artifact the director reads.
+(Chat-rate z-score is deliberately excluded here — the director sees loudness only; chat
+still feeds the legacy flat/detect path. Image/VLM scene captioning was removed entirely.)
 
 - `perception.loudness_signal(wav)` — buckets the WAV into 5s RMS z-scores, same
-  `(t_center, z)` shape as `chat_signal` so the two fuse symmetrically.
-- **Vision (optional, default on):** `frames.sample_frames` ffmpeg-scene-detects
-  keyframes, thins them (min 20s / max 600s / backfill gaps), extracts one JPEG per
-  timestamp, caches to `vods/<vod>.frames/`. `vlm.caption_frames` runs a local VLM
-  (`qwen2.5vl:3b` via Ollama) over each frame → a one-line scene caption, cached
-  incrementally (crash-resumable) and self-healing against degenerate/garbage output
-  (`vlm._degenerate` drops repeated-token poison like `"@@@@@@@@"` on load and refuses
-  to store it again).
-- `perception.moment_map(words, chat_z, audio_z, captions)` — the core fusion. It
-  reuses the same sentence splitter as the legacy `director.stream_map`
-  (`perception._sentences`: break the transcript on `.?!`) so both map formats agree
-  on line boundaries. For each sentence `[a, b, text]` it emits one line:
+  `(t_center, z)` shape as `chat_signal`.
+- `perception.moment_map(words, audio_z, captions)` — the core fusion. It reuses the
+  same sentence splitter as the legacy `director.stream_map` (`perception._sentences`:
+  break the transcript on `.?!`) so both map formats agree on line boundaries. For each
+  sentence `[a, b, text]` it emits one line:
 
   ```
-  [546s] (chat!!)(LOUD) NO WAY, did you see that?!
+  [546s] (LOUD) NO WAY, did you see that?!
   ```
 
-  `(chat!)`/`(chat!!)` and `(loud)`/`(LOUD)` are z-score threshold marks (1.5 / 3.0)
-  for that sentence's time span. Scene captions interleave as their own lines in time
-  order: `[550s] [scene: player dies to a boss]`. **Every timestamp is in raw seconds**
-  (`[546s]`, not `[09:06]`) — this is deliberate (see §7, a real bug this fixed).
-  With no chat/audio/caption signals the map degrades byte-for-byte to the plain
-  transcript map (`director.stream_map`).
-- `perception.top_windows(chat_z, audio_z, k=8, span_s=120)` — greedily finds the
-  `k` highest-combined-signal, non-overlapping 120s windows (chat + loudness, summed,
-  clamped ≥0). These are the windows that get **contact-sheeted** (see §4) so the
-  director's vision has something to look at, and also the fallback ranking signal
-  for the no-brief flat path (`rank.select_by_signal`).
+  `(loud)`/`(LOUD)` are z-score threshold marks (1.5 / 3.0) for that sentence's time
+  span. **Every timestamp is in raw seconds** (`[546s]`, not `[09:06]`) — this is
+  deliberate (see §7, a real bug this fixed). With no audio signal the map degrades
+  byte-for-byte to the plain transcript map (`director.stream_map`). (The `captions` param
+  still renders `[550s] [scene: ...]` lines if given a dict, but nothing populates it now
+  that VLM captioning is gone.)
+- `perception.top_windows(audio_z, k=8, span_s=120)` — greedily finds the `k`
+  highest-loudness, non-overlapping 120s windows (RMS z-score, clamped ≥0). Formerly used
+  to pick footage for contact sheets; now only the no-brief flat path's ranking relies on
+  loudness (via `rank.select_by_signal`, which still blends chat + loudness).
 - `run/<vod>/signals.json` and `run/<vod>/map_v2.txt` are written as inspectable
   artifacts — "did the pipeline actually hear that scream?"
 
@@ -94,11 +101,11 @@ and, per window, asks a small model for:
 
 parsed into a `Chapter` (with `start_s`/`end_s` taken from the window itself, not the
 model — the model can't get those wrong). A failed window degrades to a stub chapter
-(never crashes the run). Cached to `run/<vod>/chapters.json` (skip-if-exists).
-`perception.chapter_guide(chapters)` renders the coarse table of contents; full-
-resolution per-chapter transcript excerpts are also written to `run/<vod>/map/
-chapter_NN.txt` so the director can `Read` into one chapter for precision if the
-digest is too coarse (see §4).
+(never crashes the run). Cached to `run/<vod>/<run_name>/chapters.json` (skip-if-exists,
+so a review round within the same run reuses it). `perception.chapter_guide(chapters)`
+renders the coarse table of contents; full-resolution per-chapter transcript excerpts
+are also written to `run/<vod>/<run_name>/map/chapter_NN.txt` so the director can `Read`
+into one chapter for precision if the digest is too coarse (see §4).
 
 ## 4. Building the director's input
 
@@ -114,11 +121,10 @@ digest is too coarse (see §4).
 - **Too big, no chapters (scout disabled):** sends the raw map anyway with a printed
   warning; may overflow and fall back to flat selection.
 
-**Vision for the outline call:** if vision is on, `frames.contact_sheet` renders a
-3×3 JPEG grid (timestamps burned in) for each of the `top_windows`, saved under
-`run/<vod>/sheets/`. These are handed to the director as either file paths (CLI
-backend — the model `Read`s up to `director.MAX_READS=3` of them) or inlined base64
-image blocks (API backend, capped at 8).
+**Chapter drill-down:** on the CLI backend the director runs with `--tools Read` so it can
+`Read` the per-chapter full-resolution map files (`run/<vod>/map/chapter_NN.txt`, see §3)
+up to `director.MAX_READS=3` times when the digest excerpts are too coarse. (This is all
+that remains of the old `Read`/vision plumbing — image contact sheets were removed.)
 
 ## 5. The director call — `director.outline()`
 
@@ -168,13 +174,13 @@ Key prompt instructions (`director._SYSTEM`):
 - If no `--brief` is given, `director.pick_system(None)` swaps in
   `_SYSTEM_STREAM_INTRO`: "find the ONE story this stream tells" instead of following
   an editorial brief — same beat schema, same arc rules, different framing only.
-- `_MAP_LEGEND` (appended to every prompt) explains the `(chat!)`/`(loud)`/`[scene:
+- `_MAP_LEGEND` (appended to every prompt) explains the `(loud)`/`[scene:
   ...]` marks so the model treats scene captions as weak visual hints, not fact.
 
 **Backends** (`outline(backend="cli")`, default): tries `director._complete_cli` first
 — shells `claude -p` (Claude Code headless), billed against the user's Claude
-subscription rather than the API key, with `--tools Read` enabled when contact sheets
-exist (model can `Read` up to 3 images/chapter files). On CLI failure it falls
+subscription rather than the API key, with `--tools Read` enabled when a `run_dir` is set
+(model can `Read` up to 3 per-chapter map files). On CLI failure it falls
 through to `director._complete` (the Anthropic SDK, `ANTHROPIC_API_KEY`, adaptive
 thinking, live-streamed to the console). Either path validates the model's raw JSON
 text into `Outline` (`_extract_json` + `model_validate`) — Anthropic's strict
@@ -224,8 +230,11 @@ re-introduce exactly the score-driven selection the director exists to replace,
 knifing a low-scoring-but-structurally-essential setup or connective beat for being
 "boring." Instead (`narrative._trim_to_budget`):
 
-- Only trims past a **ceiling** `target_s * (1 + tol)` (default `tol=0.25`) — the
-  target is a goal, not a hard cap; overshoot within tolerance ships untouched.
+- Only trims past a **ceiling** `target_s * (1 + tol)` (default `tol=0.35`) — the
+  target is a goal, not a hard cap; overshoot within tolerance ships untouched. The
+  director/critic prompts are worded the same way (`_OUTLINE_INSTR`/`_REVIEW_SYSTEM`
+  now say the runtime is "a rough guide, not a hard limit"), so beats don't get
+  stretched with filler or gutted mid-payoff just to chase the exact number.
 - When it must drop, it drops the **most expendable role first**
   (`_DROP_PRIORITY`): `hook`/`climax`/`button` are protected (priority 0, the arc
   spine), `setup` next (1), `reversal`/`payoff` (2), and `escalation` beats (3, the
@@ -253,23 +262,21 @@ casting, `pipeline.make` loops up to `review_rounds` (default 2; `0` = single pa
    transition/viewer-question **and the real transcript text of its chosen span** (not
    the director's plan — the critic judges reality). Dropped-for-budget beats are
    listed explicitly with a note not to re-add them at full length.
-2. On the **last scheduled round only** (cost control), if vision is on, a fast 480p
-   proxy of the current cut is rendered (`frames.render_proxy`) and cut into
-   timestamped contact sheets (`frames.cut_sheet`) — so the final review round can
-   literally *look at* the assembled video, not just its transcript.
-3. `director.review(map, brief, outline_log, ...)` — one more LLM call. The critic
+2. `director.review(map, brief, outline_log, ...)` — one more LLM call. The critic
    judges: HOOK (first ~10s), ARC (does it build, or is it a flat highlight reel?),
    SETUP CLARITY, EXPECTATION (does the next beat pay off what the last one raised?),
    CONNECTIVE TISSUE, REDUNDANCY (cut duplicate beats), DEAD WEIGHT (re-cut rambling
    beats via `segments`), PAYOFF COMPLETION (don't cut before the payoff lands),
-   ENDING (same scrutiny as the hook — must breathe), PACING (energy variety).
+   ENDING (same scrutiny as the hook — must breathe), PACING (energy variety). This is a
+   text-only critic — it judges the realized transcript, not rendered frames (the old
+   480p-proxy visual critic was removed with the rest of the vision layer).
    Returns `Review{approved: bool, notes: str, outline: Outline}` — either an
    approval or a **full re-plan** (reorder/drop/merge/add connective beats/re-tag
    roles/retighten bounds).
-4. If approved, or rounds are exhausted, or the review call itself fails (never
+3. If approved, or rounds are exhausted, or the review call itself fails (never
    discard a working cast over a review hiccup), the loop stops. Otherwise `cast()`
    re-runs on the revised outline and the loop repeats.
-5. The stream map is sent as a Claude **prompt-cache-marked** block *before* the
+4. The stream map is sent as a Claude **prompt-cache-marked** block *before* the
    realized cut in the user message, and stays byte-identical across rounds — so
    round 2+ reads the (often huge, multi-hour) map from cache instead of re-paying for
    it every round.
@@ -281,7 +288,7 @@ always a Claude call, so the fully-free local path stays single-pass by design.
 
 `sections = [{"title", "role", "energy", "clips": [{"start","end","role","energy"}, ...]}, ...]`
 — chronologically sorted (guarantees forward playback even though beats/casting
-worked beat-by-beat) — plus `outline_log` (written to `run/<vod>/outline.json`, the
+worked beat-by-beat) — plus `outline_log` (written to `run/<vod>/<run_name>/outline.json`, the
 full inspectable comprehension artifact: every beat's editorial fields, chosen
 span(s), score, realized text, dropped beats, and critic notes per round) and
 `cut_plan.md` (`narrative.cut_plan_md`, a human-readable editor's-notebook rendering
@@ -304,20 +311,20 @@ candidates (`retrieve.retrieve` by brief-embedding similarity, or
 against), LLM-score each against the brief, snap to sentences, then
 `select.budget_select` greedily fills the duration target highest-score-first in
 chronological order. Output is a **single untitled section** — no arc, no roles, just
-relevant clips in time order. This is the same selection logic the legacy `detect`/
-`edit` CLI verbs use (minus the director/critic entirely), kept as the safety net so
-`make` always ships *something* even when the LLM story pass can't run.
+relevant clips in time order. Kept as the safety net so `make` always ships *something*
+even when the LLM story pass can't run: a director failure after a long transcription
+must not throw the whole run away. (Chunk embeddings are computed lazily *here* — the
+director path never reads them.)
 
 ## Key source files (for further reading)
 
 | File | Role |
 |---|---|
 | `refire/pipeline.py` | Orchestrates `make()`: detect core → perception → scout → director → cast → critic loop → style/manifest/render |
-| `refire/perception.py` | Pure fusion of transcript + chat-z + audio-z + VLM captions into the moment map; `top_windows`, `digest`, `chapter_guide` |
+| `refire/perception.py` | Pure fusion of transcript + audio-z into the moment map; `top_windows`, `digest`, `chapter_guide` (chat-z and VLM captions no longer fused) |
 | `refire/director.py` | `Outline`/`Beat`/`Segment`/`Chapter`/`Review` schemas, prompts, `chapterize`, `outline`, `review`, CLI/API/local backends |
 | `refire/narrative.py` | `cast()` (outline → sections), `_trim_to_budget`, `cut_plan_md` |
-| `refire/frames.py` / `refire/vlm.py` | Frame sampling, contact sheets, local VLM scene captions |
 | `refire/select.py` | `snap_to_sentences`, `speech_intervals`, `compress_silence`, `budget_select` (flat path) |
-| `refire/rank.py` | Legacy score blending (`rank_select`) + `select_by_signal` (no-brief flat candidate ranking) |
+| `refire/rank.py` | `select_by_signal` (no-brief flat candidate ranking, by chat + loudness z) |
 | `refire/style.py` | Role → presentation knobs (zoom/overlay density/caption pacing/title card) |
 | `refire/ae_export.py`, `refire/assemble.py` | Manifest / ffmpeg-rendered output from `sections` |

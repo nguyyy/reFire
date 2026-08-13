@@ -1,6 +1,7 @@
 """Transcribe audio to word-level timestamps with faster-whisper (local GPU)."""
 from __future__ import annotations
 
+import difflib
 import glob
 import json
 import os
@@ -15,6 +16,14 @@ class Word(TypedDict):
     text: str
     start: float
     end: float
+
+
+# large-v3-turbo has 4 decoder layers to large-v3's 32 at near-identical WER, and is the
+# single biggest lever on a 6h VOD. Pass model_size="large-v3" to get the old quality back.
+DEFAULT_WHISPER_MODEL = "large-v3-turbo"
+# 8 fits alongside turbo's weights on an 8GB card with room to spare; raise it if you have
+# more VRAM (throughput scales with it), or drop compute_type to int8_float16 to make room.
+DEFAULT_BATCH_SIZE = 8
 
 
 def _register_cuda_dlls() -> None:
@@ -48,39 +57,48 @@ def _wav_duration(wav_path: str | Path) -> float:
 def transcribe(
     wav_path: str | Path,
     cache_path: str | Path | None = None,
-    model_size: str = "large-v3",
+    model_size: str = DEFAULT_WHISPER_MODEL,
     device: str = "cuda",
     hotwords: str = "",
     progress: Callable[[float], None] | None = None,
     backend: str = "local",
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    compute_type: str = "float16",
 ) -> list[Word]:
     """Return word-level transcript via the chosen `backend`. Caches to cache_path JSON.
 
     `backend` selects the transcriber plugin ("local" faster-whisper, default and free;
     "deepgram" cloud — wired but deferred). All backends normalize to the same
     {text,start,end} word schema. `hotwords` is a comma-joined game glossary that biases
-    decoding toward proper nouns. The cache is keyed by BOTH the glossary AND the backend
-    (a `.source.json` sidecar records backend/model), so switching either re-transcribes
-    instead of serving a stale or wrong-engine transcript. `progress(frac)` (0..1), if
-    given, is called as decoding advances.
+    decoding toward proper nouns. The cache is keyed by the glossary, the backend AND the
+    model (a `.source.json` sidecar records backend/model), so changing any of them
+    re-transcribes instead of serving a stale or wrong-engine transcript. `progress(frac)`
+    (0..1), if given, is called as decoding advances.
     """
     cache_path = Path(cache_path) if cache_path else None
     sidecar = cache_path.with_suffix(".glossary.json") if cache_path else None
     source = cache_path.with_suffix(".source.json") if cache_path else None
     if cache_path and cache_path.exists():
         prev = sidecar.read_text(encoding="utf-8") if sidecar and sidecar.exists() else '""'
-        # legacy caches predate the source sidecar -> treat them as the local backend
-        src_backend = (json.loads(source.read_text(encoding="utf-8")).get("backend")
-                       if source and source.exists() else "local")
-        if json.loads(prev) == hotwords and src_backend == backend:
+        # legacy caches predate the source sidecar -> treat them as local/large-v3, the
+        # only thing they could have been.
+        src = (json.loads(source.read_text(encoding="utf-8"))
+               if source and source.exists() else {})
+        # The model MUST be part of the key: without it, switching to a faster model
+        # silently serves the old model's transcript and every A/B is a lie.
+        if (json.loads(prev) == hotwords
+                and src.get("backend", "local") == backend
+                and src.get("model", "large-v3") == model_size):
             return json.loads(cache_path.read_text(encoding="utf-8"))
 
     fn = _BACKENDS.get(backend)
     if fn is None:
         raise SystemExit(f"unknown transcriber '{backend}' "
                          f"(choices: {', '.join(sorted(_BACKENDS))})")
-    words = fn(wav_path, hotwords=hotwords, model_size=model_size, device=device,
-               progress=progress)
+    words = snap_to_glossary(
+        fn(wav_path, hotwords=hotwords, model_size=model_size, device=device,
+           progress=progress, batch_size=batch_size, compute_type=compute_type),
+        hotwords)
 
     if cache_path:
         cache_path.write_text(json.dumps(words), encoding="utf-8")
@@ -91,20 +109,62 @@ def transcribe(
     return words
 
 
-def _stt_local(wav_path, hotwords="", model_size="large-v3", device="cuda",
-               progress=None, **_kw) -> list[Word]:
+_STRIP = " \t\"'.,!?:;()[]…-"
+_CUTOFF = 0.72   # "arlequino" vs "Arlecchino" scores 0.74; below this it's a real word
+
+
+def snap_to_glossary(words: list[Word], hotwords: str) -> list[Word]:
+    """Rewrite near-miss proper nouns to their glossary spelling, in place.
+
+    Hotwords only *bias* the decoder -- once it has committed to "kinech" nothing
+    downstream fixes it, and the caption, the LLM director and the search index all
+    inherit the error. Guards against snapping ordinary English: a candidate must
+    share the first letter, be >=5 chars, and clear _CUTOFF similarity.
+    """
+    by_initial: dict[str, list[str]] = {}
+    canon: dict[str, str] = {}
+    for term in hotwords.split(","):
+        for tok in term.split():                 # "Hu Tao" -> per-token matching
+            if len(tok) >= 5 and tok.lower() not in canon:
+                canon[tok.lower()] = tok
+                by_initial.setdefault(tok[0].lower(), []).append(tok.lower())
+    if not canon:
+        return words
+
+    for w in words:
+        core = w["text"].strip(_STRIP)
+        key = core.lower()
+        if len(core) < 5 or key in canon:
+            continue
+        hit = difflib.get_close_matches(key, by_initial.get(key[0], ()), n=1,
+                                        cutoff=_CUTOFF)
+        if hit:
+            w["text"] = w["text"].replace(core, canon[hit[0]], 1)
+    return words
+
+
+def _stt_local(wav_path, hotwords="", model_size=DEFAULT_WHISPER_MODEL, device="cuda",
+               progress=None, batch_size=DEFAULT_BATCH_SIZE, compute_type="float16",
+               **_kw) -> list[Word]:
     """faster-whisper local GPU backend (default; free/private)."""
     _register_cuda_dlls()
-    from faster_whisper import WhisperModel  # local import: heavy, GPU-only
+    # local imports: heavy, GPU-only
+    from faster_whisper import BatchedInferencePipeline, WhisperModel
 
-    model = WhisperModel(model_size, device=device, compute_type="float16")
+    model = WhisperModel(model_size, device=device, compute_type=compute_type)
     # hotwords is the bounded bias path; passing initial_prompt too would (a) make
     # faster-whisper ignore hotwords and (b) feed an uncapped prompt that can push
     # the decoder past Whisper's 448-position limit. condition_on_previous_text=False
     # keeps positions bounded so a hallucinated/runaway segment can't overflow either.
-    segments, _ = model.transcribe(
-        str(wav_path), word_timestamps=True,
-        hotwords=hotwords or None, condition_on_previous_text=False)
+    #
+    # Batched + VAD is the whole speed story on a multi-hour VOD: sequential decoding
+    # leaves the GPU idle between windows, and without VAD we pay full decode price for
+    # the hours of dead air a Twitch stream contains. faster-whisper maps VAD-clipped
+    # timestamps back onto absolute source seconds, so every downstream consumer
+    # (perception, casting, ae_export) is unaffected.
+    segments, _ = BatchedInferencePipeline(model=model).transcribe(
+        str(wav_path), batch_size=batch_size, word_timestamps=True,
+        hotwords=hotwords or None, vad_filter=True, condition_on_previous_text=False)
 
     dur = _wav_duration(wav_path) if progress else 0.0
     words: list[Word] = []
