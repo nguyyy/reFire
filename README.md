@@ -110,6 +110,8 @@ output files are saved under `run/<vod_id>/`:
 - `cut_plan.md` - markdown file of storyboard logs and dialogue segments.
 - `rough.mp4` - rendered video compilation.
 - `ae/manifest.json` - manifest structure read by the after effects script.
+- `ae/captions.srt` - the same captions in master-timeline time, written on demand
+  by `refire srt` for the premiere panel (and anything else that eats srt).
 
 ---
 
@@ -137,6 +139,38 @@ then **window > extensions > refire**.
 already have a manifest? skip make and hit **load** in 04.
 
 panel misbehaving? with it open, browse to `http://localhost:8088` for devtools.
+
+---
+
+## premiere pro panel
+
+a fork of the ae panel lives in `refire/ppro/`, installed the same way (its own
+folder, so both can be installed at once):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File refire\ppro\install.ps1
+```
+
+restart premiere, then **window > extensions > refire**. devtools on
+`http://localhost:8089`.
+
+**scope: clip selection + subtitling, nothing else.** premiere's extendscript
+cannot create text layers, cannot set keyframe easing, and has no documented
+transition api — so the zoom punches, emote overlays, sfx, section cards and
+music bed are the after effects half of reFire and are not built here. what you
+get is the tedious part: every chosen clip on **v1** in story order, dead air
+already cut (one trackitem per kept span — real cuts, no time remap), plus a
+**captions.srt** in the `reFire` bin to drag onto the timeline.
+
+**build** regenerates `captions.srt` (`python -m refire srt <manifest>`) at the
+current caption offset and then lays out a fresh `reFire cut N` sequence. the
+offset nudge is instant because it only rewrites the srt — no `make` re-run.
+
+the srt is standalone and useful on its own (youtube, a burn-in):
+
+```powershell
+python -m refire srt run\<vod>\<run>\ae\manifest.json --offset -0.15
+```
 
 ---
 

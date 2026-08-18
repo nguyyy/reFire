@@ -35,6 +35,27 @@ def _ts(seconds: float) -> str:
 
 PAUSE_GAP = 0.35      # seconds of silence that forces a new caption line
 MAX_CARRY = 0.15      # max seconds a word's karaoke highlight may hold past its end
+MAX_WORD_S = 0.7      # longest a single spoken word is assumed to occupy -- see `_gap`
+
+
+def _gap(w: dict, nxt: dict) -> float:
+    """Silence between two words, corrected for the ASR's word-end padding.
+
+    faster-whisper does not leave gaps: it stretches each word's `end` to meet the next
+    word's `start`, so `nxt["start"] - w["end"]` reads 0.0 across 74% of a real
+    transcript -- including every audible pause, which is exactly where a caption line
+    has to break. A held pause is billed to the word before it ('me' 400.78-402.14 is
+    "me" plus a second of silence), so clamping the word to a plausible spoken length
+    recovers the silence hiding inside it.
+
+    Detection only -- displayed caption times keep the real timestamps.
+
+    ponytail: MAX_WORD_S is the calibration knob, not a truth. Raise it if drawn-out
+    words ("whaaaat") split lines too eagerly, lower it if pauses are still missed. A
+    per-speaker estimate (median word length x xN) is the upgrade if one value can't
+    cover both.
+    """
+    return nxt["start"] - min(w["end"], w["start"] + MAX_WORD_S)
 
 
 def group_words(
@@ -46,8 +67,11 @@ def group_words(
     """Words within [seg_start, seg_end) -> clip-relative, zero-based line groups.
 
     A line breaks on sentence-ending punctuation, on a pause >= PAUSE_GAP before
-    the next word, or once it hits words_per_line. This keeps each line on a single
-    phrase and stops a caption from hanging on screen across a silence.
+    the next word (measured by `_gap`, which sees through the ASR's word-end padding),
+    or once it hits words_per_line. This keeps each line on a single phrase and stops a
+    caption from hanging on screen across a silence -- or, worse, from opening with the
+    tail of one phrase and running into the head of the next, which puts words on screen
+    a full second before they are spoken.
     """
     clip_len = seg_end - seg_start
     sel = [
@@ -63,7 +87,7 @@ def group_words(
     for i, w in enumerate(sel):
         buf.append(w)
         sentence_end = w["text"][-1:] in ".?!"
-        nxt_gap = (sel[i + 1]["start"] - w["end"]) if i + 1 < len(sel) else 0.0
+        nxt_gap = _gap(w, sel[i + 1]) if i + 1 < len(sel) else 0.0
         if sentence_end or nxt_gap >= PAUSE_GAP or len(buf) >= words_per_line:
             groups.append(buf)
             buf = []

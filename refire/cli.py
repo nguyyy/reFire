@@ -141,7 +141,19 @@ def main(argv: list[str] | None = None) -> None:
     mk.add_argument("--progress-file", default=None,
                     help="write {pct,msg,done} JSON here for a GUI progress bar")
 
+    sr = sub.add_parser("srt", help="manifest.json -> captions.srt (the Premiere path)")
+    sr.add_argument("manifest", help="path to a run's ae/manifest.json")
+    sr.add_argument("--offset", type=float, default=0.0,
+                    help="shift every cue by this many seconds (caption nudge)")
+
     args = p.parse_args(argv)
+
+    if args.cmd == "srt":
+        # Pure JSON -> text, so the Premiere panel re-runs this on every caption
+        # nudge instead of re-running the whole `make`.
+        from .srt import write_srt
+        print(f"Captions: {write_srt(args.manifest, args.offset).resolve()}")
+        return
 
     if args.cmd == "make":
         file_w = _progress_writer(args.progress_file) if args.progress_file else None
@@ -193,7 +205,7 @@ def main(argv: list[str] | None = None) -> None:
         # Absolute: ExtendScript's File() resolves a relative path against AE's own
         # working directory, not ours, so a relative path here silently finds nothing.
         print(f"Manifest: {Path(out).resolve()}")
-        print("In After Effects: Window > Extensions > reFire -> Build.")
+        print("In After Effects or Premiere Pro: Window > Extensions > reFire -> Build.")
 
 
 if __name__ == "__main__":

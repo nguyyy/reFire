@@ -383,7 +383,14 @@ def test_realized_script_renders_beats_in_order():
     s = director._realized_script(log)
     assert s.index("Open") < s.index("Close")          # story order preserved
     assert "first line" in s and "last line" in s      # realized transcript, not the plan
-    assert "[00:00-00:05]" in s and "[01:05-01:10]" in s
+    # source stamps say where each moment sat in the STREAM -- what the critic needs to
+    # re-cut a beat
+    assert "source 00:00-00:05" in s and "source 01:05-01:10" in s
+    # ...and the cut position says where the VIEWER is when they reach it. Beat 2 plays at
+    # 00:05 in the finished video even though it came from 01:05 of the stream; without
+    # this the critic cannot see a sag, only a list of moments.
+    assert "cut 00:00-00:05" in s and "cut 00:05-00:10" in s
+    assert "PACING AUDIT" in s
     assert "the idea" in s
 
 
@@ -591,3 +598,73 @@ def test_cut_plan_md_shows_segment_cuts():
          "segments": [[0.0, 10.0], [40.0, 60.0]], "dur": 30.0, "score": 9.0}]}
     md = narrative.cut_plan_md(log)
     assert "2 segments, 30s kept" in md
+
+
+# --- cold open: the one clip allowed to play out of chronological order ---
+
+def _co_setup(monkeypatch):
+    monkeypatch.setattr("refire.score.score_chunk",
+                        lambda c, brief="", model="": {"llm_score": 9.0, "reason": "r"})
+    return _words("a b c. " * 40)          # 120 words, 1s apart -> 0..120s
+
+
+def _co_outline(cold, first_start=0.0):
+    """Two beats plus an optional teaser. The second beat is the one being teased."""
+    return SimpleNamespace(
+        central_idea="x", cold_open=cold,
+        beats=[SimpleNamespace(title="Open", intent="i", query="q",
+                               start_s=first_start, end_s=first_start + 11.8),
+               SimpleNamespace(title="Peak", intent="i", query="q",
+                               start_s=60.0, end_s=71.8)])
+
+
+def test_cold_open_plays_first_out_of_stream_order(monkeypatch):
+    words = _co_setup(monkeypatch)
+    ol = _co_outline(SimpleNamespace(start_s=63.0, end_s=66.0))
+    sections, log, _ = narrative.cast(ol, [], words, target_s=1000.0, model="m")
+    assert [s["title"] for s in sections] == ["Cold Open", "Open", "Peak"]
+    co = sections[0]["clips"][0]
+    # it is a FLASH-FORWARD: source-wise it comes from after the beat that follows it
+    assert co["start"] == pytest.approx(63.0) and co["start"] > sections[1]["clips"][0]["start"]
+    assert log["cold_open"]["dur"] == pytest.approx(co["end"] - co["start"])
+
+
+def test_cold_open_is_clamped_to_a_teaser(monkeypatch):
+    words = _co_setup(monkeypatch)
+    ol = _co_outline(SimpleNamespace(start_s=63.0, end_s=110.0))   # a whole scene
+    sections, _, _ = narrative.cast(ol, [], words, target_s=1000.0, model="m")
+    co = sections[0]["clips"][0]
+    assert co["end"] - co["start"] <= narrative.COLD_OPEN_MAX_S + 2.0   # +snap pad
+
+
+def test_cold_open_the_cut_never_delivers_is_dropped(monkeypatch):
+    """A teaser of footage no beat contains is a promise the video breaks."""
+    words = _co_setup(monkeypatch)
+    ol = _co_outline(SimpleNamespace(start_s=95.0, end_s=98.0))   # inside no beat
+    sections, log, _ = narrative.cast(ol, [], words, target_s=1000.0, model="m")
+    assert [s["title"] for s in sections] == ["Open", "Peak"]
+    assert log["cold_open"] is None
+
+
+def test_cold_open_next_to_the_opening_beat_is_a_stutter_not_a_promise(monkeypatch):
+    words = _co_setup(monkeypatch)
+    # first beat starts at 54s; teasing 63s is 9s ahead of itself
+    ol = _co_outline(SimpleNamespace(start_s=63.0, end_s=66.0), first_start=54.0)
+    sections, _, _ = narrative.cast(ol, [], words, target_s=1000.0, model="m")
+    assert [s["title"] for s in sections] == ["Open", "Peak"]
+
+
+def test_no_cold_open_leaves_the_cut_untouched(monkeypatch):
+    words = _co_setup(monkeypatch)
+    ol = _co_outline(None)
+    sections, log, _ = narrative.cast(ol, [], words, target_s=1000.0, model="m")
+    assert [s["title"] for s in sections] == ["Open", "Peak"]
+    assert log["cold_open"] is None
+
+
+def test_cold_open_shifts_the_pacing_clock(monkeypatch):
+    """Beats play later in the finished video than their kept footage alone implies."""
+    from refire.pacing import cut_timeline
+    log = {"cold_open": {"start": 63.0, "end": 68.0, "dur": 5.0},
+           "beats": [{"title": "A", "dur": 30.0, "start": 0.0, "end": 30.0, "text": "x"}]}
+    assert cut_timeline(log)[0]["at"] == 5.0

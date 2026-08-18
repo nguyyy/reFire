@@ -73,3 +73,47 @@ def test_snap_extends_to_sentence_boundaries():
           for i, t in enumerate("Today we review builds. Lets go now.".split())]
     s, e = snap_to_sentences(ws, 2.5, 3.0)   # cut lands mid-"review builds."
     assert s == 0.0 and e == 3.8             # pulled to sentence start + end
+
+
+# --- pauses hidden inside the previous word (the ASR-padding regression) ---
+
+def _padded(pairs):
+    """Words whose `end` is stretched to meet the next word's `start`, the way
+    faster-whisper actually emits them (74% of a real transcript has a 0.0 gap)."""
+    out = []
+    for i, (text, start) in enumerate(pairs):
+        end = pairs[i + 1][1] if i + 1 < len(pairs) else start + 0.4
+        out.append({"text": text, "start": start, "end": end})
+    return out
+
+
+def test_a_pause_billed_to_the_previous_word_still_breaks_the_line():
+    """"today we are gonna play <1s pause> genshin impact".
+
+    The silence is charged to "play" (0.4s of speech, `end` stretched to 1.4s), so the
+    raw end->start gap reads 0.0 and the line used to run straight through the pause --
+    putting "genshin impact" on screen a second before either word is spoken.
+    """
+    words = _padded([("today", 0.0), ("we", 0.4), ("are", 0.8), ("gonna", 1.2),
+                     ("play", 1.6), ("genshin", 2.6), ("impact", 3.0)])
+    assert words[4]["end"] - words[4]["start"] == 1.0     # the pause hides in "play"
+    assert words[5]["start"] - words[4]["end"] == 0.0     # ...so the raw gap sees nothing
+
+    groups = group_words(words, 0.0, 10.0, words_per_line=5)
+    texts = [[w["text"] for w in g] for g in groups]
+    assert texts == [["today", "we", "are", "gonna", "play"], ["genshin", "impact"]]
+    # and the second line now appears when it is spoken, not a second early
+    assert groups[1][0]["start"] == 2.6
+
+
+def test_ordinary_padded_speech_does_not_break_every_word():
+    """Zero raw gaps are the NORM, so the fix must not split continuous speech."""
+    words = _padded([("one", 0.0), ("two", 0.35), ("three", 0.7), ("four", 1.05)])
+    groups = group_words(words, 0.0, 10.0, words_per_line=8)
+    assert len(groups) == 1
+
+
+def test_a_drawn_out_word_is_allowed_to_be_long():
+    # "whaaaat" genuinely runs 0.65s with no pause after it -- under MAX_WORD_S
+    words = _padded([("whaaaat", 0.0), ("no", 0.65), ("way", 1.0)])
+    assert len(group_words(words, 0.0, 10.0, words_per_line=8)) == 1

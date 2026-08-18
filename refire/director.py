@@ -28,8 +28,10 @@ class _JsonModel(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _drop_nulls(cls, data):
+        # ponytail: models sometimes Title-Case the keys ("T_s"/"Why"); lowercase is enough
+        # since every field name here is already lowercase.
         if isinstance(data, dict):
-            return {k: v for k, v in data.items() if v is not None}
+            return {k.lower(): v for k, v in data.items() if v is not None}
         return data
 
 
@@ -70,6 +72,9 @@ class Outline(_JsonModel):
     story_shape: str = ""           # the ONE shape this VOD supports (e.g. "confidence -> chaos")
     viewer_promise: str = ""        # what the viewer is promised they're watching
     ending_needed: str = ""         # what kind of ending the story has to land
+    # flash-forward teaser played before beat 1: a few seconds of the peak, lifted from
+    # footage the cut delivers later. The one deliberate break in chronological order.
+    cold_open: Segment | None = None
     beats: list[Beat]
 
 
@@ -111,7 +116,9 @@ class Review(_JsonModel):
 # shape string keeps the Claude + local directors in lockstep.
 _OUTLINE_JSON = (
     '{"central_idea": "<str>", "story_shape": "<str>", "viewer_promise": "<str>", '
-    '"ending_needed": "<str>", "beats": [{"title": "<str>", "role": '
+    '"ending_needed": "<str>", '
+    '"cold_open": {"start_s": <number>, "end_s": <number>}|null, '
+    '"beats": [{"title": "<str>", "role": '
     '"<hook|setup|escalation|reversal|climax|payoff|button>", "intent": "<str>", '
     '"viewer_question": "<str>", "turn": "<str>", "transition_in": "<str>", '
     '"texture": "<str>", "energy": <1-5>, "setup_start_s": <number|null>, '
@@ -142,6 +149,13 @@ _SYSTEM = (
     "payoff'.\n"
     "- viewer_promise: what the viewer is promised they're watching (the through-line).\n"
     "- ending_needed: the kind of moment the story has to end on to feel complete.\n"
+    "- cold_open: OPTIONAL flash-forward teaser, 3-6 seconds, played before the first "
+    "beat. Lift it from the loudest instant of the climax or peak payoff -- the reaction "
+    "itself, no setup and no context -- so the viewer opens on a question ('how did we get "
+    "here?') and stays to see it answered. It MUST come from footage a later beat "
+    "actually contains, or the video breaks the promise it opened with. Set it to null if "
+    "the story genuinely has no single peak worth teasing, or if the first beat already "
+    "IS that peak (a teaser 20 seconds ahead of itself is just a stutter).\n"
     "Then break it into BEATS in story order -- which for a mostly-linear gaming stream "
     "is chronological. A beat is a slot in the story with a job, not an interesting clip. "
     "Each beat needs:\n"
@@ -229,6 +243,9 @@ _REVIEW_SYSTEM = (
     "role/intent/viewer_question), and the full stream map. Judge it as the VIEWER will "
     "experience it:\n"
     "- HOOK: do the first ~10 seconds grab attention?\n"
+    "- COLD OPEN: if the cut opens with a flash-forward teaser, does the video actually "
+    "deliver that moment later, and is it the strongest thing in the cut? A teaser of a "
+    "weak moment, or of something the cut never reaches, is worse than no teaser.\n"
     "- ARC: does it build (hook -> setup -> escalation -> climax -> resolution/button), "
     "or is it a flat list of equally-good moments (a highlight reel)?\n"
     "- SETUP CLARITY: does any clip start without enough context for the viewer to "
@@ -248,7 +265,15 @@ _REVIEW_SYSTEM = (
     "reaction/aftermath -- rather than cutting off the instant the payoff lands (an abrupt "
     "ending)? If it stops dead, extend the final beat's end_s / reaction_end_s or add a "
     "short wind-down button beat.\n"
-    "- PACING: does the energy vary, or is every beat the same intensity (monotony)?\n"
+    "- MOMENTUM: the realized cut ends with a PACING AUDIT -- positions and durations "
+    "measured from the finished video, not opinions. Treat its flags as facts and fix the "
+    "stretch it names. A flat run is the cut losing the viewer: break it by re-cutting "
+    "those beats tighter with `segments`, by moving a stronger moment from the stream map "
+    "into that stretch, or by dropping whichever of them is redundant -- NOT by deleting "
+    "the middle wholesale, which leaves the story with no bridge from setup to climax. A "
+    "thin or over-long beat gets `segments`, not deletion. If both peaks land early, the "
+    "problem is structural: find a later escalation the footage supports.\n"
+    "- PACING: does the energy vary beat to beat, or is every beat the same intensity?\n"
     "If the cut already tells a cohesive story, set approved=true and briefly say why in "
     "notes. Otherwise set approved=false, name the main problems in notes, and return a "
     "REVISED outline: reorder, drop, merge, or ADD connective beats, re-tag roles, and "
@@ -372,30 +397,49 @@ def _realized_script(outline_log: dict) -> str:
     This is the closed-loop signal -- the critic judges what the video really says against
     what each beat was meant to do, not the director's original plan. Pure (no model) so
     it's unit-testable.
+
+    Every beat leads with its position in the FINISHED CUT and the source span comes
+    second. The source stamp alone (which is all this used to print) tells the critic
+    where a moment sat in the stream, which is what it needs to RE-CUT a beat but tells it
+    nothing about where the viewer is when they reach it -- so a rubric item like "does
+    the energy vary?" had no timeline to vary across. `pacing.audit` closes the same gap
+    with measurements the model can't do in its head.
     """
+    from .pacing import _mmss, audit_note, cut_timeline
+
     lines = [f"CENTRAL IDEA: {outline_log.get('central_idea', '')}"]
     if outline_log.get("story_shape"):
         lines.append(f"STORY SHAPE: {outline_log['story_shape']}")
     if outline_log.get("viewer_promise"):
         lines.append(f"VIEWER PROMISE: {outline_log['viewer_promise']}")
     lines.append("")
+    timeline = cut_timeline(outline_log)
     for i, b in enumerate(outline_log.get("beats", []), 1):
         a, z = b.get("start"), b.get("end")
         segs = b.get("segments") or []
         cut = (f", {len(segs)} cuts, {int(b.get('dur') or 0)}s kept" if len(segs) > 1 else "")
-        ts = (f"[{int(a) // 60:02d}:{int(a) % 60:02d}-"
-              f"{int(z) // 60:02d}:{int(z) % 60:02d}{cut}]"
-              if a is not None and z is not None else "[--]")
+        ts = (f"source {int(a) // 60:02d}:{int(a) % 60:02d}-"
+              f"{int(z) // 60:02d}:{int(z) % 60:02d}{cut}"
+              if a is not None and z is not None else "source [--]")
         role = b.get("role") or "?"
+        t = timeline[i - 1] if i <= len(timeline) else None
+        where = (f"cut {_mmss(t['at'])}-{_mmss(t['end_at'])}" if t else "cut [--]")
+        extra = ""
+        if t:
+            extra = f", {t['wps']:.1f} w/s"
+            if t["setup_lead"] is not None:
+                extra += f", {int(t['setup_lead'])}s to payoff"
         lines.append(f"{i}. {b.get('title', '')} [{role}] "
-                     f"(energy {b.get('energy', '?')}, score {b.get('score', '?')})")
+                     f"(energy {b.get('energy', '?')}, score {b.get('score', '?')}{extra})")
         lines.append(f"   intent: {b.get('intent', '')}")
         if b.get("transition_in"):
             lines.append(f"   transition_in: {b['transition_in']}")
         if b.get("viewer_question"):
             lines.append(f"   leaves viewer wondering: {b['viewer_question']}")
-        lines.append(f"   {ts} {str(b.get('text', '')).strip()}")
+        lines.append(f"   [{where} | {ts}] {str(b.get('text', '')).strip()}")
         lines.append("")
+    lines.append(audit_note(outline_log))
+    lines.append("")
     dropped = outline_log.get("dropped") or []
     if dropped:
         # tell the critic WHY beats vanished, or it re-adds them at full length every
@@ -407,8 +451,15 @@ def _realized_script(outline_log: dict) -> str:
     return "\n".join(lines).strip()
 
 
+# Finished footage per beat. Lower = more story turns per minute, which is the blunt
+# instrument against a middle that drags (45s put ~20 beats in a 15-minute cut; 35s puts
+# ~26). This is the first knob to walk back if cuts start feeling choppy -- it changes
+# density only, never the arc or the 15-60s kept-footage guidance in `_SYSTEM`.
+SEC_PER_BEAT = 35.0
+
+
 def _n_beats(target_s: float) -> int:
-    return max(2, round(target_s / 45.0))   # ~45s of finished footage per beat
+    return max(2, round(target_s / SEC_PER_BEAT))
 
 
 def _extract_json(txt: str) -> str:

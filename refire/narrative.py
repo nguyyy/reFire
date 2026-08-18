@@ -50,6 +50,43 @@ def _trim_to_budget(picked: list[dict], target_s: float, tol: float):
     return kept, dropped
 
 
+COLD_OPEN_MAX_S = 8.0     # a teaser, not a scene
+COLD_OPEN_MIN_S = 1.5     # shorter than this reads as a glitch, not a promise
+COLD_OPEN_NEAR_S = 30.0   # a teaser this close to the opening beat is just the opening beat
+
+
+def _cold_open(outline, picked: list[dict], words: list[dict]) -> dict | None:
+    """The flash-forward: a few seconds of the peak, played before the story starts.
+
+    This is the ONE place the cut is allowed out of chronological order, and it is the
+    lever against a middle that loses people -- a viewer who has seen where this is going
+    sits through the setup to get there. Guarded deterministically rather than trusted,
+    because a teaser the cut never delivers is worse than no teaser: the span must overlap
+    footage a real beat already contains, it is clamped to a teaser's length, and it is
+    dropped when the first beat is already right there (a stutter, not a promise).
+    """
+    from .select import snap_to_sentences
+
+    seg = getattr(outline, "cold_open", None)
+    if seg is None or not picked:
+        return None
+    a, b = float(getattr(seg, "start_s", 0.0)), float(getattr(seg, "end_s", 0.0))
+    if b <= a:
+        return None
+    b = min(b, a + COLD_OPEN_MAX_S)
+    if not any(p["start"] <= a < p["end"] for p in picked):
+        return None                        # promises footage the cut doesn't deliver
+    if abs(a - min(p["start"] for p in picked)) < COLD_OPEN_NEAR_S:
+        return None                        # the opening beat already is this moment
+    # snap so it can't open or stop mid-word, but with a tight pad -- a sentence-length
+    # pull here would turn a teaser back into a scene. The pad can carry it ~2s past
+    # COLD_OPEN_MAX_S; landing on a clean word beats holding the ceiling exactly.
+    x, y = snap_to_sentences(words, a, b, max_pad=2.0)
+    if y - x < COLD_OPEN_MIN_S:
+        return None
+    return {"start": x, "end": y, "dur": y - x}
+
+
 def _valid_bounds(s0, e0, stream_end: float) -> bool:
     """The director gave usable in/out timestamps for this beat (the primary path)."""
     if s0 is None or e0 is None:
@@ -179,6 +216,10 @@ def cast(outline, chunks, words: list[dict], target_s: float,
                        "transition_in": getattr(beat, "transition_in", ""),
                        "texture": getattr(beat, "texture", ""),
                        "energy": getattr(beat, "energy", 3),
+                       # editorial anchors travel into the log too -- the pacing audit
+                       # measures setup lead (how long before the point lands) from them
+                       "setup_start_s": getattr(beat, "setup_start_s", None),
+                       "payoff_start_s": getattr(beat, "payoff_start_s", None),
                        "dir_start": s0, "dir_end": e0,
                        "start": a, "end": b,
                        "segments": spans,                       # the kept spans (the edit)
@@ -212,16 +253,28 @@ def cast(outline, chunks, words: list[dict], target_s: float,
                             "role": p["role"], "energy": p["energy"]}
                            for a, b in p["segments"]]}
                 for p in picked]
+    # The teaser goes in AFTER the chronological sort (it is the one clip allowed to play
+    # out of stream order) and after the budget trim, so a promise can never be the thing
+    # that gets shed. Roled `hook` so the style pass gives it no section card.
+    # ponytail: its ~5s aren't subtracted from the budget -- under 1% of a 15-minute
+    # target. Count it if teasers ever get long enough to matter.
+    cold = _cold_open(outline, picked, words)
+    if cold:
+        sections.insert(0, {"title": "Cold Open", "role": "hook", "energy": 5,
+                            "clips": [{"start": cold["start"], "end": cold["end"],
+                                       "role": "hook", "energy": 5}]})
     outline_log = {
         "central_idea": getattr(outline, "central_idea", ""),
         "story_shape": getattr(outline, "story_shape", ""),
         "viewer_promise": getattr(outline, "viewer_promise", ""),
         "ending_needed": getattr(outline, "ending_needed", ""),
+        "cold_open": cold,
         "beats": [
             {"title": p["title"], "role": p["role"], "intent": p["intent"],
              "viewer_question": p["viewer_question"], "turn": p["turn"],
              "transition_in": p["transition_in"], "texture": p["texture"],
              "energy": p["energy"], "query": p["query"],
+             "setup_start_s": p["setup_start_s"], "payoff_start_s": p["payoff_start_s"],
              "dir_start": p["dir_start"], "dir_end": p["dir_end"],
              "start": round(p["start"], 2), "end": round(p["end"], 2),
              "segments": [[round(a, 2), round(b, 2)] for a, b in p["segments"]],
@@ -257,6 +310,10 @@ def cut_plan_md(outline_log: dict) -> str:
         out += [f"**Viewer promise:** {outline_log['viewer_promise']}", ""]
     if outline_log.get("ending_needed"):
         out += [f"**Ending needed:** {outline_log['ending_needed']}", ""]
+    if outline_log.get("cold_open"):
+        co = outline_log["cold_open"]
+        out += [f"**Cold open:** {_mmss(co['start'])}-{_mmss(co['end'])} "
+                f"({co['dur']:.1f}s flash-forward)", ""]
 
     for i, b in enumerate(outline_log.get("beats", []), 1):
         role = b.get("role") or "?"
@@ -277,6 +334,14 @@ def cut_plan_md(outline_log: dict) -> str:
         if b.get("reason"):
             out.append(f"- Payoff: {b['reason']}")
         out.append("")
+
+    # the same numbers the critic was judged against -- so a human can see the sag the
+    # review round was reacting to without scrubbing the cut
+    from .pacing import audit_note
+    out.append("## Pacing audit")
+    out.append("")
+    out.append(audit_note(outline_log))
+    out.append("")
 
     review = outline_log.get("review") or []
     if review:
