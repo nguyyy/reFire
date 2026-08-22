@@ -101,6 +101,10 @@ def main(argv: list[str] | None = None) -> None:
                          "the cut may land anywhere within target*(1-tol)..target*(1+tol) "
                          "before beats get trimmed/flagged short")
     mk.add_argument("--cache-dir", default="vods", help="VOD download cache directory")
+    mk.add_argument("--start", default=None,
+                    help="only edit from here into the stream: 4h / 4:00:00 / 14400 "
+                         "(downloads + transcribes just that window)")
+    mk.add_argument("--end", default=None, help="...and stop here: 5h / 5:00:00 / 18000")
     mk.add_argument("--assets-dir", default=_DEFAULT_ASSETS,
                     help="folder with bgm/ sfx/ overlays/ for music + emote punch-ins")
     mk.add_argument("--bgm", default=None, help="music-bed track (overrides a random pick from assets/bgm)")
@@ -138,6 +142,9 @@ def main(argv: list[str] | None = None) -> None:
     mk.add_argument("--silence-pad", type=float, default=0.3,
                     help="breath (s) left around each phrase when dead space is cut; "
                          "smaller = tighter (default 0.3)")
+    mk.add_argument("--no-caption-fix", action="store_true",
+                    help="skip the Claude pass that repairs mistranscribed proper nouns "
+                         "in the captions (character/place names, the streamer's friends)")
     mk.add_argument("--progress-file", default=None,
                     help="write {pct,msg,done} JSON here for a GUI progress bar")
 
@@ -146,7 +153,31 @@ def main(argv: list[str] | None = None) -> None:
     sr.add_argument("--offset", type=float, default=0.0,
                     help="shift every cue by this many seconds (caption nudge)")
 
+    fc = sub.add_parser("fixcaps",
+                        help="re-run the caption proper-noun fix on an existing manifest")
+    fc.add_argument("manifest", help="path to a run's ae/manifest.json")
+    fc.add_argument("--game", default="", help="game name, e.g. 'genshin impact'")
+    fc.add_argument("--title", default="", help="stream title (extra context)")
+    fc.add_argument("--terms", default="", help="glossary: 'Kinich, Zajef' or a file path")
+    fc.add_argument("--chat", default=None,
+                    help="vods/<id>.chat.json -- viewers spell names the transcriber can't")
+    fc.add_argument("--claude-model", default="claude-sonnet-5")
+    fc.add_argument("--director-backend", choices=["cli", "api"], default="cli",
+                    help="cli = Claude Code headless on your subscription; api = API key")
+    fc.add_argument("--corrections-dir", default="run",
+                    help="where corrections_<game>.json lives (learned across runs)")
+
     args = p.parse_args(argv)
+
+    if args.cmd == "fixcaps":
+        from .caption_fix import fix_manifest
+        from .srt import write_srt
+        fix_manifest(args.manifest, game=args.game, title=args.title, terms=args.terms,
+                     chat_json=args.chat, model=args.claude_model,
+                     backend=args.director_backend, corrections_dir=args.corrections_dir)
+        # captions.srt is derived, so it must be rebuilt or Premiere keeps the old text
+        print(f"Captions: {write_srt(args.manifest).resolve()}")
+        return
 
     if args.cmd == "srt":
         # Pure JSON -> text, so the Premiere panel re-runs this on every caption
@@ -182,6 +213,8 @@ def main(argv: list[str] | None = None) -> None:
                        terms=args.terms,
                        zoom_sens=args.zoom_sens, words_per_line=args.words_per_line,
                        tol=args.tol, cache_dir=args.cache_dir,
+                       start=parse_duration(args.start) if args.start else None,
+                       end=parse_duration(args.end) if args.end else None,
                        assets_dir=args.assets_dir, bgm=args.bgm,
                        title=args.title, claude_model=args.claude_model,
                        director_backend=args.director_backend,
@@ -193,6 +226,7 @@ def main(argv: list[str] | None = None) -> None:
                        emotes=not args.no_emotes, sfx=not args.no_sfx,
                        deadspace=not args.no_deadspace, cards=not args.no_cards,
                        proxy=not args.no_proxy,
+                       caption_fix=not args.no_caption_fix,
                        transcriber=args.transcriber,
                        whisper_model=args.whisper_model,
                        batch_size=args.batch_size,

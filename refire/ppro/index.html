@@ -182,6 +182,18 @@ details>summary:hover .head::after{color:var(--ink)}
         <input type="text" id="title" data-k="title" placeholder="optional">
       </div>
     </div>
+    <div class="grid">
+      <div class="f">
+        <label for="start">Window start</label>
+        <input type="text" id="start" data-k="start" placeholder="whole stream">
+      </div>
+      <div class="f">
+        <label for="end">Window end</label>
+        <input type="text" id="end" data-k="end" placeholder="whole stream">
+      </div>
+    </div>
+    <p class="hint">Leave blank for the whole VOD. Set both (4h / 4:00:00 / 14400) to
+      download and transcribe only that slice &mdash; clip times are then relative to it.</p>
   </section>
 
   <section>
@@ -430,6 +442,8 @@ function buildArgs() {
     opt("--brief", "brief");
     opt("--game", "game");
     opt("--title", "title");
+    opt("--start", "start");
+    opt("--end", "end");
 
     var d = val("director");
     if (d === "api" || d === "cli") { a.push("--director-backend", d); }

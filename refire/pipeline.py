@@ -67,7 +67,8 @@ def _resolve_ollama_model(requested: str) -> str:
 
 def _detect_core(video, chat, run_dir, model=DEFAULT_MODEL, game="", tx_progress=None,
                  transcriber="local", whisper_model=DEFAULT_WHISPER_MODEL,
-                 batch_size=DEFAULT_BATCH_SIZE, compute_type="float16", terms=""):
+                 batch_size=DEFAULT_BATCH_SIZE, compute_type="float16", terms="",
+                 chat_offset=0.0):
     """Brief-agnostic, cached front half: audio -> transcribe -> chat -> chunks.
 
     Returns (words, chunks, chat_z); words is [] when the transcript is empty.
@@ -87,7 +88,7 @@ def _detect_core(video, chat, run_dir, model=DEFAULT_MODEL, game="", tx_progress
                        compute_type=compute_type)
     if not words:
         return [], [], []
-    signal = chat_signal(chat, words[-1]["end"])
+    signal = chat_signal(chat, words[-1]["end"], offset=chat_offset)
     return words, make_chunks(words, signal), signal
 
 
@@ -121,6 +122,8 @@ def make(
     tol: float = 0.35,   # duration is a suggestion -- wide slack both ways over a hard cap
     silence_pad: float = 0.3,
     cache_dir: str | Path = "vods",
+    start: float | None = None,   # only edit this window of the stream (seconds in)
+    end: float | None = None,
     assets_dir: str | Path = "assets",
     bgm: str | Path | None = None,
     title: str = "",
@@ -138,6 +141,7 @@ def make(
     deadspace: bool = True,   # cut the silence out of each clip
     cards: bool = True,       # section title cards in the AE Master
     proxy: bool = True,       # all-intra proxies for AE instead of the long-GOP VOD
+    caption_fix: bool = True,  # one Claude pass over the captions' proper nouns
 
     transcriber: str = "local",
     whisper_model: str = DEFAULT_WHISPER_MODEL,
@@ -157,7 +161,7 @@ def make(
     """
     from .ae_export import build_manifest
     from .emphasis import annotate_emphasis
-    from .ingest import ensure_vod
+    from .ingest import ensure_vod, window_tag
     from .overlay import pick_bgm, pick_overlays
     from .rank import select_by_signal
     from .reframe import ENTER, EXIT
@@ -176,8 +180,13 @@ def make(
     # extract/transcribe steps skip-if-exists and would reuse the wrong stream's cache).
     # An explicit run_dir still wins (the AE Make button isolates per output folder) and
     # skips the auto-naming below.
+    if end is not None and start is not None and end <= start:
+        raise SystemExit(f"--end ({end:g}s) must be after --start ({start:g}s)")
     auto_named = run_dir is None
-    run_dir = Path("run") / str(vod_id) if auto_named else Path(run_dir)
+    # A window gets its own cache key: audio/transcript/chunks are all skip-if-exists and
+    # a windowed run must not inherit (or poison) the full stream's cache.
+    tag = window_tag(start, end)
+    run_dir = Path("run") / f"{vod_id}{tag}" if auto_named else Path(run_dir)
     # This run's own output folder: unique per invocation (vod# + a generated phrase) so
     # re-running the same VOD (different brief/duration/etc) doesn't overwrite the last
     # outline/manifest/rough cut. The expensive per-VOD cache (audio/transcript/embeddings,
@@ -188,12 +197,17 @@ def make(
     print(f"[run] {run_name}  (cache: {run_dir}, artifacts: {out_dir})")
     model = _resolve_ollama_model(model)       # don't 404 deep into the run
     report(0.0, "downloading VOD")
-    video, chat = ensure_vod(vod_id, cache_dir)
+    if tag:
+        # Everything downstream (map, outline, manifest, captions) is zero-based off this
+        # cropped file, so add `start` back if you need real stream time.
+        print(f"[window] {(start or 0) / 3600:.2f}h .. "
+              f"{'end' if end is None else f'{end / 3600:.2f}h'} of the stream only")
+    video, chat = ensure_vod(vod_id, cache_dir, start=start, end=end)
     # transcription is the long pole -> map its segment progress into 0.10..0.55
     report(0.10, "transcribing")
     words, chunks, _chat_z = _detect_core(   # chat_z rides on chunks for the flat fallback
         video, chat, run_dir, model=model, game=game, terms=terms,
-        transcriber=transcriber,
+        transcriber=transcriber, chat_offset=start or 0.0,
         whisper_model=whisper_model, batch_size=batch_size, compute_type=compute_type,
         tx_progress=lambda f: report(0.10 + 0.45 * f, "transcribing"))
     if not words:
@@ -354,6 +368,15 @@ def make(
                         overlays_by_clip=overlays, bgm=music,
                         motion_zoom=motion_zoom, deadspace=deadspace,
                         silence_pad=silence_pad, cards=cards, proxy=proxy)
+    if caption_fix:
+        # The transcriber never knew the game or the streamer's friends; this is the first
+        # point where the captions exist as readable lines, and it's before the human opens
+        # Premiere. Timestamps and line count are untouched, so nothing downstream shifts.
+        report(0.96, "fixing captions")
+        from .caption_fix import fix_manifest
+        fix_manifest(mp, game=game, title=title, terms=terms, chat_json=chat,
+                     model=claude_model, backend=director_backend,
+                     corrections_dir=run_dir.parent, trace=out_dir / "trace")
     if render:
         # no-AE rough cut for eyeballing: ffmpeg trim+reframe+subs+concat+music bed.
         report(0.97, "rendering rough cut (ffmpeg)")

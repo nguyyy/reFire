@@ -20,6 +20,7 @@ refire is an automated video editor that analyzes twitch vods, structures a stor
 ### 3. formatting and styling
 - **motion-triggered punch zooms**: opencv detects frame-to-frame motion bursts to apply camera reframing (webcam corner anchor, 100% to 200% zoom) that holds through speech and releases on pauses.
 - **karaoke subtitles**: builds ass subtitle tracks with word-by-word highlighting. subtitle text defaults to lowercase and switches to uppercase on excitement (detected via rms audio amplitude analysis or keywords like lol, pog, wtf).
+- **caption proper-noun repair**: the transcriber never knew what game was on screen or who the streamer's friends are, so it ships `"dude, zhegef"` (the friend Zajef) and `"mawika"` (mavuika). one claude pass re-reads the built captions with the game glossary, the stream title and the vod's own chat — where viewers spell names correctly at the second they're said — and rewrites only the mistakes. line for line: the line count and every timestamp are untouched, and per-word shouting survives, so after effects and the premiere srt both pick it up for free. every accepted fix is logged to `caption_fixes.json` and learned into `run/corrections_<game>.json`, which is applied for free (no llm) on later runs.
 - **overlays and sound effects**: maps sound effects and emotes (using assets/ or betterttv search query) to keywords in excitement intervals.
 - **music mixing**: loops background music and ducks it during speech.
 
@@ -91,7 +92,16 @@ refire make 1762930614 \
 - `--no-sfx`: emote punch-ins stay, but land silently.
 - `--no-cards`: no section title cards in the AE Master — the cut runs clip to clip.
 - `--no-deadspace`: keep each clip's internal silence instead of jump-cutting it out (on by default; `--silence-pad` sets the breath left around each phrase).
+- `--no-caption-fix`: skip the claude pass that repairs mistranscribed proper nouns in the captions.
 - `--progress-file <path>`: logs execution progress to a json file.
+
+#### re-running the caption fix on an existing run: `refire fixcaps`
+`make` already does this, so you only need it to re-run against a manifest you built earlier (or after editing `run/corrections_<game>.json` by hand). it rewrites the manifest's caption text and regenerates `captions.srt`.
+
+```bash
+refire fixcaps run/<vod_id>/<run>/ae/manifest.json \
+  --game "genshin impact" --terms genshin.txt --chat vods/<vod_id>.chat.json
+```
 
 every progress line carries elapsed minutes, so a run tells you which stage it spent them in.
 
@@ -165,6 +175,20 @@ already cut (one trackitem per kept span — real cuts, no time remap), plus a
 **build** regenerates `captions.srt` (`python -m refire srt <manifest>`) at the
 current caption offset and then lays out a fresh `reFire cut N` sequence. the
 offset nudge is instant because it only rewrites the srt — no `make` re-run.
+
+### driving it from a terminal
+
+that devtools port is a Chrome DevTools Protocol endpoint, so the panel doubles as a
+remote for Premiere. with the panel open:
+
+```powershell
+python refire\ppro\remote.py 'reFirePpro.probe()'       # extendscript, inside premiere
+python refire\ppro\remote.py --panel '$("#build").click()'   # js, inside the panel
+python refire\ppro\remote.py --ae 'app.project.file.fsName'  # the ae panel, port 8088
+```
+
+each host call re-evals `reFirePpro.jsx` first, so jsx edits land without restarting
+premiere. useful for scripted checks and for letting an agent exercise the panel.
 
 the srt is standalone and useful on its own (youtube, a burn-in):
 
