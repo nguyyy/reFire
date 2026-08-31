@@ -113,6 +113,17 @@ def make(
     vod_id,
     brief: str | None,
     duration_s: float,
+    style: str | None = None,   # free text: HOW to cut it (structure, pacing, priorities)
+    pace: float = 1.0,          # cut speed: scales every role's clip-length budget
+    # The machinery half of a style, all identity-defaulted so an unstyled run is
+    # byte-identical. `cli` fills these from --style's frontmatter (see refire/styles.py).
+    order: str = "chrono",      # play order: chrono | director | whiplash
+    snap: str = "sentence",     # cut points: sentence | phrase | transient
+    stack: int = 0,             # montage-stack cold open: N moments (0 = single teaser)
+    truncate: float = 0.3,      # transient snap: seconds cut before the peak resolves
+    loudnorm: bool = False,     # ffmpeg loudness normalization in the rough cut
+    keep_build: bool = True,    # enforce the skipped-build / slow-payoff pacing flags
+    captions: str = "all",      # all | emph (only lines carrying an emphasized word)
     run_dir: str | Path | None = None,
     model: str = DEFAULT_MODEL,
     game: str = "",
@@ -222,6 +233,9 @@ def make(
     from . import perception
     audio_z = perception.loudness_signal(run_dir / "audio.wav")
     perception.save_signals(run_dir / "signals.json", audio_z)
+    # Emphasis (and the per-word RMS it measures) has to exist BEFORE casting, not after:
+    # `--snap transient` cuts on that RMS. One wav pass either way, so it simply moved up.
+    annotate_emphasis(words, run_dir / "audio.wav")
 
     # ponytail: embeddings are NOT computed here. Nothing reads `chunk["embedding"]`
     # except retrieve.retrieve_with_vec, which only the flat fallback and narrative's
@@ -235,6 +249,7 @@ def make(
     # best local clip into each beat -> titled sections (= AE section cards).
     sections = None
     warning = None
+    director_error = None
     if not flat:
         try:
             from . import director, narrative
@@ -276,11 +291,14 @@ def make(
 
             trace = out_dir / "trace"   # full prompt/response dumps per Claude call
             ol = (director.outline_local(director_input, brief, title, duration_s,
-                                         model=model)
+                                         model=model, style=style, pace=pace,
+                                         stack=stack, keep_build=keep_build)
                   if local_director
                   else director.outline(director_input, brief, title, duration_s,
                                         model=claude_model, trace=trace,
-                                        backend=director_backend, run_dir=out_dir))
+                                        backend=director_backend, run_dir=out_dir,
+                                        style=style, pace=pace, stack=stack,
+                                        keep_build=keep_build))
             # Editor-review loop: cast the outline, let a Claude critic read the REALIZED
             # cut and either approve or return a revised outline, re-cast, repeat. This is
             # what turns a relevant-but-reel cut into a story (see okay-refer-to-memories).
@@ -291,16 +309,28 @@ def make(
             for rnd in range(rounds + 1):
                 sections, outline_log, warning = narrative.cast(
                     ol, embed_chunks, words, duration_s, model=model, tol=tol,
-                    progress=lambda f, m: report(0.66 + 0.24 * f, m))
+                    progress=lambda f, m: report(0.66 + 0.24 * f, m),
+                    # so the beat durations the critic and the budget trimmer read are
+                    # the ones this run will actually render
+                    deadspace=deadspace, silence_pad=silence_pad,
+                    order=order, snap=snap, stack=stack, truncate=truncate)
                 if outline_log.get("dropped"):
                     print("[cast] dropped for budget: "
                           + ", ".join(d["title"] for d in outline_log["dropped"]))
                 if rnd == rounds or not sections:
                     break
+                # The critic re-picks spans, so hand it the shrink THIS stream realized
+                # instead of the constant prior the director opened with. Clamped: a
+                # freak measurement would otherwise blow the span budget wide open.
+                measured = outline_log.get("shrink")
+                shrink = (min(1.0, max(0.4, measured)) if measured
+                          else director.CUT_SHRINK)
                 try:
                     rv = director.review(director_input, brief, title, outline_log,
                                          duration_s, model=claude_model, trace=trace,
-                                         backend=director_backend, run_dir=out_dir)
+                                         backend=director_backend, run_dir=out_dir,
+                                         shrink=shrink, style=style, pace=pace,
+                                         stack=stack, keep_build=keep_build)
                 except Exception as re:   # a review failure must NOT discard a good cast
                     print(f"[review] round {rnd + 1} unavailable ({re}); keeping current cut")
                     break
@@ -318,12 +348,26 @@ def make(
                     json.dumps(outline_log, indent=2), encoding="utf-8")
                 # editor-readable companion: if the cut plan reads boring, so will the video
                 (out_dir / "cut_plan.md").write_text(
-                    narrative.cut_plan_md(outline_log), encoding="utf-8")
+                    narrative.cut_plan_md(outline_log, pace, keep_build, duration_s),
+                    encoding="utf-8")
         except Exception as e:
-            # ponytail: any director failure (no key, API error, parse, empty cast) ->
-            # fall back to flat selection so the run still ships a cut.
-            print("narrative outline unavailable, using flat selection:", e)
+            director_error = e
             sections = None
+
+    # A director failure used to drop through to flat selection with one printed line.
+    # That is not a degraded cut, it is a DIFFERENT cut: flat ignores every structural
+    # style knob (stack/order/snap/truncate/pace live only on the narrative path), so a
+    # `--style` document silently became a chronological 30s-chunk reel. Refuse instead.
+    # The expensive caches (audio/transcript/chapters) are keyed to run_dir and survive,
+    # so re-running after a fix costs one director call, not the whole pipeline.
+    if not flat and not sections:
+        raise SystemExit(
+            f"director pass failed: {director_error or 'no castable sections'}\n"
+            f"Refusing to fall back to flat selection -- it ignores every structural "
+            f"style knob (stack/order/snap/truncate/pace) and would ship a chronological "
+            f"reel instead of the cut you asked for.\n"
+            f"Caches in {run_dir} are warm, so a re-run is cheap. Pass --flat to take the "
+            f"flat path deliberately.")
 
     if not sections:
         # Flat fallback: candidate pool ~3x the budget worth of ~60s chunks, floored so
@@ -352,7 +396,6 @@ def make(
         sections = [{"title": "", "clips": picked}]
 
     report(0.90, "selecting clips")
-    annotate_emphasis(words, run_dir / "audio.wav")
     flat_clips = [clip for sec in sections for clip in sec["clips"]]
 
     report(0.93, "placing overlays + music")
@@ -367,7 +410,8 @@ def make(
                         words_per_line, z_enter, z_exit,
                         overlays_by_clip=overlays, bgm=music,
                         motion_zoom=motion_zoom, deadspace=deadspace,
-                        silence_pad=silence_pad, cards=cards, proxy=proxy)
+                        silence_pad=silence_pad, cards=cards, proxy=proxy,
+                        captions=captions)
     if caption_fix:
         # The transcriber never knew the game or the streamer's friends; this is the first
         # point where the captions exist as readable lines, and it's before the human opens
@@ -383,7 +427,8 @@ def make(
         from .assemble import render_clips
         rough = render_clips(video, out_dir, flat_clips, words,
                              music=music, encoder=encoder, silence_pad=silence_pad,
-                             motion_zoom=motion_zoom, deadspace=deadspace)
+                             motion_zoom=motion_zoom, deadspace=deadspace,
+                             loudnorm=loudnorm)
         print("Rough cut:", rough)
     report(1.0, "done")
     if warning:

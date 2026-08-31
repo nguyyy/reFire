@@ -192,7 +192,8 @@ def _fake_anthropic(monkeypatch, responses, output_format=None):
     The director prompts for JSON and validates it itself (the strict structured-output
     endpoint 400s on the editorial schema's depth) over a streamed call (large max_tokens
     needs streaming), so a None response = an empty text block (thinking ate the budget),
-    and a model = its `model_dump_json()`.
+    a plain `str` = that raw answer text verbatim (for a truncated reply), and a model =
+    its `model_dump_json()`.
 
     Also hides the `claude` binary so the default `backend="cli"` takes its real
     CLI-missing fallthrough to this API stub instead of shelling out for real.
@@ -231,7 +232,8 @@ def _fake_anthropic(monkeypatch, responses, output_format=None):
         def stream(self, **kw):
             calls.append(kw)
             parsed, stop = next(seq)
-            text = "" if parsed is None else parsed.model_dump_json()
+            text = ("" if parsed is None else
+                    parsed if isinstance(parsed, str) else parsed.model_dump_json())
             return FakeStream(SimpleNamespace(content=[_Block(text)], stop_reason=stop))
 
     monkeypatch.setattr(anthropic, "Anthropic",
@@ -267,6 +269,21 @@ def test_director_retries_without_thinking_on_none(monkeypatch):
     assert len(calls) == 2
     assert calls[0]["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert calls[1]["thinking"] == {"type": "disabled"}   # retry turns thinking off
+
+
+def test_director_retries_on_truncated_max_tokens(monkeypatch):
+    """Text present but stop_reason=max_tokens -> thinking ate the budget and the JSON got
+    cut off mid-object. The API path has no auto-continuation to stitch it back, so it
+    must take the same thinking-off retry as the empty case rather than parse a fragment."""
+    from refire import director
+    want = director.Outline(central_idea="x", beats=[
+        director.Beat(title="A", intent="i", query="q", start_s=1.0, end_s=2.0)])
+    cut = want.model_dump_json()[:-30]                    # a mid-object fragment
+    calls = _fake_anthropic(monkeypatch, [(cut, "max_tokens"), (want, "end_turn")])
+    got = director.outline("[00:00] hi", "brief", "title", 600.0)
+    assert got.beats[0].title == "A"
+    assert len(calls) == 2
+    assert calls[1]["thinking"] == {"type": "disabled"}
 
 
 def test_director_raises_when_no_outline(monkeypatch):
@@ -626,7 +643,7 @@ def test_cold_open_plays_first_out_of_stream_order(monkeypatch):
     co = sections[0]["clips"][0]
     # it is a FLASH-FORWARD: source-wise it comes from after the beat that follows it
     assert co["start"] == pytest.approx(63.0) and co["start"] > sections[1]["clips"][0]["start"]
-    assert log["cold_open"]["dur"] == pytest.approx(co["end"] - co["start"])
+    assert log["cold_open"][0]["dur"] == pytest.approx(co["end"] - co["start"])
 
 
 def test_cold_open_is_clamped_to_a_teaser(monkeypatch):
@@ -643,7 +660,7 @@ def test_cold_open_the_cut_never_delivers_is_dropped(monkeypatch):
     ol = _co_outline(SimpleNamespace(start_s=95.0, end_s=98.0))   # inside no beat
     sections, log, _ = narrative.cast(ol, [], words, target_s=1000.0, model="m")
     assert [s["title"] for s in sections] == ["Open", "Peak"]
-    assert log["cold_open"] is None
+    assert log["cold_open"] == []
 
 
 def test_cold_open_next_to_the_opening_beat_is_a_stutter_not_a_promise(monkeypatch):
@@ -659,7 +676,7 @@ def test_no_cold_open_leaves_the_cut_untouched(monkeypatch):
     ol = _co_outline(None)
     sections, log, _ = narrative.cast(ol, [], words, target_s=1000.0, model="m")
     assert [s["title"] for s in sections] == ["Open", "Peak"]
-    assert log["cold_open"] is None
+    assert log["cold_open"] == []
 
 
 def test_cold_open_shifts_the_pacing_clock(monkeypatch):
@@ -668,3 +685,574 @@ def test_cold_open_shifts_the_pacing_clock(monkeypatch):
     log = {"cold_open": {"start": 63.0, "end": 68.0, "dur": 5.0},
            "beats": [{"title": "A", "dur": 30.0, "start": 0.0, "end": 30.0, "text": "x"}]}
     assert cut_timeline(log)[0]["at"] == 5.0
+
+
+# --- honest beat durations -------------------------------------------------
+
+def _gapped_words():
+    """Two sentences with 20s of dead air between them -- the shape `compress_silence`
+    exists to remove, and which the renderer WILL remove before anyone sees the cut."""
+    return ([{"text": t, "start": i * 1.0, "end": i * 1.0 + 0.8}
+             for i, t in enumerate(["a", "b", "c."])]
+            + [{"text": t, "start": 23.0 + i, "end": 23.8 + i}
+               for i, t in enumerate(["d", "e", "f."])])
+
+
+def test_beat_dur_is_the_compressed_length_the_renderer_will_ship(monkeypatch):
+    """`dur` drives the pacing audit, the critic's realized script and the budget trimmer.
+
+    Measuring the raw spans made every beat read longer than it ships (one real run
+    audited a 16:33 cut as 21:28), so the audit flagged beats that were never long and
+    the trimmer shed beats it had room for. The gap must not count.
+    """
+    monkeypatch.setattr("refire.score.score_chunk",
+                        lambda c, brief="", model="": {"llm_score": 9.0, "reason": "r"})
+    words = _gapped_words()
+    ol = SimpleNamespace(central_idea="x", beats=[
+        SimpleNamespace(title="T", intent="i", query="q", start_s=0.0, end_s=25.8)])
+
+    _s, tight, _w = narrative.cast(ol, [], words, target_s=1000.0, model="m")
+    _s, raw, _w = narrative.cast(ol, [], words, target_s=1000.0, model="m",
+                                 deadspace=False)
+
+    span = raw["beats"][0]["end"] - raw["beats"][0]["start"]
+    # --no-deadspace: nothing is compressed downstream either, so the span IS the length
+    assert raw["beats"][0]["dur"] == pytest.approx(span)
+    # default: the 20s of dead air never reaches the viewer, so it must not be counted
+    assert tight["beats"][0]["dur"] < span - 15.0
+
+
+# --- the role budget reaches the prompts -----------------------------------
+
+def test_both_system_prompts_survive_format_with_the_role_budget_spliced_in():
+    """The budget table is injected into strings that are later `.format(n=...)`ed.
+
+    A literal brace in that table raises at call time, inside the one code path that
+    costs a Claude call to reach -- so it gets asserted here instead.
+    """
+    from refire import director
+
+    roles = director._role_note(director.CUT_SHRINK)
+    for system in (director.pick_system("a brief"), director.pick_system(""),
+                   director._REVIEW_SYSTEM):
+        rendered = system.format(n=20, roles=roles)   # must not raise
+        assert "escalation 39-117s" in rendered       # ...and the budget actually arrived
+        assert "climax 58-169s" in rendered
+
+
+def test_the_director_is_given_role_budgets_in_span_seconds_not_finished_seconds():
+    """ROLE_BUDGET is finished video; the director picks spans that get compressed.
+
+    Handed the table unscaled it would pick a 90s span for a 90s ceiling and ship ~69s --
+    under-filling every beat by exactly the compression it cannot see.
+    """
+    from refire import director
+    from refire.pacing import ROLE_BUDGET
+
+    lo, hi = ROLE_BUDGET["escalation"]
+    assert director._role_note(1.0) == director._role_note()        # 1.0 is the identity
+    assert f"escalation {lo}-{hi}s" in director._role_note(1.0)     # canonical, finished
+    scaled = director._role_note(0.5)                               # spans, inflated
+    assert f"escalation {lo * 2}-{hi * 2}s" in scaled
+
+
+def test_the_header_asks_for_more_span_than_the_finished_target():
+    """A 14-minute ask used to ship under 11: the director aimed its SPANS at the target,
+    and compression then took ~23% off. It has to be told both numbers."""
+    from refire import director
+
+    h = director._header("b", "t", 840.0, shrink=0.77)
+    assert "~840s of FINISHED video" in h
+    assert "~1090s" in h            # 840 / 0.77 -- the span budget to actually hit it
+    assert "23%" in h               # ...and why it is bigger
+    # shrink=1.0 means "no compression downstream", so no second number to explain
+    assert "SPAN BUDGET" not in director._header("b", "t", 840.0)
+
+
+def test_cast_reports_the_shrink_this_stream_realized(monkeypatch):
+    """The self-calibration signal: review rounds get this instead of the constant prior."""
+    monkeypatch.setattr("refire.score.score_chunk",
+                        lambda c, brief="", model="": {"llm_score": 9.0, "reason": "r"})
+    words = _gapped_words()
+    ol = SimpleNamespace(central_idea="x", beats=[
+        SimpleNamespace(title="T", intent="i", query="q", start_s=0.0, end_s=25.8)])
+
+    _s, log, _w = narrative.cast(ol, [], words, target_s=1000.0, model="m")
+    span = log["beats"][0]["end"] - log["beats"][0]["start"]
+    assert log["shrink"] == pytest.approx(log["beats"][0]["dur"] / span, abs=1e-3)
+    assert 0 < log["shrink"] < 1                      # the gap cost real time
+
+    # --no-deadspace: nothing is compressed, so a span IS its finished length
+    _s, raw, _w = narrative.cast(ol, [], words, target_s=1000.0, model="m",
+                                 deadspace=False)
+    assert raw["shrink"] == pytest.approx(1.0)
+
+
+def test_shrink_is_none_rather_than_invented_when_there_is_nothing_to_measure():
+    assert narrative._realized_shrink([]) is None
+
+
+# --- direction (--style) and cut speed (--pace) --------------------------
+
+def test_the_styled_system_prompt_also_survives_format():
+    """`_STYLE_RULE` is spliced into a string that is later `.format(n=..., roles=...)`ed.
+
+    A literal brace in it would raise inside the one code path that costs a Claude call
+    to reach -- the same trap the unstyled prompts are guarded against above.
+    """
+    from refire import director
+
+    roles = director._role_note(director.CUT_SHRINK)
+    for system in (director.pick_system("a brief", "highlight reel"),
+                   director.pick_system(None, "highlight reel")):
+        rendered = system.format(n=20, roles=roles)   # must not raise
+        assert "escalation 39-117s" in rendered
+
+
+def test_dense_styles_are_told_the_shot_length_they_are_graded_on():
+    """`pacing.audit` grades mean shot length against `AVG_SHOT_S * pace`, but only when
+    build-up is deliberately skipped. Left unstated the director picked 14s-mean segments
+    against a 4.2s ceiling -- a floor with no ceiling is how a dense style ships slow
+    shots. Told exactly where measured, so instruction and enforcement cannot drift.
+    """
+    from refire import director
+    from refire.pacing import AVG_SHOT_S
+
+    dense = director.pick_system("b", "fast", keep_build=False, pace=0.35)
+    assert f"AVERAGE about {AVG_SHOT_S * 0.35:.1f} seconds" in dense
+    assert "at least ~1.05 seconds" in dense            # floor still scales too
+    dense.format(n=20, roles="x")                       # brace-free, or the run dies
+
+    # keep_build=True is where the audit measures the OPPOSITE flag, so stating a
+    # ceiling there would constrain a cut nothing checks.
+    assert "AVERAGE about" not in director.pick_system("b", "fast", keep_build=True)
+    assert "AVERAGE about" not in director.pick_system("b")
+
+
+def test_a_style_replaces_the_arc_mandate_instead_of_arguing_with_it():
+    """Without a style the prompt forbids the alternative outright ("that is a highlight
+    reel, not a story"), so asking for one would be arguing with the instructions."""
+    from refire import director
+
+    default = director.pick_system("a brief")
+    styled = director.pick_system("a brief", "highlight reel, loudest first")
+    assert "highlight reel, not a story" in default
+    assert "highlight reel, not a story" not in styled
+    assert "DIRECTION above" in styled
+    assert "DIRECTION above" not in default
+
+
+def test_the_styled_prompt_keeps_the_ending_and_the_beat_schema():
+    """Only the STRUCTURE rule is swapped. The ending-must-breathe clause is not about
+    structure, and dropping the schema would break every beat the director emits."""
+    from refire import director
+
+    styled = director.pick_system("a brief", "highlight reel")
+    assert "reaction_end_s" in styled and "BREATHE" in styled
+    for field in ("start_s", "segments", "payoff_start_s", "texture", "energy"):
+        assert field in styled
+
+
+def test_style_is_identity_when_absent():
+    """Every existing run passes style=None; those prompts must not move at all."""
+    from refire import director
+
+    assert director.pick_system("b") == director._SYSTEM + director._MAP_LEGEND
+    assert director.pick_system("b", None) == director.pick_system("b")
+    assert director.pick_system(None, None) == director.pick_system(None)
+
+
+def test_the_stream_driven_mode_survives_the_structure_swap():
+    """pick_system slices its no-brief variant out of the prompt by text; the swap must
+    not break that surgery."""
+    from refire import director
+
+    free = director.pick_system(None, "highlight reel")
+    assert free.startswith("You are a video editor cutting a Twitch")
+    assert "NO editorial brief was given" in free
+    assert "DIRECTION above" in free
+
+
+def test_the_header_carries_the_direction_next_to_the_brief():
+    """One line in _header is the whole free-text mechanism -- outline, review and the
+    local director all route through it."""
+    from refire import director
+
+    h = director._header("hu tao pulls", "t", 600.0, style="fast, favor loud")
+    assert "EDITOR'S BRIEF: hu tao pulls" in h
+    assert "DIRECTION (how to cut it): fast, favor loud" in h
+    assert "DIRECTION" not in director._header("hu tao pulls", "t", 600.0)
+
+
+def test_pace_scales_the_budget_the_director_is_told():
+    """--style says "fast cuts" in words; --pace moves the numbers the prompt states
+    literally, which is the only thing an adjective has no leverage over."""
+    from refire import director
+
+    assert director._role_note(1.0, 1.0) == director._role_note(1.0)   # identity
+    assert "climax 36-104s" in director._role_note(1.0, 0.8)           # 45,130 x 0.8
+    assert "climax 68-195s" in director._role_note(1.0, 1.5)
+
+
+def test_the_budget_stops_shrinking_where_the_beat_count_is_capped():
+    """Below the knee the beat COUNT is clamped (`BEAT_INFLATION_CAP`), so shrinking the
+    budgets any further can only ship a shorter video -- which is what 8:53 against a
+    16:00 target was. `pacing.fill_pace` holds them at the floor instead."""
+    from refire import director
+    from refire.pacing import BEAT_INFLATION_CAP
+
+    knee = 1.0 / BEAT_INFLATION_CAP
+    assert director._role_note(1.0, 0.35) == director._role_note(1.0, knee)
+    assert "climax 30-87s" in director._role_note(1.0, 0.35)   # 45,130 x 2/3, not x 0.35
+
+
+def test_beat_count_and_budget_fill_the_target():
+    """The invariant the two knobs exist to preserve: count x per-beat budget = runtime,
+    at any pace. Broken, `--pace 0.35` could not reach a 16-minute target even with every
+    beat at its ceiling."""
+    from refire import director
+    from refire.pacing import fill_pace, scaled_budget
+
+    for target in (600.0, 960.0, 1800.0):
+        for pace in (0.35, 0.5, 1.0, 1.5):
+            budget = scaled_budget(fill_pace(pace))
+            mid = sum((lo + hi) / 2 for lo, hi in budget.values()) / len(budget)
+            fill = director._n_beats(target, pace) * mid
+            assert 0.75 * target <= fill <= 1.35 * target, (target, pace, fill)
+
+
+def test_pace_moves_the_beat_count_with_the_budgets():
+    """Shrinking the per-beat budgets alone would just ship a SHORTER video; the count
+    has to scale with them or the two fight (the SEC_PER_BEAT note records that bug)."""
+    from refire import director
+
+    assert director._n_beats(900.0, 1.0) == director._n_beats(900.0)
+    assert director._n_beats(900.0, 0.6) > director._n_beats(900.0)
+    assert director._n_beats(900.0, 1.5) < director._n_beats(900.0)
+    assert director._n_beats(60.0, 0.05) >= 2        # floor holds at any pace
+    assert director._n_beats(900.0, 0.0) >= 2        # ...and does not divide by zero
+
+
+# --- montage stack: the cold open as several unexplained moments ---------
+
+def _stack_outline(*spans, first_start=0.0, energies=(3, 3)):
+    """Two beats plus a cold_open LIST. Beat 2 (60-71.8s) is where the stack is lifted."""
+    return SimpleNamespace(
+        central_idea="x",
+        cold_open=[SimpleNamespace(start_s=a, end_s=b) for a, b in spans],
+        beats=[SimpleNamespace(title="Open", intent="i", query="q", energy=energies[0],
+                               start_s=first_start, end_s=first_start + 11.8),
+               SimpleNamespace(title="Peak", intent="i", query="q", energy=energies[1],
+                               start_s=60.0, end_s=71.8)])
+
+
+def test_stack_plays_every_moment_in_one_section(monkeypatch):
+    words = _co_setup(monkeypatch)
+    ol = _stack_outline((62.0, 64.0), (66.0, 68.0), (70.0, 71.5))
+    sections, log, _ = narrative.cast(ol, [], words, target_s=1000.0, model="m", stack=8)
+    assert sections[0]["title"] == "Cold Open"
+    # one section, several clips -- build_manifest renders that as jump cuts, which is
+    # exactly what a stack is
+    assert len(sections[0]["clips"]) == 3
+    assert len(log["cold_open"]) == 3
+
+
+def test_stack_moments_are_flashes_not_scenes(monkeypatch):
+    words = _co_setup(monkeypatch)
+    ol = _stack_outline((62.0, 71.0), (66.0, 71.5))     # both asked for whole scenes
+    sections, _, _ = narrative.cast(ol, [], words, target_s=1000.0, model="m", stack=8)
+    for c in sections[0]["clips"]:
+        assert c["end"] - c["start"] <= narrative.STACK_MAX_S + 0.5   # + the phrase pad
+
+
+def test_stack_escalates_so_the_best_moment_lands_last(monkeypatch):
+    """Weakest first is the whole point -- a stack that opens on its best moment has
+    nowhere to climb and reads as a normal intro."""
+    words = _co_setup(monkeypatch)
+    # 2s lifted from the energy-5 beat, 66s lifted from the energy-2 beat
+    ol = _stack_outline((62.0, 64.0), (2.0, 4.0), first_start=0.0, energies=(2, 5))
+    sections, _, _ = narrative.cast(ol, [], words, target_s=1000.0, model="m", stack=8)
+    starts = [c["start"] for c in sections[0]["clips"]]
+    assert starts[-1] == pytest.approx(62.0)        # the energy-5 moment is LAST
+    assert starts[0] == pytest.approx(2.0)
+
+
+def test_stack_drops_a_moment_the_cut_never_delivers(monkeypatch):
+    words = _co_setup(monkeypatch)
+    ol = _stack_outline((62.0, 64.0), (95.0, 97.0))   # 95s is inside no beat
+    sections, _, _ = narrative.cast(ol, [], words, target_s=1000.0, model="m", stack=8)
+    assert len(sections[0]["clips"]) == 1
+
+
+def test_stack_is_capped_at_the_requested_count(monkeypatch):
+    words = _co_setup(monkeypatch)
+    ol = _stack_outline(*[(60.0 + i, 61.5 + i) for i in range(8)])
+    sections, _, _ = narrative.cast(ol, [], words, target_s=1000.0, model="m", stack=3)
+    assert len(sections[0]["clips"]) == 3
+
+
+def test_stack_zero_is_the_teaser_path_untouched(monkeypatch):
+    """The default must not become "a 1-moment stack" -- it keeps the teaser's own
+    ceiling and its sentence snap."""
+    words = _co_setup(monkeypatch)
+    ol = _stack_outline((63.0, 74.0))
+    sections, _, _ = narrative.cast(ol, [], words, target_s=1000.0, model="m")
+    co = sections[0]["clips"][0]
+    assert co["end"] - co["start"] > narrative.STACK_MAX_S          # teaser, not a flash
+    assert co["end"] - co["start"] <= narrative.COLD_OPEN_MAX_S + 2.0
+
+
+def test_stack_shifts_the_pacing_clock_by_its_whole_length():
+    from refire.pacing import cut_timeline
+
+    log = {"cold_open": [{"start": 62.0, "end": 64.0, "dur": 2.0},
+                         {"start": 66.0, "end": 68.0, "dur": 2.0}],
+           "beats": [{"title": "A", "dur": 30.0, "start": 0.0, "end": 30.0, "text": "x"}]}
+    assert cut_timeline(log)[0]["at"] == 4.0
+    # an outline from before cold_open was a list still measures
+    old = {"cold_open": {"start": 62.0, "end": 67.0, "dur": 5.0}, "beats": log["beats"]}
+    assert cut_timeline(old)[0]["at"] == 5.0
+
+
+# --- the Outline schema tolerates both shapes ----------------------------
+
+def test_outline_accepts_a_bare_cold_open_object():
+    """An older outline.json, or a model that ignores the list shape, must not fail the
+    whole call."""
+    from refire.director import Outline
+
+    beats = [{"title": "A", "start_s": 0.0, "end_s": 10.0}]
+    assert Outline(central_idea="x", cold_open={"start_s": 1.0, "end_s": 4.0},
+                   beats=beats).cold_open[0].start_s == 1.0
+    assert Outline(central_idea="x", cold_open=None, beats=beats).cold_open == []
+    assert Outline(central_idea="x", beats=beats).cold_open == []
+    assert len(Outline(central_idea="x", beats=beats,
+                       cold_open=[{"start_s": 1.0, "end_s": 2.0},
+                                  {"start_s": 5.0, "end_s": 6.0}]).cold_open) == 2
+
+
+# --- the stack rewrites the director's teaser paragraph ------------------
+
+def test_stack_swaps_the_teaser_paragraph_for_a_stack_rule():
+    from refire import director
+
+    plain = director.pick_system("b")
+    stacked = director.pick_system("b", stack=8)
+    assert "flash-forward teaser, 3-6 seconds" in plain
+    assert "flash-forward teaser, 3-6 seconds" not in stacked
+    assert "MONTAGE STACK of about 8 moments" in stacked
+    assert "the single best moment LAST" in stacked
+    # the swap must not eat the beat schema that follows it
+    assert "Then break it into BEATS" in stacked
+    assert plain.format(n=5, roles="r") and stacked.format(n=5, roles="r")   # brace-free
+
+
+def test_stack_without_a_style_keeps_the_arc():
+    """--stack is a cold-open shape, not a licence to drop the story arc; only --style
+    swaps that."""
+    from refire import director
+
+    stacked = director.pick_system("b", stack=8)
+    assert "highlight reel, not a story" in stacked
+    assert "MONTAGE STACK" in stacked
+
+
+def test_stack_survives_the_stream_driven_intro():
+    from refire import director
+
+    s = director.pick_system(None, style="fast", stack=6)
+    assert s.startswith("You are a video editor cutting a Twitch gaming stream into one "
+                        "focused, cohesive short. NO editorial brief")
+    assert "MONTAGE STACK of about 6 moments" in s
+
+
+# --- cut-point modes reach the cast --------------------------------------
+
+def _snap_words(n=60):
+    """One long sentence every 6s, with an RMS peak on the last word of each."""
+    ws = []
+    for i in range(n):
+        t = i * 1.0
+        last = (i % 6) == 5
+        ws.append({"text": ("end." if last else f"w{i}"), "start": t, "end": t + 0.8,
+                   "rms": 900.0 if last else 10.0})
+    return ws
+
+
+def _snap_outline():
+    return SimpleNamespace(central_idea="x", cold_open=[],
+                           beats=[SimpleNamespace(title="A", intent="i", query="q",
+                                                  start_s=6.0, end_s=17.0,
+                                                  reaction_end_s=23.0)])
+
+
+def _cast_with(monkeypatch, **kw):
+    monkeypatch.setattr("refire.score.score_chunk",
+                        lambda c, brief="", model="": {"llm_score": 9.0, "reason": "r"})
+    return narrative.cast(_snap_outline(), [], _snap_words(), target_s=1000.0,
+                          model="m", **kw)
+
+
+def test_phrase_and_transient_cut_shorter_than_sentence(monkeypatch):
+    base = _cast_with(monkeypatch)[1]["beats"][0]["dur"]
+    phrase = _cast_with(monkeypatch, snap="phrase")[1]["beats"][0]["dur"]
+    trans = _cast_with(monkeypatch, snap="transient")[1]["beats"][0]["dur"]
+    assert phrase <= base and trans < base
+
+
+def test_transient_drops_the_reaction_tail(monkeypatch):
+    """reaction_end_s exists to stop a cut feeling abrupt -- which is exactly what a
+    premature cut is FOR, so transient mode must not honour it."""
+    sent_end = _cast_with(monkeypatch)[1]["beats"][0]["end"]
+    trans_end = _cast_with(monkeypatch, snap="transient")[1]["beats"][0]["end"]
+    assert sent_end >= 23.0            # the reaction tail was kept
+    assert trans_end < sent_end        # ...and deliberately dropped
+
+
+def test_sentence_mode_is_the_untouched_default(monkeypatch):
+    a = _cast_with(monkeypatch)[1]
+    b = _cast_with(monkeypatch, snap="sentence", order="chrono", stack=0)[1]
+    assert a == b
+
+
+def test_the_final_cut_of_the_video_is_never_truncated(monkeypatch):
+    """The ending is the most visible cut there is; truncating it is an abrupt stop,
+    not a style."""
+    monkeypatch.setattr("refire.score.score_chunk",
+                        lambda c, brief="", model="": {"llm_score": 9.0, "reason": "r"})
+    ol = SimpleNamespace(central_idea="x", cold_open=[], beats=[
+        SimpleNamespace(title="A", intent="i", query="q", start_s=6.0, end_s=17.0),
+        SimpleNamespace(title="B", intent="i", query="q", start_s=24.0, end_s=35.0)])
+    words = _snap_words()
+    _s, log, _w = narrative.cast(ol, [], words, target_s=1000.0, model="m",
+                                 snap="transient")
+    # the last beat's out-point still lands on a sentence terminator ("end." at x.8)
+    assert log["beats"][-1]["end"] == pytest.approx(35.8)
+
+
+# --- play order ----------------------------------------------------------
+
+def _ordered_outline():
+    """Four beats whose stream order is deliberately the WORST tonal order: two calm
+    then two chaotic."""
+    mk = lambda t, s, tex, en: SimpleNamespace(   # noqa: E731
+        title=t, intent="i", query="q", start_s=s, end_s=s + 5.8,
+        texture=tex, energy=en)
+    return SimpleNamespace(central_idea="x", cold_open=[], beats=[
+        mk("calm1", 0.0, "sincere", 1), mk("calm2", 12.0, "sincere", 2),
+        mk("wild1", 24.0, "chaotic", 5), mk("wild2", 36.0, "chaotic", 4)])
+
+
+def _order_titles(monkeypatch, **kw):
+    monkeypatch.setattr("refire.score.score_chunk",
+                        lambda c, brief="", model="": {"llm_score": 9.0, "reason": "r"})
+    sections, _log, _w = narrative.cast(_ordered_outline(), [], _snap_words(),
+                                        target_s=1000.0, model="m", **kw)
+    return [s["title"] for s in sections]
+
+
+def test_chrono_is_still_the_default(monkeypatch):
+    assert _order_titles(monkeypatch) == ["calm1", "calm2", "wild1", "wild2"]
+    assert _order_titles(monkeypatch, order="chrono") == _order_titles(monkeypatch)
+
+
+def test_director_order_keeps_the_outline_sequence(monkeypatch):
+    """Same list here, but it must come from the outline rather than from a re-sort --
+    a reordered outline would otherwise be silently undone."""
+    monkeypatch.setattr("refire.score.score_chunk",
+                        lambda c, brief="", model="": {"llm_score": 9.0, "reason": "r"})
+    ol = _ordered_outline()
+    ol.beats = [ol.beats[2], ol.beats[0], ol.beats[3], ol.beats[1]]
+    sections, _l, _w = narrative.cast(ol, [], _snap_words(), target_s=1000.0, model="m",
+                                      order="director")
+    assert [s["title"] for s in sections] == ["wild1", "calm1", "wild2", "calm2"]
+
+
+def test_whiplash_opens_on_the_peak_and_alternates_texture(monkeypatch):
+    titles = _order_titles(monkeypatch, order="whiplash")
+    assert titles[0] == "wild1"                       # highest energy opens
+    assert titles != ["calm1", "calm2", "wild1", "wild2"]
+    textures = ["chaotic" if t.startswith("wild") else "sincere" for t in titles]
+    # no two same-texture beats back to back -- an alternative always existed here
+    assert all(a != b for a, b in zip(textures, textures[1:])), titles
+
+
+def test_whiplash_scores_the_bigger_jolt_higher():
+    from refire.narrative import _mismatch
+
+    calm = {"texture": "sincere", "energy": 1}
+    wild = {"texture": "chaotic", "energy": 5}
+    assert _mismatch(calm, wild) > _mismatch(calm, {"texture": "sincere", "energy": 2})
+
+
+# --- the critic must not stuff a styled cut back into shape --------------
+# Silencing the pacing FLAG is not enough: the rubric asks for the same thing in prose,
+# and prose is what the critic re-plans from. Two of these items are literal orders to
+# add footage back ("RESTORE a representative run", "Extend its end").
+
+_PROTECT = ["does any clip start without enough context",   # SETUP CLARITY
+            "RESTORE a representative run",                 # MISSING BUILD-UP
+            "does any clip end BEFORE its payoff"]          # PAYOFF COMPLETION
+_MIRROR = ["- NO SETUP NEEDED:", "- DENSITY:", "- PREMATURE CUTS ARE INTENDED:"]
+
+
+def test_review_rubric_keeps_protecting_moments_by_default():
+    from refire import director
+
+    s = director._review_system()
+    assert s == director._REVIEW_SYSTEM
+    assert all(x in s for x in _PROTECT)
+    assert not any(x in s for x in _MIRROR)
+
+
+def test_review_rubric_flips_when_build_up_is_deliberately_skipped():
+    from refire import director
+
+    s = director._review_system(keep_build=False)
+    assert not any(x in s for x in _PROTECT), "the critic will re-stuff the cut"
+    assert all(x in s for x in _MIRROR)
+    # the ending is the one moment that still has to resolve
+    assert "The FINAL beat is the one exception" in s
+    # and the rubric still has to survive .format()
+    assert s.format(n=5, roles="r")
+
+
+def test_outline_prompt_stops_demanding_the_whole_build_up():
+    from refire import director
+
+    plain = director.pick_system("b")
+    dense = director.pick_system("b", style="fast", keep_build=False)
+    assert "must keep a representative RUN" in plain
+    assert "must keep a representative RUN" not in dense
+    assert "jump to the punchline with no build" not in dense
+    assert "not thorough, it is slack" in dense
+
+
+def test_segment_floor_scales_with_pace():
+    """A 3s floor stated next to a paced budget contradicts it -- a 1-2.5s stack moment
+    is below the minimum the same prompt just set."""
+    from refire import director
+
+    assert "at least ~3 seconds" in director.pick_system("b")
+    assert "at least ~3 seconds" in director.pick_system("b", pace=1.0)   # identity
+    assert "at least ~1.05 seconds" in director.pick_system("b", pace=0.35)
+    assert "at least ~1 seconds" in director.pick_system("b", pace=0.1)   # floored at 1s
+
+
+def test_the_style_clause_outranks_the_whole_rubric_not_one_item():
+    """Naming only ARC leaves a model dutifully applying the other twelve items."""
+    import refire.director as d
+
+    seen = {}
+    d._complete_cli = lambda m, sys, c, cls, tag="", **k: (
+        seen.__setitem__(tag, sys), (_ for _ in ()).throw(RuntimeError("x")))[1]
+    log = {"central_idea": "x", "cold_open": [], "beats": [
+        {"title": "A", "role": "climax", "energy": 5, "dur": 40.0, "start": 0.0,
+         "end": 40.0, "text": "w " * 60, "segments": [[0.0, 40.0]]}]}
+    try:
+        d.review("MAP", "b", "t", log, 480.0, style="dense clip reel", keep_build=False)
+    except Exception:
+        pass
+    s = seen["review"]
+    assert "the direction wins" in s and "the rubric is what is wrong" in s
+    assert "never widen, extend or re-add footage" in s

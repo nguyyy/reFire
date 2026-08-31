@@ -32,28 +32,41 @@ def _is_allcaps(text: str) -> bool:
     return len(letters) >= 2 and all(c.isupper() for c in letters)
 
 
-def loud_word_flags(wav_path: str | Path, words: list[Word]) -> list[bool]:
-    """Per-word True if its audio RMS spikes above the clip baseline.
+def word_rms(wav_path: str | Path, words: list[Word]) -> list[float]:
+    """Per-word audio RMS off the mono 16k WAV (stdlib `wave`). All-zeros if unreadable.
 
-    Reads the mono 16k WAV (stdlib `wave`). Returns all-False if the file is
-    missing/unreadable so emphasis silently degrades to keyword-only.
+    The transient signal, at word resolution. `perception.loudness_signal` buckets the
+    same wav at 5s for the moment map's (loud) marks, which is far too coarse to cut on;
+    this is the fine-grained view, and it is the one primitive both the emphasis flags
+    and `select.snap_to_transient` need -- so it lives here once rather than being
+    re-derived per caller.
     """
     wav_path = Path(wav_path)
     if not wav_path.exists() or not words:
-        return [False] * len(words)
+        return [0.0] * len(words)
     try:
         with wave.open(str(wav_path), "rb") as wf:
             sr = wf.getframerate()
             raw = wf.readframes(wf.getnframes())
         sig = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
     except (wave.Error, OSError, ValueError):
-        return [False] * len(words)
+        return [0.0] * len(words)
 
-    rms = []
+    out = []
     for w in words:
         a, b = int(w["start"] * sr), int(w["end"] * sr)
         seg = sig[a:b]
-        rms.append(float(np.sqrt(np.mean(seg * seg))) if seg.size else 0.0)
+        out.append(float(np.sqrt(np.mean(seg * seg))) if seg.size else 0.0)
+    return out
+
+
+def loud_word_flags(wav_path: str | Path, words: list[Word]) -> list[bool]:
+    """Per-word True if its audio RMS spikes above the clip baseline.
+
+    Returns all-False if the wav is missing/unreadable so emphasis silently degrades to
+    keyword-only.
+    """
+    rms = word_rms(wav_path, words)
     arr = np.asarray(rms)
     voiced = arr[arr > 0]
     if voiced.size == 0:
@@ -63,10 +76,20 @@ def loud_word_flags(wav_path: str | Path, words: list[Word]) -> list[bool]:
 
 
 def annotate_emphasis(words: list[Word], wav_path: str | Path) -> list[Word]:
-    """Add `emph` to each word in place: keyword OR all-caps OR yelled."""
-    loud = loud_word_flags(wav_path, words)
-    for w, hot in zip(words, loud):
-        w["emph"] = bool(hot or _is_keyword(w["text"]) or _is_allcaps(w["text"]))
+    """Add `emph` to each word in place: keyword OR all-caps OR yelled.
+
+    Also stamps the raw `rms` it measured, so a later pass that needs to cut ON the audio
+    peak (`select.snap_to_transient`) reads it off the words instead of re-opening and
+    re-scanning a multi-hour wav.
+    """
+    rms = word_rms(wav_path, words)
+    arr = np.asarray(rms)
+    voiced = arr[arr > 0]
+    thr = (max(float(np.median(voiced)) * LOUD_K, float(np.percentile(voiced, 85)))
+           if voiced.size else float("inf"))
+    for w, r in zip(words, rms):
+        w["rms"] = r
+        w["emph"] = bool(r > thr or _is_keyword(w["text"]) or _is_allcaps(w["text"]))
     return words
 
 

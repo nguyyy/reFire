@@ -13,9 +13,12 @@ refire is an automated video editor that analyzes twitch vods, structures a stor
 - **headless cli execution**: the narrative pass can run via the claude cli (`--director-backend cli`) using a claude subscription, the anthropic api (`--director-backend api`), or locally (`--local-director`) on ollama.
 
 ### 2. clip boundaries and cuts
-- **sentence alignment**: clips are snapped to sentence boundaries to prevent mid-word cuts.
+- **sentence alignment**: clips are snapped to sentence boundaries to prevent mid-word cuts. that snap is also the real floor on shot length, so `--snap` offers two finer modes for dense styles: `phrase` lands on natural speech pauses (still never mid-word), and `transient` lands on the audio peak and cuts a few hundred ms *before* it resolves. the last cut of the video always keeps its sentence snap.
+- **play order**: the cut runs chronologically by default. `--order whiplash` reorders the beats to maximise the tonal jolt between neighbours instead — chaos into calm — for styles whose comedy is the juxtaposition rather than the story.
+- **cold open**: one flash-forward teaser by default, or `--stack n` for a montage stack of `n` unexplained 1–2.5s moments ordered so the best lands last. every moment is checked against footage a later beat actually delivers, so the open can't promise something the cut never reaches.
 - **silence compression**: internal silences inside clips are removed using `compress_silence` with a configurable padding buffer.
 - **payoff preservation**: cuts are anchored to explicit setups, payoffs, and reaction times defined by the storyboard.
+- **build-up preservation**: a beat whose comedy is the repetition (a wordle spiral, a run of failed attempts) scores highest at its punchline, so the cheap edit opens on the last guess and reads as a missing scene. the pacing audit measures the largest jump between a beat's kept segments that lands *before* its payoff and flags it (`skipped_build`), so the critic sees the skipped build-up as a measured number instead of being asked to notice it.
 
 ### 3. formatting and styling
 - **motion-triggered punch zooms**: opencv detects frame-to-frame motion bursts to apply camera reframing (webcam corner anchor, 100% to 200% zoom) that holds through speech and releases on pauses.
@@ -50,14 +53,27 @@ refire is an automated video editor that analyzes twitch vods, structures a stor
 
 ## installation
 
-install the package in editable mode:
-```bash
-# default install
-pip install -e .
+on a fresh machine, [uv](https://docs.astral.sh/uv/) is the only thing to install
+(`winget install astral-sh.uv`). everything else — the right python, the venv, and
+the exact pinned versions from `uv.lock` — comes from one command:
 
-# developer install with dev dependencies
-pip install -e ".[dev]"
+```bash
+uv sync --extra dev   # drop --extra dev for a runtime-only install
+uv run pytest         # 170 tests, no activation needed
+uv run refire make ...
 ```
+
+`uv.lock` + `.python-version` are committed, so every machine resolves to the same
+versions. after changing deps in `pyproject.toml`, re-run `uv sync` and commit the
+updated `uv.lock`.
+
+<details><summary>plain pip instead</summary>
+
+```bash
+python -m venv .venv && .venv/Scripts/activate
+pip install -e ".[dev]"   # unpinned — resolves fresh versions, ignores uv.lock
+```
+</details>
 
 ---
 
@@ -69,14 +85,25 @@ downloads the vod, processes chat logs, transcribes, storyboard and casts the be
 ```bash
 refire make 1762930614 \
   --brief "the funniest hu tao gacha pulls and rage moments" \
+  --style "highlight reel, not a story arc; never open a bit mid-sequence" \
   --duration 20m \
+  --pace 0.8 \
   --game "genshin impact" \
   --render
+
+# ...or hand it a style document and let its frontmatter set the machinery
+refire make 1762930614 --duration 8m --style ryukStyl.md
 ```
 
 #### arguments and options:
 - `vod_id`: twitch vod number (downloaded and cached in `vods/`).
-- `--brief`: brief defining the vibe and topic.
+- `--brief`: brief defining the vibe and topic — **what** the cut is about.
+- `--style`: free text defining **how** to cut it: structure, pacing, what to favor, what never to do. the brief picks the footage; the style shapes the edit. by default the director is told to build a story arc and explicitly forbidden the alternative ("that is a highlight reel, not a story") — a style replaces that mandate, in the director *and* in the critic, so a review round cannot quietly restore the arc. omit it and nothing moves. **it can also be a path to a style document** — see [style documents](#style-documents) below.
+- `--pace`: cut speed (default `1.0`). scales every role's clip-length budget and the beat count together: `0.6` is snappier and packs in more beats, `1.5` gives each one room to breathe. `--style` says "fast cuts" in words; `--pace` moves the numbers the prompt states literally and the pacing audit enforces — the part an adjective has no leverage over. the beat count is capped at **1.5× the pace-1.0 count** (`director.BEAT_INFLATION_CAP`): the director returns 15–24 beats whatever it is asked for, so a bigger ask buys no extra story turns and only burns thinking budget — `--pace 0.35` once asked for 57 beats on a 16-minute target, spent 57k output tokens deciding, and returned 20. the cap is a ratio, not a fixed number, so genuinely long targets still scale. below the knee where the cap binds (`pace < 1/1.5`) the per-role budgets stop shrinking with it (`pacing.fill_pace`) — a capped beat count against budgets that kept shrinking cannot fill the target at all, which is how a 16-minute ask at `--pace 0.35` shipped as 8:53. past that point a faster pace buys more *cuts per beat*, not less video.
+- `--order <chrono|director|whiplash>`: play order (default `chrono`, forward in stream time). `director` keeps the outline's own sequencing; `whiplash` throws the clock away and orders for tonal jolt — chaos into calm, never two similar beats adjacent.
+- `--snap <sentence|phrase|transient>`: where cuts land (default `sentence`, never mid-sentence). this is the real floor on shot length: a sentence runs seconds, so no amount of `--pace` produces a 2s shot out of it. `phrase` lands on natural pauses (still never mid-word); `transient` lands on the audio peak and leaves `--truncate` seconds *before* it resolves, so the viewer finishes the joke after the cut has already moved on. the last cut of the video always keeps its sentence snap — truncating the ending is an abrupt stop, not a style.
+- `--truncate <s>`: with `--snap transient`, how far before the peak resolves to cut (default `0.3`).
+- `--stack <n>`: replaces the single flash-forward teaser with a **montage stack** of `n` unexplained moments (1–2.5s each, escalating, best last) before beat 1. `0` (default) keeps the teaser.
 - `--duration`: target compilation length (e.g., `20m`, `20:00`, or `1200`).
 - `--game`: name of the game (used to build a proper-noun spelling dictionary).
 - `--render`: immediately renders the video draft locally to `run/<vod_id>/rough.mp4`.
@@ -95,6 +122,47 @@ refire make 1762930614 \
 - `--no-caption-fix`: skip the claude pass that repairs mistranscribed proper nouns in the captions.
 - `--progress-file <path>`: logs execution progress to a json file.
 
+#### style documents
+`--style` takes free text **or a path to a `.md` file**. prose alone can't reach the numbers the cut actually runs on -- the sort order, the snap mode, the beat budgets -- so a style document carries them in a frontmatter block, and everything below the closing fence is the direction the director reads:
+
+```markdown
+---
+pace: 0.35            # 1.5-4s shots
+order: chrono         # play forward in stream time (the cold-open stack is exempt)
+snap: transient       # cut on the peak, not on the sentence
+truncate: 0.3         # leave 300ms before the punchline finishes
+stack: 8              # montage-stack cold open, best moment last
+keep_build: false     # "letting a moment breathe so it lands" is the anti-pattern here
+cards: false
+motion_zoom: false
+loudnorm: true
+words_per_line: 2
+captions: emph        # caption only the lines that are hard to hear
+---
+
+# My Style
+...everything from here down is fed to the director and the critic verbatim...
+```
+
+every key is also a plain cli flag, and **the flag wins** -- `--style ryukStyl.md --pace 1.0` reads the document but overrides its pace. a `.md` with no frontmatter is prose-only, exactly like passing the text inline. unknown keys and bad values warn and are skipped rather than killing a run that already spent director calls.
+
+`ryukStyl.md` in the repo root is a worked example: a reconstruction of a dense, quick-cut clip-channel style, annotated with which section of the spec each knob comes from.
+
+#### re-captioning a hand-recut premiere timeline: `refire recap`
+the panel's **recaption** button (see [premiere pro panel](#premiere-pro-panel))
+shells this. it needs a `timeline.tsv` — written by `reFirePpro.timeline()`, one
+row per v1 trackitem: `media path \t source in \t source out \t timeline in \t
+timeline out`. defaults to the one beside the manifest.
+
+```bash
+refire recap run/<vod_id>/<run>/ae/manifest.json \
+  --words-per-line 3 --game "genshin impact" --fix
+```
+
+`--fix` adds the claude proper-noun pass over the regrouped lines; without it the
+learned `corrections_<game>.json` is still applied, for free. prints
+`Captions: <path>` to the new `captions.recutN.srt`.
+
 #### re-running the caption fix on an existing run: `refire fixcaps`
 `make` already does this, so you only need it to re-run against a manifest you built earlier (or after editing `run/corrections_<game>.json` by hand). it rewrites the manifest's caption text and regenerates `captions.srt`.
 
@@ -104,6 +172,47 @@ refire fixcaps run/<vod_id>/<run>/ae/manifest.json \
 ```
 
 every progress line carries elapsed minutes, so a run tells you which stage it spent them in.
+
+### loudest moments across a month of streams: `refire loud`
+
+`make` reads one stream for a *story*. this reads *many* for the moments the room got
+loud -- and never downloads a vod whole to do it:
+
+```bash
+refire loud 2854020361 2856544608 2857506789 2859479079   --duration 8m --game "genshin impact"
+```
+
+twitch serves an audio-only rendition, and the downloader picks the download type off the
+output extension, so a 6h stream costs **~440mb instead of ~15gb**. that audio is scored,
+and only the windows that survive get their *video* fetched -- the downloader crops
+server-side, so a 14s moment costs 14s of transfer. scanning 4.8h of cached audio takes
+**under a second**; there is no whisper pass over the stream and no claude call anywhere.
+
+**what counts as loudest** is a spike against a rolling median, not raw level. on raw
+level a stretch that is merely loud *throughout* -- a boss fight, a hot-mixed menu, a
+music bed -- outranks a real scream, because a window sum wins on duration rather than on
+peak. `--baseline` is that median's span: raise it to rank sustained loudness higher,
+lower it for sharper reactions.
+
+captions come from transcribing **only the picked windows** (minutes of audio, not hours).
+output is a premiere manifest -- `ae/manifest.json` + `ae/captions.srt` -- so the picks
+land on v1 via the panel's **build** button and you cut from there. each moment is
+downloaded with `--pad` seconds of headroom each side, so a cut can still be nudged
+outward by hand once it is on the timeline.
+
+- `vod_ids`: one or more twitch vod numbers (no channel lookup -- paste the ids).
+- `--duration`: target length; moments are taken best-first until it is met (`8m` default).
+- `--clip` / `--lead`: shot length, and how much of it is run-up *before* the spike
+  (default `14` / `4`).
+- `--per-vod`: candidate windows scanned out of each stream (default `12`).
+- `--pad`: extra seconds downloaded each side for snapping and hand-nudging (default `5`).
+- `--baseline`: rolling-median span the spike is measured against (default `60`s).
+- `--game` / `--terms` / `--words-per-line` / `--whisper-model` etc. behave as in `make`.
+
+the cut spans several vods, so clips ride one virtual timeline (vod *i* at `i * 100000`s)
+and each clip points at its own downloaded window through the manifest's `sources[]`. that
+is the same shape the ae proxy path already emitted, so the premiere panel, `refire srt`
+and **recaption** all work on a `loud` manifest unchanged.
 
 ---
 
@@ -122,6 +231,8 @@ output files are saved under `run/<vod_id>/`:
 - `ae/manifest.json` - manifest structure read by the after effects script.
 - `ae/captions.srt` - the same captions in master-timeline time, written on demand
   by `refire srt` for the premiere panel (and anything else that eats srt).
+- `ae/timeline.tsv`, `ae/captions.recutN.srt` - written by the premiere panel's
+  **recaption** button: what is on v1 right now, and the captions rebuilt to match.
 
 ---
 
@@ -175,6 +286,30 @@ already cut (one trackitem per kept span — real cuts, no time remap), plus a
 **build** regenerates `captions.srt` (`python -m refire srt <manifest>`) at the
 current caption offset and then lays out a fresh `reFire cut N` sequence. the
 offset nudge is instant because it only rewrites the srt — no `make` re-run.
+
+**recaption** is for after you re-cut that sequence by hand. the manifest
+describes the cut reFire built, so the moment you move, trim, split or delete
+clips, every cue after the first drifts — and dragging captions back into place
+one at a time is worse than the edit was. the button dumps the active sequence's
+**v1** to `timeline.tsv` (media path, source in/out, timeline in/out per
+trackitem) and runs `python -m refire recap <manifest>`, which walks the
+*timeline* instead of the manifest: source in/out plus the manifest's
+`sources[].offset` gives the absolute vod range each clip is really showing, and
+the run's `transcript.json` is re-grouped against those ranges. moves, trims,
+splits, deletes, retimes and handles pulled **wider** than reFire's own cut all
+land back under their footage — the widened case is why it reads the transcript
+rather than re-timing the manifest's existing cues.
+
+names this stream already taught reFire (`run/corrections_<game>.json`) are
+re-applied for free; tick **proper-noun pass** to also run claude over lines it
+has never seen. each press writes a fresh `captions.recutN.srt` — premiere's
+`importFiles()` skips a path already in the project, so reusing one name would
+hand you back the caption track you just replaced. delete the old caption track
+and drag the new one on.
+
+v1 only: that is where **build** lays the spine down, so anything stacked above
+it reads as b-roll you did not want captioned. media that is not in the
+manifest's `sources[]` is skipped, disabled clips are skipped.
 
 ### driving it from a terminal
 

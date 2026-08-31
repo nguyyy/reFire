@@ -155,3 +155,39 @@ def test_assign_parts_tags_the_right_part():
     solo = [{"start": 10.0, "end": 40.0}]
     _assign_parts(solo, [("a.mp4", 0.0)])
     assert "src" not in solo[0]
+
+
+def test_captions_emph_keeps_only_the_lines_that_need_text(tmp_path):
+    """A full subtitle track competes with the cuts in a fast style; sparse text just
+    prevents the confusion the cutting can't."""
+    words = [
+        {"text": "just", "start": 0.0, "end": 0.4, "emph": False},
+        {"text": "talking.", "start": 0.5, "end": 0.9, "emph": False},
+        {"text": "WHAT", "start": 1.0, "end": 1.4, "emph": True},
+        {"text": "no.", "start": 1.5, "end": 1.9, "emph": False},
+    ]
+    sections = [{"title": "Open", "clips": [{"start": 0.0, "end": 2.0}]}]
+    kw = dict(motion_zoom=False, deadspace=False, words_per_line=2)
+
+    every = json.loads(build_manifest("v.mp4", tmp_path / "a", words, sections,
+                                      **kw).read_text(encoding="utf-8"))
+    sparse = json.loads(build_manifest("v.mp4", tmp_path / "b", words, sections,
+                                       captions="emph", **kw).read_text(encoding="utf-8"))
+    assert len(every["clips"][0]["captions"]) == 2          # both pairs captioned
+    kept = sparse["clips"][0]["captions"]
+    assert len(kept) == 1 and "WHAT" in kept[0]["text"]     # only the yelled line
+    # the surviving line keeps its original timing -- filtering must not re-time anything
+    assert kept[0] == every["clips"][0]["captions"][1]
+
+
+def test_captions_default_is_the_full_track(tmp_path):
+    words = [{"text": "a", "start": 0.0, "end": 0.4, "emph": False},
+             {"text": "b.", "start": 0.5, "end": 0.9, "emph": False}]
+    sections = [{"title": "Open", "clips": [{"start": 0.0, "end": 1.0}]}]
+    kw = dict(motion_zoom=False, deadspace=False)
+    a = json.loads(build_manifest("v.mp4", tmp_path / "a", words, sections,
+                                  **kw).read_text(encoding="utf-8"))
+    b = json.loads(build_manifest("v.mp4", tmp_path / "b", words, sections,
+                                  captions="all", **kw).read_text(encoding="utf-8"))
+    assert a["clips"][0]["captions"] == b["clips"][0]["captions"]
+    assert a["clips"][0]["captions"]                        # not silently emptied

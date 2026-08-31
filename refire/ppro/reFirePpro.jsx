@@ -14,14 +14,23 @@
 // API (everything else in here is private):
 //   reFirePpro.build(manifestPath)   import the clip proxies + lay them out on V1 of
 //                                    a fresh sequence, one trackItem per kept span.
+//   reFirePpro.timeline(manifestPath) dump the ACTIVE sequence's V1 to timeline.tsv, so
+//                                    `refire recap` can re-caption a hand re-cut edit.
+//   reFirePpro.attach(manifestPath, srtPath)  import a .srt into the reFire bin.
 //   reFirePpro.probe()               liveness check the panel runs on load.
-// Both return a human-readable status string, which the panel shows and logs.
+// All return a human-readable status string, which the panel shows and logs.
 //
 // CAPTIONS: the panel runs `python -m refire srt <manifest> --offset X` before it
 // calls build, which writes captions.srt next to the manifest in MASTER-TIMELINE
 // time (see refire/srt.py -- it walks the clips with the same layout rule this file
 // does, so the two line up by construction). Nudging captions = change the offset
 // field and Build again; the srt regen is instant, unlike re-running `make`.
+//
+// RECAPTION: once you re-cut that sequence by hand the manifest no longer describes
+// it, so captions.srt drifts. The panel's Recaption button dumps the timeline through
+// `timeline()` and runs `python -m refire recap <manifest>`, which re-groups the run's
+// transcript against the source ranges the timeline is ACTUALLY showing -- moves,
+// trims, splits and handles pulled wider than reFire's own cut all come out right.
 
 var reFirePpro = (function () {
 
@@ -250,6 +259,66 @@ var reFirePpro = (function () {
         }
     }
 
+    // --- recut -------------------------------------------------------------
+
+    // Dump the ACTIVE sequence's V1 to timeline.tsv beside the manifest -- one row per
+    // trackItem: media path, source in, source out, timeline in, timeline out. That is
+    // everything `refire recap` needs to put captions back under footage a human has
+    // since re-cut: source in/out plus the manifest's sources[].offset gives the absolute
+    // VOD range the clip is showing, and timeline in/out gives where it now plays (and,
+    // by ratio, whether it was retimed).
+    //
+    // TSV, not JSON: ExtendScript is ES3 and has no JSON.stringify, and no media path
+    // contains a tab or a newline, so the format cannot go ambiguous on us.
+    //
+    // ponytail: V1 only -- that is where doBuild lays the spine down, and anything
+    // stacked above it reads as b-roll nobody wants captioned. Loop seq.videoTracks
+    // here if a stacked recut ever becomes the normal way to work.
+    function doTimeline(manifestPath) {
+        var seq = app.project.activeSequence;
+        if (!seq) { return "Error: no active sequence -- open your recut sequence first."; }
+        if (!seq.videoTracks.numTracks) {
+            return "Error: '" + seq.name + "' has no video tracks.";
+        }
+        var track = seq.videoTracks[0], rows = [], i;
+        for (i = 0; i < track.clips.numItems; i++) {
+            var c = track.clips[i], mp = "";
+            if (c.disabled) { continue; }      // a muted clip does not play, so no captions
+            try { mp = c.projectItem.getMediaPath(); } catch (e) {}
+            if (!mp) { continue; }             // titles, colour mattes, offline media
+            // toFixed keeps long VOD timecodes out of exponent notation, which the
+            // python side would read as a bad row and silently drop.
+            rows.push([mp,
+                       c.inPoint.seconds.toFixed(6), c.outPoint.seconds.toFixed(6),
+                       c.start.seconds.toFixed(6), c.end.seconds.toFixed(6)].join("\t"));
+        }
+        if (!rows.length) {
+            return "Error: nothing on V1 of '" + seq.name + "' to caption.";
+        }
+
+        var out = new File(new File(manifestPath).parent.fsName + "/timeline.tsv");
+        out.encoding = "UTF-8";
+        if (!out.open("w")) { throw new Error("Cannot write " + out.fsName); }
+        out.write(rows.join("\n"));
+        out.close();
+        return "Timeline: " + rows.length + " clip(s) on V1 of '" + seq.name + "'.";
+    }
+
+    // Same one-drag hand-off as attachCaptions, for the .srt `recap` just wrote. It is a
+    // fresh captions.recutN.srt every press by design: importFiles() skips a path already
+    // in the project, so reusing one name would hand back the caption track being replaced.
+    function doAttach(manifestPath, srtPath) {
+        var srt = new File(srtPath);
+        if (!srt.exists) { return "Error: captions not found: " + srtPath; }
+        try {
+            app.project.importFiles([srt.fsName], true, ensureBin("reFire"), false);
+            return "Recaptioned: " + srt.name + " is in the reFire bin. Delete the old "
+                 + "caption track, then drag this one onto the sequence.";
+        } catch (e) {
+            return "Recaptioned. File > Import  " + srt.fsName;
+        }
+    }
+
     // --- public API --------------------------------------------------------
 
     // CEP collapses ANY uncaught ExtendScript exception into the opaque string
@@ -275,5 +344,6 @@ var reFirePpro = (function () {
                (app.project.name || "untitled") + "'";
     }
 
-    return { build: guard(doBuild), probe: guard(probe) };
+    return { build: guard(doBuild), timeline: guard(doTimeline),
+             attach: guard(doAttach), probe: guard(probe) };
 }());

@@ -259,6 +259,56 @@ def _ask(system: str, user: str, model: str, backend: str, trace=None) -> Fixes:
 # -------------------------------------------------------------------------------- main
 
 
+def fix_lines(lines: list[str], llm: bool = True, game: str = "", title: str = "",
+              terms: str = "", chat_json=None, model: str = CLAUDE_MODEL,
+              backend: str = "cli", corrections_dir="run", trace=None,
+              ask=_ask) -> tuple[list[str], dict[str, str]]:
+    """Correct mistranscribed proper nouns in caption lines -> (fixed lines, learned).
+
+    Line for line: the caller re-attaches timestamps by position, so the line count
+    never changes. Two passes -- everything this stream has already taught us (free,
+    instant, out of `corrections_<game>.json`), then one LLM pass over what is left.
+
+    `llm=False` stops after the free pass, which is what the panel's Recaption does by
+    default: a hand-recut timeline is usually the same words in a new order, already
+    corrected on the run that built them, so a call per press is waste.
+    """
+    corrections = load_corrections(corrections_dir, game)
+    # 1. deterministic pass: everything this stream has already taught us, for free
+    out = []
+    for t in lines:
+        fixed = apply_corrections(t, corrections)
+        # corrections are stored lowercase; put the styler's shouting back on top
+        out.append(_recase(t, fixed) if fixed != t else t)
+
+    learned: dict[str, str] = {}
+    if not llm or not out:
+        return out, learned
+
+    # 2. one LLM pass over what's left
+    ctx = _context(game, title, parse_terms(terms),
+                   _chat_terms(chat_json), _chat_names(chat_json), corrections)
+    for lo in range(0, len(out), BATCH):
+        chunk = out[lo:lo + BATCH]
+        user = (ctx + "\n\nCAPTION LINES:\n"
+                + "\n".join(f"{lo + i}: {t}" for i, t in enumerate(chunk)))
+        try:
+            reply = ask(_SYSTEM, user, model, backend, trace)
+        except Exception as e:
+            # ponytail: same degradation as the director block -- a failed pass leaves the
+            # captions exactly as built, it never fails the run.
+            print(f"[captions] fix pass failed ({type(e).__name__}: {e}); captions unchanged")
+            break
+        for fix in reply.fixes:
+            if not lo <= fix.i < lo + len(chunk):
+                continue
+            ok = vet(out[fix.i], fix)
+            if ok:
+                learned.update(learned_pairs(out[fix.i], ok))
+                out[fix.i] = ok
+    return out, learned
+
+
 def fix_manifest(manifest_path, game: str = "", title: str = "", terms: str = "",
                  chat_json=None, model: str = CLAUDE_MODEL, backend: str = "cli",
                  corrections_dir="run", trace=None, ask=_ask) -> dict:
@@ -276,40 +326,12 @@ def fix_manifest(manifest_path, game: str = "", title: str = "", terms: str = ""
     if not caps:
         return {}
 
-    corrections = load_corrections(corrections_dir, game)
     before = [c["text"] for c in caps]
+    lines, learned = fix_lines(before, game=game, title=title, terms=terms,
+                               chat_json=chat_json, model=model, backend=backend,
+                               corrections_dir=corrections_dir, trace=trace, ask=ask)
 
-    # 1. deterministic pass: everything this stream has already taught us, for free
-    lines = []
-    for t in before:
-        fixed = apply_corrections(t, corrections)
-        # corrections are stored lowercase; put the styler's shouting back on top
-        lines.append(_recase(t, fixed) if fixed != t else t)
-
-    # 2. one LLM pass over what's left
-    ctx = _context(game, title, parse_terms(terms),
-                   _chat_terms(chat_json), _chat_names(chat_json), corrections)
-    learned: dict[str, str] = {}
-    for lo in range(0, len(lines), BATCH):
-        chunk = lines[lo:lo + BATCH]
-        user = (ctx + "\n\nCAPTION LINES:\n"
-                + "\n".join(f"{lo + i}: {t}" for i, t in enumerate(chunk)))
-        try:
-            reply = ask(_SYSTEM, user, model, backend, trace)
-        except Exception as e:
-            # ponytail: same degradation as the director block -- a failed pass leaves the
-            # captions exactly as built, it never fails the run.
-            print(f"[captions] fix pass failed ({type(e).__name__}: {e}); captions unchanged")
-            break
-        for fix in reply.fixes:
-            if not lo <= fix.i < lo + len(chunk):
-                continue
-            ok = vet(lines[fix.i], fix)
-            if ok:
-                learned.update(learned_pairs(lines[fix.i], ok))
-                lines[fix.i] = ok
-
-    # 3. write back
+    # write back
     diff = {str(i): {"before": b, "after": a}
             for i, (b, a) in enumerate(zip(before, lines)) if b != a}
     if diff:

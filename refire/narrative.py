@@ -8,6 +8,8 @@ pipeline -- no new model work here.
 """
 from __future__ import annotations
 
+from .select import SILENCE_PAD, compress_silence   # pure; imports nothing back
+
 K_RETRIEVE = 6   # candidates pulled per beat by embedding similarity (fallback path)
 N_SCORE = 4      # of those, how many get the (costlier) local LLM relevance score
 
@@ -34,6 +36,33 @@ def _dur(p: dict) -> float:
     return p.get("dur", p["end"] - p["start"])
 
 
+def _realized_shrink(picked: list[dict]) -> float | None:
+    """Finished seconds per second of SELECTED span, over the whole cast.
+
+    This is the correction the director needs and cannot compute: it picks spans off the
+    stream map, and the dead air inside them never reaches the viewer. `None` when there
+    is nothing to measure, so callers fall back to the constant prior rather than to a
+    fabricated ratio.
+    """
+    raw = sum(y - x for p in picked for x, y in p["segments"])
+    return round(sum(_dur(p) for p in picked) / raw, 4) if raw > 0 else None
+
+
+def _kept_dur(words: list[dict], spans, deadspace: bool, pad: float) -> float:
+    """The FINISHED length of `spans`: what the viewer sees, not what the spans cover.
+
+    With `deadspace` on, the renderer strips each span's internal silence, so the honest
+    length is what `compress_silence` reports -- the very function `ae_export`/`assemble`
+    call later, reused here so the two can't disagree. With it off nothing is compressed
+    downstream either, and the raw sum already IS the finished length.
+    """
+    if not deadspace:
+        return sum(y - x for x, y in spans)
+    # ponytail: compress_silence re-derives speech_intervals(words) per span -- ~50 calls
+    # per cast, invisible beside the model passes. Hoist it if it ever shows in a profile.
+    return sum(compress_silence(words, x, y, pad=pad)[2] for x, y in spans)
+
+
 def _trim_to_budget(picked: list[dict], target_s: float, tol: float):
     """Drop beats only past the tolerance CEILING (target is a goal, not a hard cap), and
     drop the most expendable first (`_drop_rank`) so the arc survives. Returns
@@ -54,37 +83,140 @@ COLD_OPEN_MAX_S = 8.0     # a teaser, not a scene
 COLD_OPEN_MIN_S = 1.5     # shorter than this reads as a glitch, not a promise
 COLD_OPEN_NEAR_S = 30.0   # a teaser this close to the opening beat is just the opening beat
 
+# A stack moment is a different object from a teaser: long enough to register WHAT KIND of
+# moment it is, never long enough to explain it. Past ~2.5s it stops being a flash and
+# starts being a scene, and the stack's density -- the whole point -- collapses.
+STACK_MAX_S = 2.5
+STACK_MIN_S = 1.0
 
-def _cold_open(outline, picked: list[dict], words: list[dict]) -> dict | None:
-    """The flash-forward: a few seconds of the peak, played before the story starts.
 
-    This is the ONE place the cut is allowed out of chronological order, and it is the
-    lever against a middle that loses people -- a viewer who has seen where this is going
-    sits through the setup to get there. Guarded deterministically rather than trusted,
-    because a teaser the cut never delivers is worse than no teaser: the span must overlap
-    footage a real beat already contains, it is clamped to a teaser's length, and it is
-    dropped when the first beat is already right there (a stutter, not a promise).
+def _cold_open_one(seg, picked: list[dict], words: list[dict], first_start: float,
+                   stack: bool) -> dict | None:
+    """One cold-open segment -> a clip, or None if it fails a guard.
+
+    Guarded deterministically rather than trusted, because a promise the cut never
+    delivers is worse than no promise: the span must overlap footage a real beat already
+    contains, it is clamped to its own length ceiling, and it is dropped when the first
+    beat is already right there (a stutter, not a promise).
     """
-    from .select import snap_to_sentences
+    from .select import snap_to_phrase, snap_to_sentences
 
-    seg = getattr(outline, "cold_open", None)
-    if seg is None or not picked:
-        return None
     a, b = float(getattr(seg, "start_s", 0.0)), float(getattr(seg, "end_s", 0.0))
     if b <= a:
         return None
-    b = min(b, a + COLD_OPEN_MAX_S)
+    hi, lo = (STACK_MAX_S, STACK_MIN_S) if stack else (COLD_OPEN_MAX_S, COLD_OPEN_MIN_S)
+    b = min(b, a + hi)
     if not any(p["start"] <= a < p["end"] for p in picked):
         return None                        # promises footage the cut doesn't deliver
-    if abs(a - min(p["start"] for p in picked)) < COLD_OPEN_NEAR_S:
-        return None                        # the opening beat already is this moment
-    # snap so it can't open or stop mid-word, but with a tight pad -- a sentence-length
-    # pull here would turn a teaser back into a scene. The pad can carry it ~2s past
-    # COLD_OPEN_MAX_S; landing on a clean word beats holding the ceiling exactly.
-    x, y = snap_to_sentences(words, a, b, max_pad=2.0)
-    if y - x < COLD_OPEN_MIN_S:
+    if not stack and abs(a - first_start) < COLD_OPEN_NEAR_S:
+        # A single teaser 20s ahead of itself is a stutter, not a promise. A STACK has no
+        # such problem: it deliberately spoils moments from across the whole video, it is
+        # ordered by energy rather than source time, and the thing that follows it is the
+        # rest of the stack -- so this guard would only delete its opening moments.
+        return None
+    # Snap so it can't open or stop mid-word, but with a tight pad -- a sentence-length
+    # pull would turn a flash back into a scene. The pad can carry it ~2s past the
+    # ceiling; landing on a clean word beats holding the ceiling exactly. A stack moment
+    # is shorter than most sentences, so it snaps to a PHRASE (a natural pause) instead --
+    # a sentence snap there would inflate every moment past the ceiling by design.
+    x, y = (snap_to_phrase(words, a, b, max_pad=0.5) if stack
+            else snap_to_sentences(words, a, b, max_pad=2.0))
+    if y - x < lo:
         return None
     return {"start": x, "end": y, "dur": y - x}
+
+
+def _mismatch(a: dict, b: dict) -> int:
+    """How wrong `b` feels straight after `a`. Higher = a bigger tonal jolt.
+
+    Texture dominates: chaos into calm is the joke, and screaming into more screaming is
+    not. Energy distance breaks ties, so the run alternates loud and quiet instead of
+    merely alternating labels.
+    """
+    return (2 * (a.get("texture") != b.get("texture"))
+            + abs(int(a.get("energy") or 3) - int(b.get("energy") or 3)))
+
+
+def _whiplash(picked: list[dict]) -> list[dict]:
+    """Order beats to MAXIMIZE the tonal jolt between neighbours, not to follow the clock.
+
+    Chronological order is loyalty to the stream, and a dense clip reel gets its comedy
+    from juxtaposition instead: the second clip doesn't have to be funnier, it has to be
+    tonally wrong. Greedy -- open on the highest-energy beat, then repeatedly take
+    whichever unused beat feels most wrong next. `pacing.sameness` already flags adjacent
+    same role/texture, so the audit and this ordering want the same thing.
+    """
+    rest = list(picked)
+    out = [rest.pop(rest.index(max(rest, key=lambda p: int(p.get("energy") or 3))))]
+    while rest:
+        nxt = max(rest, key=lambda p: _mismatch(out[-1], p))
+        out.append(rest.pop(rest.index(nxt)))
+    return out
+
+
+def _snap(words, a: float, b: float, mode: str, truncate: float, closing: bool):
+    """One kept span -> its real in/out, by cut-point mode.
+
+    `sentence` (default) is the old behavior verbatim: a cut that opens mid-sentence is
+    incomprehensible, so spans widen to whole sentences. That widening is also the real
+    floor on shot length -- no budget scaling produces a 2s shot out of a 6s sentence --
+    which is why the other two modes exist. `phrase` lands on natural pauses (still never
+    mid-word); `transient` lands on the audio peak and leaves before it resolves.
+
+    The FINAL span of the final beat keeps its sentence snap in every mode: the ending is
+    the most visible cut in the video, and truncating it is an abrupt stop, not a style.
+    """
+    from .select import snap_to_phrase, snap_to_sentences, snap_to_transient
+
+    if closing or mode == "sentence":
+        return snap_to_sentences(words, a, b, max_pad=8.0 if closing else 5.0,
+                                 phrase_fallback=closing)
+    if mode == "transient":
+        return snap_to_transient(words, a, b, truncate=truncate)
+    return snap_to_phrase(words, a, b)
+
+
+def _beat_energy(picked: list[dict], t: float) -> int:
+    """Energy of the beat this moment was lifted from -- the stack's escalation key."""
+    for p in picked:
+        if p["start"] <= t < p["end"]:
+            return int(p.get("energy") or 3)
+    return 3
+
+
+def _cold_opens(outline, picked: list[dict], words: list[dict],
+                stack: int = 0) -> list[dict]:
+    """What plays before beat 1: one flash-forward teaser, or a montage stack of `stack`.
+
+    This is the ONE place the cut is allowed out of chronological order. As a teaser it is
+    the lever against a middle that loses people -- a viewer who has seen where this is
+    going sits through the setup to get there. As a STACK it is the opposite bet: several
+    unexplained moments in a row, each too short to process, so the 5-15s window where
+    clip videos hemorrhage viewers becomes the densest part of the video instead of the
+    setup for it. Stack moments are ordered weakest-first so the run escalates and the
+    single best moment lands last.
+    """
+    segs = getattr(outline, "cold_open", None) or []
+    if isinstance(segs, dict) or not isinstance(segs, (list, tuple)):
+        segs = [segs]                      # a bare Segment (older outline / model reply)
+    if not segs or not picked:
+        return []
+    first_start = min(p["start"] for p in picked)
+    if stack <= 0:
+        one = _cold_open_one(segs[0], picked, words, first_start, stack=False)
+        return [one] if one else []
+    out = []
+    for seg in segs[:stack]:
+        clip = _cold_open_one(seg, picked, words, first_start, stack=True)
+        if clip:
+            out.append(clip)
+    # escalate: weakest moment first, the best one LAST. Ties keep the director's order,
+    # which is the order it was told to escalate in anyway. The energy travels into the
+    # log so `pacing._stack_flag` can measure whether the stack actually escalated.
+    for c in out:
+        c["energy"] = _beat_energy(picked, c["start"])
+    out.sort(key=lambda c: c["energy"])
+    return out
 
 
 def _valid_bounds(s0, e0, stream_end: float) -> bool:
@@ -97,7 +229,12 @@ def _valid_bounds(s0, e0, stream_end: float) -> bool:
 
 
 def cast(outline, chunks, words: list[dict], target_s: float,
-         model: str, tol: float = 0.35, progress=None):
+         model: str, tol: float = 0.35, progress=None,
+         deadspace: bool = True, silence_pad: float = SILENCE_PAD,
+         # the style's machinery half (see refire/styles.py); all identity-defaulted, so
+         # an unstyled cast is byte-identical to the one this module has always produced
+         order: str = "chrono", snap: str = "sentence", stack: int = 0,
+         truncate: float = 0.3):
     """Outline -> (sections, outline_log, warning).
 
     Primary path: the director chose explicit in/out timestamps per beat, so we just snap
@@ -164,7 +301,10 @@ def cast(outline, chunks, words: list[dict], target_s: float,
             out = lb
             if payoff is not None:
                 out = max(out, float(payoff))         # never cut before the payoff lands
-            if reaction is not None:
+            if reaction is not None and snap != "transient":
+                # The reaction tail is the opposite of a premature cut: transient mode
+                # exists to leave DURING the moment, so honouring it there would undo the
+                # only thing that mode does.
                 out = max(out, float(reaction))       # keep the reaction tail
             segs[-1] = (la, min(out, lb + slop))
             # snap each kept span; the final beat's LAST span is the most visible ending
@@ -173,9 +313,7 @@ def cast(outline, chunks, words: list[dict], target_s: float,
             snapped = []
             for j, (sa, sb) in enumerate(segs):
                 closing = is_final and j == len(segs) - 1
-                x, y = snap_to_sentences(words, sa, sb,
-                                         max_pad=8.0 if closing else 5.0,
-                                         phrase_fallback=closing)
+                x, y = _snap(words, sa, sb, snap, truncate, closing)
                 snapped.append([x, y])
             spans = [snapped[0]]
             for x, y in snapped[1:]:                  # merge overlaps/near-touches
@@ -223,7 +361,14 @@ def cast(outline, chunks, words: list[dict], target_s: float,
                        "dir_start": s0, "dir_end": e0,
                        "start": a, "end": b,
                        "segments": spans,                       # the kept spans (the edit)
-                       "dur": sum(y - x for x, y in spans),     # kept footage, not envelope
+                       # FINISHED length: the same silence compression `ae_export`/
+                       # `assemble` apply later, so the pacing audit, the critic and
+                       # `_trim_to_budget` all describe the video that actually renders.
+                       # Measuring the raw spans here made every beat read up to 46%
+                       # longer than it ships (a 16:33 cut audited as 21:28), so the
+                       # audit flagged beats that were never long and the trimmer shed
+                       # beats it had room for.
+                       "dur": _kept_dur(words, spans, deadspace, silence_pad),
                        "score": sc, "reason": reason,
                        "text": text})   # realized KEPT transcript -> editor-review
 
@@ -240,10 +385,14 @@ def cast(outline, chunks, words: list[dict], target_s: float,
         warning = (f"only {total():.0f}s of material cleared casting "
                    f"(target {target_s:.0f}s) -- not padding with filler.")
 
-    # Emit in chronological order so the cut plays forward in time (the beat title
-    # travels with its clip as the section card). For a linear stream this is also the
-    # natural story order; it guarantees output is never reverse/scrambled.
-    picked.sort(key=lambda p: p["start"])
+    # Play order. `chrono` (default) emits in stream order so the cut plays forward in
+    # time -- for a linear stream that is also the natural story order, and it guarantees
+    # output is never reverse/scrambled. `director` trusts the outline's own sequencing;
+    # `whiplash` throws the clock away entirely and orders for tonal jolt.
+    if order == "chrono":
+        picked.sort(key=lambda p: p["start"])
+    elif order == "whiplash":
+        picked = _whiplash(picked)
     # role/energy travel with the clip so the style pass (ae_export/overlay/render) can
     # let the story drive presentation: hook punches in, button stays out of the laugh.
     # One clip PER KEPT SPAN -- multiple clips in a section render as jump cuts within
@@ -253,16 +402,18 @@ def cast(outline, chunks, words: list[dict], target_s: float,
                             "role": p["role"], "energy": p["energy"]}
                            for a, b in p["segments"]]}
                 for p in picked]
-    # The teaser goes in AFTER the chronological sort (it is the one clip allowed to play
+    # The cold open goes in AFTER the ordering pass (it is the one thing allowed to play
     # out of stream order) and after the budget trim, so a promise can never be the thing
-    # that gets shed. Roled `hook` so the style pass gives it no section card.
-    # ponytail: its ~5s aren't subtracted from the budget -- under 1% of a 15-minute
-    # target. Count it if teasers ever get long enough to matter.
-    cold = _cold_open(outline, picked, words)
+    # that gets shed. Roled `hook` so the style pass gives it no section card. A stack is
+    # several clips in the SAME section -- build_manifest already renders a multi-clip
+    # section as jump cuts, which is exactly what a montage stack is.
+    # ponytail: its seconds aren't subtracted from the budget -- under 1% of a 15-minute
+    # target even as an 8-moment stack. Count it if stacks ever get long enough to matter.
+    cold = _cold_opens(outline, picked, words, stack)
     if cold:
         sections.insert(0, {"title": "Cold Open", "role": "hook", "energy": 5,
-                            "clips": [{"start": cold["start"], "end": cold["end"],
-                                       "role": "hook", "energy": 5}]})
+                            "clips": [{"start": c["start"], "end": c["end"],
+                                       "role": "hook", "energy": 5} for c in cold]})
     outline_log = {
         "central_idea": getattr(outline, "central_idea", ""),
         "story_shape": getattr(outline, "story_shape", ""),
@@ -286,6 +437,11 @@ def cast(outline, chunks, words: list[dict], target_s: float,
         # tightens other beats instead of re-adding these at full length every round.
         "dropped": [{"title": p["title"], "role": p["role"],
                      "dur": round(_dur(p), 2)} for p in dropped],
+        # finished seconds per second of selected span, measured on THIS stream. The
+        # director budgets in spans and can't see the compression, so it is told to
+        # select target/shrink -- with the constant prior on round 0 and this number,
+        # which is the truth for this footage, on every review round after.
+        "shrink": _realized_shrink(picked),
     }
     return sections, outline_log, warning
 
@@ -295,7 +451,8 @@ def _mmss(s) -> str:
     return f"{s // 60:02d}:{s % 60:02d}"
 
 
-def cut_plan_md(outline_log: dict) -> str:
+def cut_plan_md(outline_log: dict, pace: float = 1.0,
+                keep_build: bool = True, target_s: float = 0.0) -> str:
     """Render the editor's-notebook Markdown cut plan from an `outline_log` (see `cast`).
 
     Pure -- written beside run/outline.json so taste is debuggable by a human or agent:
@@ -310,10 +467,17 @@ def cut_plan_md(outline_log: dict) -> str:
         out += [f"**Viewer promise:** {outline_log['viewer_promise']}", ""]
     if outline_log.get("ending_needed"):
         out += [f"**Ending needed:** {outline_log['ending_needed']}", ""]
-    if outline_log.get("cold_open"):
-        co = outline_log["cold_open"]
+    cold = outline_log.get("cold_open") or []
+    if isinstance(cold, dict):                     # an outline from before it was a list
+        cold = [cold]
+    if len(cold) == 1:
+        co = cold[0]
         out += [f"**Cold open:** {_mmss(co['start'])}-{_mmss(co['end'])} "
                 f"({co['dur']:.1f}s flash-forward)", ""]
+    elif cold:
+        spans = ", ".join(f"{_mmss(c['start'])} ({c['dur']:.1f}s)" for c in cold)
+        out += [f"**Cold open:** {len(cold)}-moment stack, "
+                f"{sum(c['dur'] for c in cold):.1f}s total -- {spans}", ""]
 
     for i, b in enumerate(outline_log.get("beats", []), 1):
         role = b.get("role") or "?"
@@ -340,7 +504,7 @@ def cut_plan_md(outline_log: dict) -> str:
     from .pacing import audit_note
     out.append("## Pacing audit")
     out.append("")
-    out.append(audit_note(outline_log))
+    out.append(audit_note(outline_log, pace, keep_build, target_s))
     out.append("")
 
     review = outline_log.get("review") or []

@@ -8,6 +8,10 @@ uses to lay clips on V1 -- clips concatenated in section order, each contributin
 
 Straight cuts only: unlike the AE Master there is no crossfade to subtract, because
 the Premiere build is clip selection + subtitling and nothing else.
+
+`recaption` at the bottom is the same job for a timeline a human has since re-cut by
+hand: it walks the TIMELINE rather than the manifest, so the captions follow the
+footage wherever it was dragged to.
 """
 from __future__ import annotations
 
@@ -108,5 +112,119 @@ def _demo() -> None:
     print("srt ok")
 
 
+
+# --------------------------------------------------------------------------- recut
+
+def _norm(p) -> str:
+    return str(p).replace("\\", "/").lower()
+
+
+def _run_dir(manifest_path: Path) -> Path:
+    """Walk up from the manifest to the VOD run dir -- the one holding transcript.json."""
+    for d in manifest_path.resolve().parents:
+        if (d / "transcript.json").exists():
+            return d
+    raise FileNotFoundError(
+        "No transcript.json above %s -- recaption needs the run that built it."
+        % manifest_path)
+
+
+def _rows(timeline_path: Path):
+    """timeline.tsv -> [(media path, src in, src out, timeline at, timeline end)].
+
+    Written by reFirePpro.jsx:timeline(). Tab-separated because ExtendScript is ES3
+    and has no JSON.stringify, and no media path contains a tab or a newline.
+    """
+    out = []
+    for line in timeline_path.read_text(encoding="utf-8").splitlines():
+        cols = line.split("\t")
+        if len(cols) < 5:
+            continue
+        try:
+            out.append((cols[0], *(float(c) for c in cols[1:5])))
+        except ValueError:
+            continue
+    return out
+
+
+def _next_recut(dirpath: Path) -> Path:
+    """captions.recut1.srt, recut2.srt, ...
+
+    Never `captions.srt`: Premiere's importFiles() skips a path already in the project,
+    so overwriting in place leaves the user dragging in the caption track they just
+    replaced. A fresh name sidesteps the import cache entirely.
+    """
+    n = 1
+    while (dirpath / f"captions.recut{n}.srt").exists():
+        n += 1
+    return dirpath / f"captions.recut{n}.srt"
+
+
+def recaption(manifest_path, timeline_path=None, offset: float = 0.0,
+              words_per_line: int = 3, polish=None) -> Path:
+    """Re-caption a hand-recut Premiere timeline. Returns the new .srt path.
+
+    `build_srt` above walks the MANIFEST, so the moment clips are moved, trimmed or
+    dropped in Premiere every cue after the first drifts. This walks the TIMELINE
+    instead: each trackItem's source in/out plus its `sources[].offset` gives an
+    absolute VOD range, and the words in that range are re-grouped from the run's
+    transcript. Reorders, trims, deletes, splits and handles pulled wider than reFire's
+    original cut all fall out of that for free -- the captions follow the footage.
+
+    `polish` is an optional `lines -> lines` hook (the proper-noun pass); it is injected
+    so this module stays pure JSON -> text, which is what makes it instant enough for
+    the panel to re-run on every press.
+
+    ponytail: V1 only, and no dedup if two reFire proxies are stacked -- V1 is where
+    the panel's build() lays the spine down and anything above it reads as b-roll.
+    Scan `seq.videoTracks` instead if a stacked recut ever becomes normal.
+    """
+    from .emphasis import annotate_emphasis, style_text
+    from .subtitles import group_words
+
+    manifest_path = Path(manifest_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    timeline_path = Path(timeline_path or manifest_path.parent / "timeline.tsv")
+    rows = _rows(timeline_path)
+    if not rows:
+        raise ValueError(
+            "No clips in %s -- is the recut sequence the active one in Premiere?"
+            % timeline_path)
+
+    # media path -> the absolute VOD time its frame 0 sits at
+    offsets = {_norm(s["path"]): s.get("offset", 0.0)
+               for s in manifest.get("sources") or []}
+    if not offsets and manifest.get("source"):
+        offsets[_norm(manifest["source"])] = 0.0
+
+    run = _run_dir(manifest_path)
+    words = json.loads((run / "transcript.json").read_text(encoding="utf-8"))
+    # no audio.wav (a pruned run) degrades to keyword/ALL-CAPS emphasis, never an error
+    annotate_emphasis(words, run / "audio.wav")
+
+    cues = []
+    for path, src_in, src_out, at, end in rows:
+        src_off = offsets.get(_norm(path))
+        if src_off is None:
+            continue                       # b-roll the user brought in: not ours to caption
+        span, src_span = end - at, src_out - src_in
+        if span <= 1e-3 or src_span <= 1e-3:
+            continue
+        rate = src_span / span             # >1 where the clip was sped up
+        for g in group_words(words, src_in + src_off, src_out + src_off, words_per_line):
+            text = " ".join(style_text(w["text"], w["emph"]) for w in g).strip()
+            a, b = min(g[0]["start"] / rate, span), min(g[-1]["end"] / rate, span)
+            if text and b > a:
+                cues.append([at + a + offset, at + b + offset, text])
+
+    cues.sort(key=lambda c: c[0])
+    if polish and cues:
+        for cue, text in zip(cues, polish([c[2] for c in cues])):
+            cue[2] = text
+
+    out = _next_recut(manifest_path.parent)
+    out.write_text("".join(f"{i}\n{_ts(a)} --> {_ts(b)}\n{t}\n\n"
+                           for i, (a, b, t) in enumerate(cues, 1)), encoding="utf-8")
+    return out
 if __name__ == "__main__":
     _demo()

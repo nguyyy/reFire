@@ -91,8 +91,13 @@ select{
 }
 select option{background:var(--surface);color:var(--ink)}
 
-/* checkbox: a hairline square that fills white when on */
-.chk{display:flex;align-items:center;gap:9px;cursor:pointer;padding:6px 0;margin-bottom:6px}
+/* checkbox: a hairline square that fills white when on.
+   position:relative is load-bearing -- the input below is absolutely positioned,
+   and with no positioned ancestor its containing block is the INITIAL one: it
+   stops scrolling with `main`, pushes documentElement.scrollHeight past the
+   viewport, and clicking the label focuses an input the browser then scrolls the
+   whole panel off the top of the window to reach. */
+.chk{display:flex;align-items:center;gap:9px;cursor:pointer;padding:6px 0;margin-bottom:6px;position:relative}
 .chk input{position:absolute;opacity:0;pointer-events:none}
 .box{width:13px;height:13px;border:1px solid var(--line);flex:0 0 auto;transition:all .16s ease}
 .chk:hover .box{border-color:#3A3E3C}
@@ -203,10 +208,43 @@ details>summary:hover .head::after{color:var(--ink)}
       <textarea id="brief" data-k="brief"
         placeholder="what you want the cut to be about &mdash; leave empty to let the director mine the stream's own best story"></textarea>
     </div>
-    <div class="grid">
+    <div class="f">
+      <label for="style">Style</label>
+      <textarea id="style" data-k="style"
+        placeholder="how to cut it &mdash; or a path to a style document (.md) whose frontmatter sets the fields below. &ldquo;highlight reel, not a story arc; never open a bit mid-sequence; favor the loudest reactions&rdquo;"></textarea>
+    </div>
+    <div class="grid3">
       <div class="f">
         <label for="duration">Duration</label>
         <input type="text" id="duration" data-k="duration" placeholder="20m">
+      </div>
+      <div class="f">
+        <label for="pace">Pace</label>
+        <input type="text" id="pace" data-k="pace" placeholder="1.0">
+      </div>
+    </div>
+    <div class="grid3">
+      <div class="f">
+        <label for="order">Order</label>
+        <select id="order" data-k="order">
+          <option value="">Default &middot; or style doc</option>
+          <option value="chrono">Chronological</option>
+          <option value="director">Director's order</option>
+          <option value="whiplash">Whiplash</option>
+        </select>
+      </div>
+      <div class="f">
+        <label for="snap">Cuts</label>
+        <select id="snap" data-k="snap">
+          <option value="">Default &middot; or style doc</option>
+          <option value="sentence">On sentences</option>
+          <option value="phrase">On pauses</option>
+          <option value="transient">On the peak</option>
+        </select>
+      </div>
+      <div class="f">
+        <label for="stack">Stack</label>
+        <input type="text" id="stack" data-k="stack" placeholder="&mdash;">
       </div>
       <div class="f">
         <label for="director">Director</label>
@@ -218,7 +256,8 @@ details>summary:hover .head::after{color:var(--ink)}
         </select>
       </div>
     </div>
-    <p class="hint">Duration is a target, not a cap &mdash; the cut lands within the slack set in 03.</p>
+    <p class="hint">Duration is a target, not a cap &mdash; the cut lands within the slack set in 03.
+      Pace scales every clip-length budget at once: 0.6 snappier, 1.5 room to breathe.</p>
   </section>
 
   <details>
@@ -232,7 +271,7 @@ details>summary:hover .head::after{color:var(--ink)}
         </div>
         <div class="f">
           <label for="model">Ollama model</label>
-          <input type="text" id="model" data-k="model" placeholder="llama3.1:8b">
+          <input type="text" id="model" data-k="model" value="gpt-oss:20b" placeholder="gpt-oss:20b">
         </div>
       </div>
       <div class="grid3">
@@ -324,6 +363,21 @@ details>summary:hover .head::after{color:var(--ink)}
     <p class="hint">&minus; pulls every caption earlier, + pushes them later. The value is
       absolute, so nudging back and forth never drifts. It is baked into captions.srt on
       the next Build &mdash; a regen takes no time, unlike re-running Make.</p>
+  </section>
+
+  <section>
+    <div class="head"><span class="n">05</span><span class="t">Recaption</span><i></i></div>
+    <button id="recap">Recaption timeline</button>
+    <label class="chk"><input type="checkbox" id="cap_fix" data-k="cap_fix">
+      <i class="box"></i><span>Proper-noun pass (one Claude call)</span></label>
+    <p class="hint">Re-cut the sequence by hand and the manifest stops describing it, so
+      every cue after the first drifts. This reads the <b>active sequence&rsquo;s V1</b> and
+      rebuilds the captions from the source ranges it is really showing &mdash; moves, trims,
+      splits, deletes and handles pulled wider than reFire&rsquo;s own cut all land back
+      under their footage. Writes a fresh <b>captions.recutN.srt</b> into the reFire bin:
+      delete the old caption track, drag the new one on. Names this stream already taught
+      reFire are re-applied for free; tick the box to also run Claude over lines it has
+      never seen.</p>
     <pre id="log"></pre>
   </section>
 
@@ -354,6 +408,14 @@ function defaultRepo() {
     // the extension is installed as a link into %APPDATA%\Adobe\CEP\extensions -- resolve
     // through it so ../.. lands on the real repo root, not the link's parent.
     try { return P.resolve(fs.realpathSync(extDir()), "..", ".."); } catch (e) { return ""; }
+}
+// Premiere's CEP process has no venv on PATH, and bare "python" hits the Windows
+// Store stub -- fall back to the repo's own venv before giving up on PATH.
+function pyExe() {
+    var typed = val("python");
+    if (typed) { return typed; }
+    var venv = P.join(val("repo") || defaultRepo(), ".venv", "Scripts", "python.exe");
+    return fs.existsSync(venv) ? venv : "python";
 }
 function esc(s) { return String(s).replace(/\\/g, "\\\\").replace(/"/g, "\\\""); }
 
@@ -401,6 +463,8 @@ function setManifest(p) {
     el.textContent = manifest || "no manifest loaded";
     el.classList.toggle("set", !!manifest);
     $("#build").disabled = !manifest;
+    $("#recap").disabled = !manifest;
+    save();               // the manifest has to survive a reload -- see restore()
 }
 
 // --- caption offset -----------------------------------------------------
@@ -419,6 +483,7 @@ function save() {
     Array.prototype.forEach.call(fields(), function (el) {
         o[el.dataset.k] = el.type === "checkbox" ? el.checked : el.value;
     });
+    o.manifest = manifest;          // not a [data-k] field, but just as worth keeping
     localStorage.setItem(STORE, JSON.stringify(o));
 }
 function restore() {
@@ -426,9 +491,12 @@ function restore() {
     try { o = JSON.parse(localStorage.getItem(STORE) || "{}"); } catch (e) {}
     Array.prototype.forEach.call(fields(), function (el) {
         var v = o[el.dataset.k];
-        if (v === undefined) { return; }
+        // "" from an older save would wipe a seeded value= default (the model field).
+        // Fields without value= restore to "" anyway, so skipping empties is a no-op there.
+        if (v === undefined || v === "") { return; }
         if (el.type === "checkbox") { el.checked = v; } else { el.value = v; }
     });
+    return o;
 }
 
 // --- argv ---------------------------------------------------------------
@@ -440,6 +508,11 @@ function buildArgs() {
     function opt(flag, k) { var v = val(k); if (v !== "") { a.push(flag, v); } }
 
     opt("--brief", "brief");
+    opt("--style", "style");
+    opt("--pace", "pace");
+    opt("--order", "order");
+    opt("--snap", "snap");
+    opt("--stack", "stack");
     opt("--game", "game");
     opt("--title", "title");
     opt("--start", "start");
@@ -507,7 +580,7 @@ function make() {
     if (!repo || !fs.existsSync(P.join(repo, "refire", "__init__.py"))) {
         return status("err", "set Repository in 03 -- refire package not found");
     }
-    var py = val("python") || "python";
+    var py = pyExe();
     var args = ["-m", "refire", "make"].concat(buildArgs());
 
     $("#log").textContent = "";
@@ -589,13 +662,14 @@ function build() {
         log("! node unavailable -- building with the existing captions.srt");
         return ppro("build", "building sequence");
     }
-    var py = val("python") || "python";
+    var py = pyExe();
     var args = ["-m", "refire", "srt", manifest, "--offset", String(off)];
     waiting(true); status("run", "writing captions");
     log("> " + py + " " + args.join(" "));
     var proc;
     try {
-        proc = cp.spawn(py, args, { env: Object.assign({}, process.env,
+        proc = cp.spawn(py, args, { cwd: val("repo") || defaultRepo(),
+                                    env: Object.assign({}, process.env,
                                                        { PYTHONIOENCODING: "utf-8" }) });
     } catch (e) {
         waiting(false);
@@ -611,9 +685,87 @@ function build() {
     });
 }
 
+// --- recaption ----------------------------------------------------------
+// Build() lays out what the MANIFEST says; the moment that sequence is re-cut by hand
+// the manifest no longer describes what is on screen. So ask Premiere what is actually
+// on V1 and let `refire recap` re-group the run's transcript against those source
+// ranges. Press it as often as you like -- each press writes its own .srt.
+function recaption() {
+    if (!manifest) { return; }
+    if (!cp) { return status("err", "node unavailable -- Recaption needs python"); }
+    waiting(true); status("run", "reading timeline");
+    evalScript(snippet('reFirePpro.timeline("' + esc(manifest) + '")'), function (res) {
+        if (!res || res === "EvalScript error.") {
+            res = "Error: no reply from Premiere Pro. The panel's ExtendScript engine "
+                + "is wedged -- close and reopen the panel.";
+        }
+        log(res);
+        if (/^Error/.test(res)) { waiting(false); progress(0); return status("err", res); }
+        runRecap();
+    });
+}
+
+function runRecap() {
+    var py = pyExe();
+    var args = ["-m", "refire", "recap", manifest,
+                "--offset", String(capOffset()),
+                "--words-per-line", val("wpl") || "3"];
+    function opt(flag, k) { var v = val(k); if (v !== "") { args.push(flag, v); } }
+    opt("--game", "game");            // unlocks corrections_<game>.json, free and instant
+    opt("--title", "title");
+    if (val("cap_fix")) {
+        args.push("--fix");
+        opt("--claude-model", "claude_model");
+        var d = val("director");
+        if (d === "api" || d === "cli") { args.push("--director-backend", d); }
+    }
+
+    status("run", "recaptioning");
+    log("> " + py + " " + args.join(" "));
+    var srt = "", rest = "", proc;
+    try {
+        proc = cp.spawn(py, args, {
+            cwd: val("repo") || defaultRepo(),
+            env: Object.assign({}, process.env,
+                               { PYTHONUNBUFFERED: "1", PYTHONIOENCODING: "utf-8" })
+        });
+    } catch (e) { waiting(false); return status("err", String(e)); }
+
+    // buffered like make()'s pump: the "Captions:" line is the last thing printed and a
+    // chunk boundary can land mid-line, which would lose the path we need.
+    function onRecapLine(line) {
+        if (!line) { return; }
+        log(line);
+        var m = /^Captions:\s*(.+)$/.exec(line);
+        if (m) { srt = m[1].trim(); }
+    }
+    function sink(d) {
+        rest += d.toString();
+        var lines = rest.split(/\r?\n/);
+        rest = lines.pop();
+        lines.forEach(onRecapLine);
+    }
+    proc.stdout.on("data", sink);
+    proc.stderr.on("data", sink);
+    proc.on("error", function (e) { waiting(false); status("err", String(e)); });
+    proc.on("close", function (code) {
+        onRecapLine(rest); rest = "";
+        if (code !== 0) {
+            waiting(false); progress(0);
+            return status("err", "recaption failed (exit " + code + ")");
+        }
+        if (!srt) {
+            waiting(false); progress(0);
+            return status("err", "recaption wrote no .srt -- see log");
+        }
+        ppro("attach", "importing captions", '"' + esc(normPath(srt)) + '"');
+    });
+}
+
 // --- wiring -------------------------------------------------------------
 $("#make").onclick = make;
 $("#build").onclick = build;
+$("#recap").onclick = recaption;
 function nudge(step) {
     // round to the step so repeated clicks don't accumulate float dust in the field.
     // The value only takes effect on the next Build -- see the hint under the field.
@@ -651,8 +803,11 @@ function selfCheck() {
     });
 }
 
-restore();
-setManifest("");
+// Reopening the panel used to drop the manifest and grey out Build and Recaption with
+// nothing to explain why. Re-check the file: a run since deleted would otherwise light
+// both buttons up pointing at nothing.
+var kept = restore().manifest || "";
+setManifest(fs && kept && !fs.existsSync(kept) ? "" : kept);
 status("", "idle");
 selfCheck();
 }());

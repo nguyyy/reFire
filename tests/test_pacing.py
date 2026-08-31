@@ -1,7 +1,8 @@
 """The pacing audit is the critic's only source of truth about the FINISHED cut's
 timeline, so its arithmetic gets tested: if `at` drifts, every flag points the critic at
 the wrong stretch of video and the review round is wasted."""
-from refire.pacing import audit, cut_timeline, pacing_note
+from refire.pacing import (ROLE_BUDGET, audit, cut_timeline, pacing_note,
+                          scaled_budget)
 
 
 def beat(n, energy=3, dur=30.0, role="escalation", texture="funny",
@@ -126,4 +127,200 @@ def test_the_note_lists_flags_worst_first():
     beats = ([beat(1, energy=5)] + [beat(i, energy=1) for i in range(2, 6)]
              + [beat(6, dur=100.0, words=200)])
     note = pacing_note(audit(cut_timeline(log(beats))))
-    assert note.index("flattest stretch") < note.index("longest single beat")
+    assert note.index("flattest stretch") < note.index("ceiling for a")
+
+
+def test_the_long_beat_ceiling_is_per_role_not_flat():
+    # 70s: comfortably inside an escalation's 90s budget, way past a setup's 40s.
+    # The old flat 75s ceiling flagged neither, which is how beats that were never
+    # long got "tightened" while a sprawling setup went unmentioned.
+    assert "long_beat" not in kinds([beat(1, dur=70.0, role="escalation")])
+    assert "long_beat" in kinds([beat(1, dur=70.0, role="setup")])
+    # and the flag says which ceiling was broken, so the critic can re-role instead
+    flags = audit(cut_timeline(log([beat(1, dur=70.0, role="setup")])))
+    assert "40s ceiling for a setup beat" in flags[0]["text"]
+
+
+def test_a_climax_may_run_longer_than_any_other_role():
+    assert "long_beat" not in kinds([beat(1, dur=120.0, role="climax")])
+    assert "long_beat" in kinds([beat(1, dur=120.0, role="payoff")])
+
+
+# --- cut speed (--pace) -------------------------------------------------
+
+def test_scaled_budget_is_identity_at_pace_one():
+    """pace 1.0 must not perturb the table -- every default run depends on it."""
+    assert scaled_budget() == dict(ROLE_BUDGET)
+    assert scaled_budget(1.0) == dict(ROLE_BUDGET)
+
+
+def test_scaled_budget_scales_both_bounds():
+    assert scaled_budget(0.5)["climax"] == (22.5, 65.0)
+    assert scaled_budget(2.0)["hook"] == (24.0, 70.0)
+
+
+def test_pace_moves_the_long_beat_ceiling():
+    """The ceiling the audit enforces has to travel with the budget the director was
+    told, or a deliberately slow cut gets flagged for obeying its own direction."""
+    tl = cut_timeline(log([beat(1, dur=100.0, role="escalation")]))   # 90s ceiling
+    assert any(f["kind"] == "long_beat" for f in audit(tl))
+    assert not any(f["kind"] == "long_beat" for f in audit(tl, pace=1.5))
+    # and the other way: a snappy cut flags a beat that was fine at 1.0
+    tl2 = cut_timeline(log([beat(2, dur=80.0, role="escalation")]))
+    assert not any(f["kind"] == "long_beat" for f in audit(tl2))
+    assert any(f["kind"] == "long_beat" for f in audit(tl2, pace=0.6))
+
+
+# --- skipped build-up ---------------------------------------------------
+
+def test_gap_before_the_payoff_is_a_skipped_build():
+    """Cutting from a bit's opener straight to its punchline reads as a missing scene --
+    the wordle sequence jumped to its last guess because that scores highest."""
+    b = beat(1, dur=50.0, start=0.0, payoff=200.0)
+    b["segments"] = [[0.0, 10.0], [190.0, 240.0]]     # 180s of build-up skipped
+    flags = audit(cut_timeline(log([b])))
+    hit = [f for f in flags if f["kind"] == "skipped_build"]
+    assert len(hit) == 1
+    assert "180s of its own build-up" in hit[0]["text"]
+
+
+def test_gap_after_the_payoff_is_not_flagged():
+    """A jump past the payoff is a tail trim, not a skipped build."""
+    b = beat(1, dur=50.0, start=0.0, payoff=5.0)
+    b["segments"] = [[0.0, 10.0], [190.0, 240.0]]
+    assert not any(f["kind"] == "skipped_build"
+                   for f in audit(cut_timeline(log([b]))))
+
+
+def test_small_internal_jumps_are_not_flagged():
+    """Jump-cutting the rambling out of a moment is the normal edit, not a defect."""
+    b = beat(1, dur=50.0, start=0.0, payoff=200.0)
+    b["segments"] = [[0.0, 30.0], [55.0, 90.0], [120.0, 160.0]]   # 25s, 30s gaps
+    assert not any(f["kind"] == "skipped_build"
+                   for f in audit(cut_timeline(log([b]))))
+
+
+def test_beat_without_segments_has_no_build_gap():
+    """The fallback cast path emits no segments; it must not flag."""
+    tl = cut_timeline(log([beat(1)]))
+    assert tl[0]["build_gap"] == 0.0
+    assert not any(f["kind"] == "skipped_build" for f in audit(tl))
+
+
+def test_skipped_build_outranks_tightening_flags():
+    """A structural break is worth the critic's attention before a long/thin beat is."""
+    b = beat(1, dur=200.0, start=0.0, payoff=300.0, words=10)
+    b["segments"] = [[0.0, 10.0], [290.0, 480.0]]
+    kinds = [f["kind"] for f in audit(cut_timeline(log([b])))]
+    assert "skipped_build" in kinds and "long_beat" in kinds
+    assert kinds.index("skipped_build") < kinds.index("long_beat")
+
+
+# --- the audit must not fight a deliberate style -------------------------
+
+def _build_gap_timeline():
+    """One beat whose segments skip 100s of its own build-up before the payoff, plus a
+    slow lead-in -- the two flags a story wants and a dense clip reel does not."""
+    log = {"cold_open": [], "beats": [{
+        "title": "wordle", "role": "escalation", "energy": 4, "texture": "funny",
+        "start": 0.0, "end": 200.0, "dur": 80.0, "text": "w " * 200,
+        "payoff_start_s": 190.0, "setup_start_s": None,
+        "segments": [[0.0, 10.0], [110.0, 190.0]]}]}
+    return log
+
+
+def test_keep_build_off_silences_the_flags_a_style_contradicts():
+    log = _build_gap_timeline()
+    tl = cut_timeline(log)
+    kinds_on = {f["kind"] for f in audit(tl)}
+    kinds_off = {f["kind"] for f in audit(tl, keep_build=False)}
+    assert "skipped_build" in kinds_on
+    assert "skipped_build" not in kinds_off and "slow_payoff" not in kinds_off
+
+
+def test_average_shot_is_measured_only_when_build_up_is_skipped():
+    """The mirror measurement: with setup deliberately gone, the failure flips from
+    'the build was deleted' to 'this stopped being dense'."""
+    log = _build_gap_timeline()
+    tl = cut_timeline(log)
+    assert not [f for f in audit(tl) if f["kind"] == "avg_shot"]
+    flags = [f for f in audit(tl, keep_build=False) if f["kind"] == "avg_shot"]
+    # a SHOT is one kept segment, not the beat: 80s over two segments is a 40s mean.
+    # Measured as beats this read 80.0s, and the only way to clear it was to ship less.
+    assert flags and "average shot runs 40.0s across 2 segments" in flags[0]["text"]
+
+
+def test_average_shot_counts_segments_not_beats():
+    """The flag has to be clearable by CUTTING MORE, not by shipping less footage: one
+    60s beat split into ten 6s segments is a dense cut, and grading its beat length said
+    the opposite."""
+    from refire.pacing import audit, cut_timeline
+
+    segs = [[float(i * 6), float(i * 6 + 6)] for i in range(10)]
+    log = {"cold_open": [], "beats": [
+        {"title": "a", "role": "escalation", "energy": 3, "dur": 60.0,
+         "start": 0.0, "end": 60.0, "text": "x " * 120, "segments": segs}]}
+    tl = cut_timeline(log)
+    assert tl[0]["shots"] == [6.0] * 10
+    assert not [f for f in audit(tl, keep_build=False) if f["kind"] == "avg_shot"]
+
+
+def test_a_short_cut_is_flagged_against_its_target():
+    """The one defect invisible beat-by-beat: every beat looks fine and the video is half
+    the length it was asked for. Silent, the critic has no reason to act on it."""
+    from refire.pacing import audit, cut_timeline
+
+    log = {"cold_open": [], "beats": [
+        {"title": "a", "role": "escalation", "energy": 3, "dur": 60.0,
+         "start": 0.0, "end": 60.0, "text": "x y z", "segments": [[0.0, 60.0]]}]}
+    tl = cut_timeline(log)
+    assert not [f for f in audit(tl) if f["kind"] == "short_cut"]        # no target given
+    assert not [f for f in audit(tl, target_s=60.0) if f["kind"] == "short_cut"]
+    short = [f for f in audit(tl, target_s=960.0) if f["kind"] == "short_cut"]
+    assert short and "94% short" in short[0]["text"]
+    assert short[0]["kind"] == audit(tl, target_s=960.0)[0]["kind"]      # ranked first
+
+
+def test_average_shot_ceiling_scales_with_pace():
+    from refire.pacing import AVG_SHOT_S
+
+    log = {"cold_open": [], "beats": [
+        {"title": "a", "role": "", "energy": 3, "dur": 6.0, "start": 0.0, "end": 6.0,
+         "text": "x y z", "segments": [[0.0, 6.0]]}]}
+    tl = cut_timeline(log)
+    assert 6.0 < AVG_SHOT_S                                   # under the pace-1.0 ceiling
+    assert not [f for f in audit(tl, keep_build=False) if f["kind"] == "avg_shot"]
+    # at pace 0.35 the ceiling is 4.2s, so a 6s average is now too slow
+    assert [f for f in audit(tl, 0.35, keep_build=False) if f["kind"] == "avg_shot"]
+
+
+def test_a_stack_that_peaks_early_is_flagged():
+    from refire.pacing import audit_note
+
+    beats = [{"title": "a", "role": "", "energy": 3, "dur": 10.0, "start": 0.0,
+              "end": 10.0, "text": "x", "segments": [[0.0, 10.0]]}]
+    good = {"cold_open": [{"start": 1.0, "end": 3.0, "dur": 2.0, "energy": 2},
+                          {"start": 5.0, "end": 7.0, "dur": 2.0, "energy": 5}],
+            "beats": beats}
+    bad = {"cold_open": [{"start": 1.0, "end": 3.0, "dur": 2.0, "energy": 5},
+                         {"start": 5.0, "end": 7.0, "dur": 2.0, "energy": 2}],
+           "beats": beats}
+    assert "strongest moment" not in audit_note(good)
+    assert "strongest moment is #1 of 2" in audit_note(bad)
+
+
+def test_a_single_teaser_is_never_a_stack_order_problem():
+    from refire.pacing import audit_note
+
+    log = {"cold_open": [{"start": 1.0, "end": 3.0, "dur": 2.0, "energy": 5}],
+           "beats": [{"title": "a", "role": "", "energy": 3, "dur": 10.0, "start": 0.0,
+                      "end": 10.0, "text": "x", "segments": [[0.0, 10.0]]}]}
+    assert "strongest moment" not in audit_note(log)
+
+
+def test_audit_defaults_are_unchanged():
+    """keep_build defaults to True everywhere, so an unstyled run measures exactly what
+    it measured before."""
+    log = _build_gap_timeline()
+    tl = cut_timeline(log)
+    assert audit(tl) == audit(tl, 1.0, True)

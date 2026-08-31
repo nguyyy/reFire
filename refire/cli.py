@@ -9,7 +9,8 @@ from pathlib import Path
 
 from .pipeline import make
 from .score import DEFAULT_MODEL
-from .select import parse_duration
+from . import loud as loud_mod
+from .select import SILENCE_PAD, parse_duration
 from .transcribe import DEFAULT_BATCH_SIZE, DEFAULT_WHISPER_MODEL
 
 # Anchor to the repo's assets/, not the CWD: the AE "Make" button launches the CLI
@@ -67,6 +68,38 @@ def main(argv: list[str] | None = None) -> None:
     mk.add_argument("--brief", default=None,
                     help="free text: the subject + vibe you want; omit to let the "
                          "director mine the stream's own best story")
+    mk.add_argument("--style", default=None,
+                    help="free text: HOW to cut it, as opposed to --brief's what. "
+                         "Structure, pacing, what to favor, what never to do -- e.g. "
+                         "\"highlight reel, not a story arc; never open a bit "
+                         "mid-sequence; favor the loudest reactions\". It overrides "
+                         "the default story-arc framing in both the director and the "
+                         "critic. May also be a PATH to a style document (.md): its "
+                         "frontmatter sets the flags below, its body is the direction")
+    # The five knobs a style document can also set. All default to None so `cli` can tell
+    # "the user asked for this" from "nobody said" -- an explicit flag beats frontmatter.
+    mk.add_argument("--pace", type=float, default=None,
+                    help="cut speed: scales every role's clip-length budget at once "
+                         "(0.6 = snappier and more beats, 1.5 = room to breathe; "
+                         "default 1.0). --style says it in words; this moves the "
+                         "numbers the prompt and the pacing audit actually use")
+    mk.add_argument("--order", choices=["chrono", "director", "whiplash"], default=None,
+                    help="play order: chrono (default, forward in stream time), "
+                         "director (the outline's own order), whiplash (maximize the "
+                         "tonal mismatch between adjacent beats -- chaos into calm)")
+    mk.add_argument("--snap", choices=["sentence", "phrase", "transient"], default=None,
+                    help="where cuts land: sentence (default, never mid-sentence), "
+                         "phrase (natural speech pauses -- shorter shots, still never "
+                         "mid-word), transient (out-point on the audio peak, cut short "
+                         "by --truncate so the moment never fully resolves)")
+    mk.add_argument("--stack", type=int, default=None,
+                    help="montage-stack cold open: N unexplained moments (1-2.5s each, "
+                         "escalating, best last) before beat 1. 0 = the default single "
+                         "flash-forward teaser")
+    mk.add_argument("--truncate", type=float, default=None,
+                    help="--snap transient only: seconds to cut BEFORE the peak "
+                         "resolves, so the viewer finishes the joke after the cut "
+                         "(default 0.3)")
     mk.add_argument("--duration", required=True, help="target runtime: 20m / 20:00 / 1200")
     mk.add_argument("--run-dir", default=None,
                     help="artifact/output directory (default: run/<vod_id>/<vod_id>-<phrase>, "
@@ -153,6 +186,28 @@ def main(argv: list[str] | None = None) -> None:
     sr.add_argument("--offset", type=float, default=0.0,
                     help="shift every cue by this many seconds (caption nudge)")
 
+    rc = sub.add_parser("recap",
+                        help="re-caption a Premiere timeline you re-cut by hand")
+    rc.add_argument("manifest", help="path to a run's ae/manifest.json")
+    rc.add_argument("--timeline", default=None,
+                    help="timeline.tsv dumped by the panel (default: beside the manifest)")
+    rc.add_argument("--offset", type=float, default=0.0,
+                    help="shift every cue by this many seconds (caption nudge)")
+    rc.add_argument("--words-per-line", type=int, default=3,
+                    help="caption line length -- the same knob `make` uses (default 3)")
+    rc.add_argument("--fix", action="store_true",
+                    help="also run the Claude proper-noun pass over the new lines; "
+                         "corrections_<game>.json is applied either way, for free")
+    rc.add_argument("--game", default="", help="game name, e.g. 'genshin impact'")
+    rc.add_argument("--title", default="", help="stream title (extra context)")
+    rc.add_argument("--terms", default="", help="glossary: 'Kinich, Zajef' or a file path")
+    rc.add_argument("--chat", default=None,
+                    help="vods/<id>.chat.json -- viewers spell names the transcriber can't")
+    rc.add_argument("--claude-model", default="claude-sonnet-5")
+    rc.add_argument("--director-backend", choices=["cli", "api"], default="cli")
+    rc.add_argument("--corrections-dir", default="run",
+                    help="where corrections_<game>.json lives (learned across runs)")
+
     fc = sub.add_parser("fixcaps",
                         help="re-run the caption proper-noun fix on an existing manifest")
     fc.add_argument("manifest", help="path to a run's ae/manifest.json")
@@ -167,6 +222,45 @@ def main(argv: list[str] | None = None) -> None:
     fc.add_argument("--corrections-dir", default="run",
                     help="where corrections_<game>.json lives (learned across runs)")
 
+    ld = sub.add_parser("loud",
+                        help="several VOD#s -> a loudest-moments Premiere manifest")
+    ld.add_argument("vod_ids", nargs="+", help="Twitch VOD numbers to mine")
+    ld.add_argument("--duration", default="8m",
+                    help="target compilation length (e.g. 8m, 08:00, 480)")
+    ld.add_argument("--per-vod", type=int, default=loud_mod.PER_VOD,
+                    help=f"candidate windows scanned per VOD (default {loud_mod.PER_VOD})")
+    ld.add_argument("--clip", type=float, default=loud_mod.CLIP_S,
+                    help=f"shot length in seconds (default {loud_mod.CLIP_S:g})")
+    ld.add_argument("--lead", type=float, default=loud_mod.LEAD_S,
+                    help="seconds of run-up kept BEFORE the spike, out of --clip "
+                         f"(default {loud_mod.LEAD_S:g})")
+    ld.add_argument("--pad", type=float, default=loud_mod.PAD_S,
+                    help="extra seconds downloaded each side so the cut can be snapped "
+                         f"and hand-nudged in Premiere (default {loud_mod.PAD_S:g})")
+    ld.add_argument("--baseline", type=float, default=loud_mod.BASELINE_S,
+                    help="rolling-median span the spike is measured against; raise it to "
+                         "rank sustained loudness higher, lower it for sharper reactions "
+                         f"(default {loud_mod.BASELINE_S:g}s)")
+    ld.add_argument("--out", default=None, help="output folder (default run/loud-<name>)")
+    ld.add_argument("--cache-dir", default="vods", help="where VOD downloads are cached")
+    ld.add_argument("--threads", type=int, default=loud_mod.DL_THREADS,
+                    help="parallel download threads; the downloader's own default of 4 "
+                         f"throttles well under a fast link (default {loud_mod.DL_THREADS}). "
+                         "Back it off if Twitch starts rate limiting.")
+    ld.add_argument("--game", default="", help="game name, for transcription hotwords")
+    ld.add_argument("--terms", default="", help="glossary: 'Kinich, Zajef' or a file path")
+    ld.add_argument("--words-per-line", type=int, default=3,
+                    help="caption line length (default 3)")
+    ld.add_argument("--no-deadspace", action="store_true",
+                    help="keep each moment's internal silence instead of jump-cutting it")
+    ld.add_argument("--silence-pad", type=float, default=SILENCE_PAD,
+                    help="breath left around each phrase when dead air is cut")
+    ld.add_argument("--model", default=DEFAULT_MODEL, help="local Ollama model (glossary)")
+    ld.add_argument("--transcriber", choices=["local", "deepgram"], default="local")
+    ld.add_argument("--whisper-model", default=DEFAULT_WHISPER_MODEL)
+    ld.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    ld.add_argument("--compute-type", default="float16")
+
     args = p.parse_args(argv)
 
     if args.cmd == "fixcaps":
@@ -179,11 +273,46 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Captions: {write_srt(args.manifest).resolve()}")
         return
 
+    if args.cmd == "loud":
+        loud_mod.loud(args.vod_ids, parse_duration(args.duration), out_dir=args.out,
+                      cache_dir=args.cache_dir, per_vod=args.per_vod, clip_s=args.clip,
+                      lead_s=args.lead, pad_s=args.pad, baseline_s=args.baseline,
+                      game=args.game, terms=args.terms,
+                      words_per_line=args.words_per_line,
+                      deadspace=not args.no_deadspace, silence_pad=args.silence_pad,
+                      model=args.model, transcriber=args.transcriber,
+                      whisper_model=args.whisper_model, batch_size=args.batch_size,
+                      compute_type=args.compute_type, threads=args.threads)
+        return
+
     if args.cmd == "srt":
         # Pure JSON -> text, so the Premiere panel re-runs this on every caption
         # nudge instead of re-running the whole `make`.
         from .srt import write_srt
         print(f"Captions: {write_srt(args.manifest, args.offset).resolve()}")
+        return
+
+    if args.cmd == "recap":
+        # Walks the TIMELINE the panel dumped instead of the manifest, so the captions
+        # follow footage a human moved, trimmed, split or widened after `make` was done
+        # with it. Pure JSON -> text unless --fix is on, so the panel can re-run it freely.
+        from .caption_fix import fix_lines, save_corrections
+        from .srt import recaption
+
+        def polish(lines):
+            fixed, learned = fix_lines(lines, llm=args.fix, game=args.game,
+                                       title=args.title, terms=args.terms,
+                                       chat_json=args.chat, model=args.claude_model,
+                                       backend=args.director_backend,
+                                       corrections_dir=args.corrections_dir)
+            save_corrections(args.corrections_dir, args.game, learned)
+            n = sum(1 for a, b in zip(lines, fixed) if a != b)
+            print(f"[captions] {n}/{len(lines)} lines corrected")
+            return fixed
+
+        out = recaption(args.manifest, args.timeline, offset=args.offset,
+                        words_per_line=args.words_per_line, polish=polish)
+        print(f"Captions: {out.resolve()}")
         return
 
     if args.cmd == "make":
@@ -207,11 +336,31 @@ def main(argv: list[str] | None = None) -> None:
             if file_w:
                 file_w(frac, msg, done)
 
+        # A style may be a document: its body is the direction, its frontmatter supplies
+        # defaults for the knobs below. An explicit flag always wins -- `pick` for the
+        # value flags (None = nobody said), and a plain AND for the --no-* switches,
+        # which can only ever turn something OFF and so can't be ambiguous.
+        from .styles import resolve as _resolve_style
+        direction, knobs = _resolve_style(args.style)
+
+        def pick(flag, key, default):
+            return flag if flag is not None else knobs.get(key, default)
+
         try:
             out = make(args.vod_id, args.brief, parse_duration(args.duration),
+                       style=direction,
+                       pace=pick(args.pace, "pace", 1.0),
+                       order=pick(args.order, "order", "chrono"),
+                       snap=pick(args.snap, "snap", "sentence"),
+                       stack=pick(args.stack, "stack", 0),
+                       truncate=pick(args.truncate, "truncate", 0.3),
+                       loudnorm=knobs.get("loudnorm", False),
+                       keep_build=knobs.get("keep_build", True),
+                       captions=knobs.get("captions", "all"),
                        run_dir=args.run_dir, model=args.model, game=args.game,
                        terms=args.terms,
-                       zoom_sens=args.zoom_sens, words_per_line=args.words_per_line,
+                       zoom_sens=args.zoom_sens,
+                       words_per_line=knobs.get("words_per_line", args.words_per_line),
                        tol=args.tol, cache_dir=args.cache_dir,
                        start=parse_duration(args.start) if args.start else None,
                        end=parse_duration(args.end) if args.end else None,
@@ -222,9 +371,10 @@ def main(argv: list[str] | None = None) -> None:
                        review_rounds=args.review_rounds, scout=args.scout,
                        render=args.render, encoder=args.encoder,
                        silence_pad=args.silence_pad,
-                       motion_zoom=not args.no_motion_zoom,
+                       motion_zoom=not args.no_motion_zoom and knobs.get("motion_zoom", True),
                        emotes=not args.no_emotes, sfx=not args.no_sfx,
-                       deadspace=not args.no_deadspace, cards=not args.no_cards,
+                       deadspace=not args.no_deadspace and knobs.get("deadspace", True),
+                       cards=not args.no_cards and knobs.get("cards", True),
                        proxy=not args.no_proxy,
                        caption_fix=not args.no_caption_fix,
                        transcriber=args.transcriber,

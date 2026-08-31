@@ -12,7 +12,7 @@ from .subtitles import build_ass
 
 
 def _run(cmd: list[str]) -> None:
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg failed ({proc.returncode}):\n{proc.stderr[-2000:]}")
 
@@ -63,6 +63,7 @@ def render_clips(
     silence_pad: float = SILENCE_PAD,
     motion_zoom: bool = True,
     deadspace: bool = True,
+    loudnorm: bool = False,
 ) -> Path:
     """Render a flat list of {start,end} clips into a watchable rough cut.
 
@@ -101,6 +102,7 @@ def render_clips(
         ass.write_text(build_ass(retimed, 0.0, cdur, wpl), encoding="utf-8")
         seg_speech = speech_intervals(retimed)  # phrase runs on the clip timeline
         render_clip(video, seg, ass, out, encoder=encoder, speech=seg_speech, keep=keep,
-                    motion_zoom=motion_zoom, enter=c_enter, exit=c_exit)
+                    motion_zoom=motion_zoom, enter=c_enter, exit=c_exit,
+                    loudnorm=loudnorm)
         rendered.append(out)
     return assemble(rendered, run_dir / out_name, music=music)

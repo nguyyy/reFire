@@ -16,3 +16,6 @@ THIRD-PARTY-LICENSES.txt
 
 .env
 *.jpg
+.venv/
+*.m4a
+*.csv

@@ -8,6 +8,7 @@ import os
 import sys
 import time
 import wave
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, TypedDict
 
@@ -143,15 +144,29 @@ def snap_to_glossary(words: list[Word], hotwords: str) -> list[Word]:
     return words
 
 
+@lru_cache(maxsize=1)
+def _whisper(model_size: str, device: str, compute_type: str):
+    """One WhisperModel per (size, device, precision), reused across calls.
+
+    The constructor loads gigabytes of weights onto the GPU. `make` transcribes one long
+    wav and never noticed, but `loud` calls this once per picked moment -- dozens of
+    20-second windows -- where reloading per call costs far more than the decoding does.
+    maxsize=1: a different precision evicts the old model rather than holding two on the
+    GPU at once.
+    """
+    from faster_whisper import WhisperModel
+    return WhisperModel(model_size, device=device, compute_type=compute_type)
+
+
 def _stt_local(wav_path, hotwords="", model_size=DEFAULT_WHISPER_MODEL, device="cuda",
                progress=None, batch_size=DEFAULT_BATCH_SIZE, compute_type="float16",
                **_kw) -> list[Word]:
     """faster-whisper local GPU backend (default; free/private)."""
     _register_cuda_dlls()
     # local imports: heavy, GPU-only
-    from faster_whisper import BatchedInferencePipeline, WhisperModel
+    from faster_whisper import BatchedInferencePipeline
 
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
+    model = _whisper(model_size, device, compute_type)
     # hotwords is the bounded bias path; passing initial_prompt too would (a) make
     # faster-whisper ignore hotwords and (b) feed an uncapped prompt that can push
     # the decoder past Whisper's 448-position limit. condition_on_previous_text=False

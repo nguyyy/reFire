@@ -90,6 +90,70 @@ def snap_to_sentences(words, start: float, end: float, max_pad: float = 5.0,
     return max(0.0, new_start), max(new_end, new_start)
 
 
+def snap_to_phrase(words, start: float, end: float, max_pad: float = 2.0):
+    """Nudge [start, end] onto the nearest natural PAUSE instead of the nearest sentence.
+
+    `snap_to_sentences` is the right default -- a cut that opens mid-sentence is
+    incomprehensible -- but it is also the real floor on shot length: a sentence runs
+    several seconds, so no amount of budget scaling produces the 1.5-4s shots a dense
+    clip reel is made of. This snaps to `speech_intervals` boundaries (the gaps between
+    speaking runs), which are still real breaths, so a cut here can never land mid-word;
+    it is simply allowed to leave before the thought is finished.
+
+    Both edges are capped by `max_pad` and fall back to the requested time, exactly like
+    `snap_to_sentences`, so a span inside one long unbroken run comes back unchanged.
+    """
+    runs = speech_intervals(words)
+    if not runs:
+        return max(0.0, start), max(end, start)
+    # pull the head back to the start of the run it lands in (or forward to the next
+    # run's head if it sits in a silence -- either way it opens on speech, not dead air)
+    new_start = start
+    for s, e in runs:
+        if s <= start <= e:
+            new_start = s if start - s <= max_pad else start
+            break
+        if s > start:
+            new_start = s if s - start <= max_pad else start
+            break
+    # push the tail out to the end of the run it lands in: the next real breath
+    new_end = end
+    for s, e in runs:
+        if e >= end:
+            new_end = e if (e - end <= max_pad and s <= end) else end
+            break
+    new_start = max(0.0, min(new_start, end))
+    return new_start, max(new_end, new_start)
+
+
+TRUNCATE_S = 0.3     # how far before the peak resolves the cut lands (0.2-0.4 is the band)
+TRANSIENT_FLOOR_S = 0.8   # below this a shot reads as a glitch, not a cut
+PEAK_TAIL_S = 4.0    # only the span's last few seconds are searched for the out-point
+
+
+def snap_to_transient(words, start: float, end: float, truncate: float = TRUNCATE_S,
+                      floor: float = TRANSIENT_FLOOR_S):
+    """Cut ON the audio peak, and leave `truncate` seconds BEFORE it resolves.
+
+    The premature cut: the viewer's brain finishes the joke after the cut has already
+    landed them somewhere new, which is what stops them leaving. Requires `words` carrying
+    the per-word `rms` that `emphasis.annotate_emphasis` stamps; with no rms anywhere this
+    degrades to `snap_to_phrase`, so a run whose wav is missing still cuts cleanly.
+
+    In-point: the head of the speech run `start` lands in, so the shot opens on speech
+    rather than on the tail of a silence. Out-point: the end of the loudest word in the
+    span's last `PEAK_TAIL_S`, minus `truncate` -- never letting the span fall below
+    `floor`, which is the difference between a hard cut and a glitch.
+    """
+    a, b = snap_to_phrase(words, start, end, max_pad=1.0)
+    inside = [w for w in words if a <= w["start"] < b and w.get("rms")]
+    if not inside:
+        return a, b
+    tail = [w for w in inside if w["end"] >= b - PEAK_TAIL_S] or inside
+    peak = max(tail, key=lambda w: w["rms"])
+    return a, max(a + floor, min(b, float(peak["end"]) - truncate))
+
+
 def speech_intervals(words, max_gap: float = 0.4) -> list[tuple[float, float]]:
     """Merge words into speaking runs, splitting on silence >= max_gap (seconds).
 

@@ -91,8 +91,13 @@ select{
 }
 select option{background:var(--surface);color:var(--ink)}
 
-/* checkbox: a hairline square that fills white when on */
-.chk{display:flex;align-items:center;gap:9px;cursor:pointer;padding:6px 0;margin-bottom:6px}
+/* checkbox: a hairline square that fills white when on.
+   position:relative is load-bearing -- the input below is absolutely positioned,
+   and with no positioned ancestor its containing block is the INITIAL one: it
+   stops scrolling with `main`, pushes documentElement.scrollHeight past the
+   viewport, and clicking the label focuses an input the browser then scrolls the
+   whole panel off the top of the window to reach. */
+.chk{display:flex;align-items:center;gap:9px;cursor:pointer;padding:6px 0;margin-bottom:6px;position:relative}
 .chk input{position:absolute;opacity:0;pointer-events:none}
 .box{width:13px;height:13px;border:1px solid var(--line);flex:0 0 auto;transition:all .16s ease}
 .chk:hover .box{border-color:#3A3E3C}
@@ -191,10 +196,43 @@ details>summary:hover .head::after{color:var(--ink)}
       <textarea id="brief" data-k="brief"
         placeholder="what you want the cut to be about &mdash; leave empty to let the director mine the stream's own best story"></textarea>
     </div>
-    <div class="grid">
+    <div class="f">
+      <label for="style">Style</label>
+      <textarea id="style" data-k="style"
+        placeholder="how to cut it &mdash; or a path to a style document (.md) whose frontmatter sets the fields below. &ldquo;highlight reel, not a story arc; never open a bit mid-sequence; favor the loudest reactions&rdquo;"></textarea>
+    </div>
+    <div class="grid3">
       <div class="f">
         <label for="duration">Duration</label>
         <input type="text" id="duration" data-k="duration" placeholder="20m">
+      </div>
+      <div class="f">
+        <label for="pace">Pace</label>
+        <input type="text" id="pace" data-k="pace" placeholder="1.0">
+      </div>
+    </div>
+    <div class="grid3">
+      <div class="f">
+        <label for="order">Order</label>
+        <select id="order" data-k="order">
+          <option value="">Default &middot; or style doc</option>
+          <option value="chrono">Chronological</option>
+          <option value="director">Director's order</option>
+          <option value="whiplash">Whiplash</option>
+        </select>
+      </div>
+      <div class="f">
+        <label for="snap">Cuts</label>
+        <select id="snap" data-k="snap">
+          <option value="">Default &middot; or style doc</option>
+          <option value="sentence">On sentences</option>
+          <option value="phrase">On pauses</option>
+          <option value="transient">On the peak</option>
+        </select>
+      </div>
+      <div class="f">
+        <label for="stack">Stack</label>
+        <input type="text" id="stack" data-k="stack" placeholder="&mdash;">
       </div>
       <div class="f">
         <label for="director">Director</label>
@@ -206,7 +244,8 @@ details>summary:hover .head::after{color:var(--ink)}
         </select>
       </div>
     </div>
-    <p class="hint">Duration is a target, not a cap &mdash; the cut lands within the slack set in 03.</p>
+    <p class="hint">Duration is a target, not a cap &mdash; the cut lands within the slack set in 03.
+      Pace scales every clip-length budget at once: 0.6 snappier, 1.5 room to breathe.</p>
   </section>
 
   <details>
@@ -444,6 +483,11 @@ function buildArgs() {
     function opt(flag, k) { var v = val(k); if (v !== "") { a.push(flag, v); } }
 
     opt("--brief", "brief");
+    opt("--style", "style");
+    opt("--pace", "pace");
+    opt("--order", "order");
+    opt("--snap", "snap");
+    opt("--stack", "stack");
     opt("--game", "game");
     opt("--title", "title");
 

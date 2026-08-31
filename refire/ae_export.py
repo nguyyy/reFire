@@ -94,7 +94,7 @@ def _duration(path) -> float:
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "default=nw=1:nk=1", str(path)],
-        capture_output=True, text=True, check=True)
+        capture_output=True, text=True, errors="replace", check=True)
     return float(out.stdout.strip())
 
 
@@ -255,7 +255,7 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
                    overlays_by_clip=None, bgm=None, bgm_db: float = -18.0,
                    motion_zoom: bool = True, deadspace: bool = True,
                    silence_pad: float = SILENCE_PAD, cards: bool = True,
-                   proxy: bool = True) -> Path:
+                   proxy: bool = True, captions: str = "all", sources=None) -> Path:
     """Write run_dir/ae/manifest.json from already-chosen sections. Returns its path.
 
     Shared by `export_ae` (legacy detect path) and `pipeline.make` (brief path).
@@ -273,6 +273,11 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
     `proxy=True` cuts each clip to an all-intra DNxHR LB proxy and points AE at those
     instead of the long-GOP VOD -- much faster previews, at the cost of one transcode
     per clip up front; `proxy=False` keeps AE on the original source.
+    `sources`, if given, is the media map [(path, offset_s)] to write verbatim -- the
+    caller has already tagged each clip's `src` and no proxying or splitting happens. That
+    is how a cut spanning SEVERAL VODs ships: there is no single `video` to slice, so each
+    clip points at its own separately-downloaded window and clip times stay absolute on
+    whatever timeline the caller laid out (`refire.loud`).
     """
     run_dir = Path(run_dir)
     speech = speech_intervals(words)                 # hold zoom through phrases
@@ -303,10 +308,15 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
                 groups = group_words(retimed, 0.0, cdur, wpl)
             else:
                 groups = group_words(words, seg["start"], seg["end"], wpl)
-            captions = [
+            # `captions="emph"` keeps only the lines carrying an emphasized word (a
+            # yell, an interjection, an ALL-CAPS transcription). A full subtitle track
+            # competes with the cuts in a fast style; sparse text just prevents the
+            # confusion the cutting can't. `emph` is already on every word.
+            lines = [
                 {"text": " ".join(style_text(w["text"], w["emph"]) for w in g),
                  "start": g[0]["start"], "end": g[-1]["end"]}
                 for g in groups
+                if captions != "emph" or any(w.get("emph") for w in g)
             ]
             # clip-relative speech runs so an episode never releases mid-sentence
             seg_speech = [(max(s, seg["start"]) - seg["start"], min(e, seg["end"]) - seg["start"])
@@ -322,13 +332,15 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
             else:
                 episodes = []
             clip = {"start": seg["start"], "end": seg["end"],
-                    "captions": captions, "zoom_episodes": episodes}
+                    "captions": lines, "zoom_episodes": episodes}
             # nothing actually cut (silent clip) -> leave the manifest as it was
             if keep and cdur < (seg["end"] - seg["start"]) - 1e-3:
                 clip["keep"] = [[round(a, 3), round(b, 3)] for a, b in keep]
                 clip["dur"] = round(cdur, 3)
             if role:
                 clip["role"] = role                  # informational for AE / debugging
+            if "src" in seg:
+                clip["src"] = seg["src"]             # caller-supplied media map (see `sources`)
             if overlays_by_clip and ci < len(overlays_by_clip):
                 ovs = overlays_by_clip[ci]
                 if tight:
@@ -347,16 +359,19 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
 
     # Each clip gets its own all-intra proxy so AE never decodes the long-GOP VOD.
     # `source` stays for the raw-VOD case and older manifests.
-    parts = proxy_clips(video, run_dir / "ae" / "proxies", clips) if proxy else []
-    if parts:
-        for i, c in enumerate(clips):
-            c["src"] = i
+    if sources is not None:
+        parts = list(sources)               # caller owns the media map and the src tags
     else:
-        # raw VOD: AE can only reach 3h into a file, so a long one ships as parts.
-        parts = split_source(video, Path(video).with_suffix(".parts"), clips)
-        _assign_parts(clips, parts)
-        if len(parts) < 2:
-            parts = []
+        parts = proxy_clips(video, run_dir / "ae" / "proxies", clips) if proxy else []
+        if parts:
+            for i, c in enumerate(clips):
+                c["src"] = i
+        else:
+            # raw VOD: AE can only reach 3h into a file, so a long one ships as parts.
+            parts = split_source(video, Path(video).with_suffix(".parts"), clips)
+            _assign_parts(clips, parts)
+            if len(parts) < 2:
+                parts = []
 
     manifest = {
         "source": str(Path(video).resolve()).replace("\\", "/"),
@@ -364,7 +379,7 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
         "sections": manifest_sections,
         "clips": clips,
     }
-    if len(parts) > 1:
+    if len(parts) > 1 or sources is not None:
         manifest["sources"] = [{"path": str(p.resolve()).replace("\\", "/"),
                                 "offset": round(off, 3)} for p, off in parts]
     if bgm:

@@ -9,6 +9,13 @@ from .chunk import Chunk
 # qwen2.5:14b scores better but 404s/OOMs on this box; pass --model to use it.
 DEFAULT_MODEL = "llama3.1:8b"
 
+# A local scorer that wedges must not cost a whole run. `ollama.chat` has no timeout and
+# blocks forever, so a runner deadlocked on VRAM pressure (another GPU app, an OOM) hangs
+# the pipeline mid-cast with the director's and critic's Claude calls already paid for and
+# `outline.json` not yet written. One rating is worth seconds; the ceiling is generous
+# enough for a big model's first (cold) call and still bounded.
+SCORE_TIMEOUT_S = 180.0
+
 _SYSTEM = (
     "You rate moments from a Twitch gaming stream for a highlights compilation. "
     "Given a transcript snippet, rate how clip-worthy it is for a highlight reel "
@@ -49,14 +56,21 @@ def score_chunk(chunk: Chunk, brief: str = "", model: str = DEFAULT_MODEL) -> di
         system, key = _SYSTEM, "llm_score"
         user = chunk["text"]
 
-    resp = ollama.chat(
-        model=model,
-        format="json",
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    )
+    try:
+        resp = ollama.Client(timeout=SCORE_TIMEOUT_S).chat(
+            model=model,
+            format="json",
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+    except Exception as e:                      # timeout, dead runner, refused socket
+        # Never propagate: `narrative.cast` is not wrapped, so raising here kills a run
+        # that already spent the director + critic Claude calls. Same shape as a parse
+        # failure -- this beat scores 0 and the cut survives.
+        print(f"[score] local scorer unavailable ({type(e).__name__}); scoring 0")
+        return {"llm_score": 0.0, "reason": "scorer_unavailable"}
     try:
         data = json.loads(resp["message"]["content"])
         out = {"llm_score": float(data[key]), "reason": str(data.get("reason", ""))}
