@@ -1,6 +1,6 @@
 # refire: automated narrative-driven video editor
 
-refire is an automated video editor that analyzes twitch vods, structures a story outline, selects relevant clips, refines cuts, reviews the draft script, and compiles the final video or after effects project.
+refire is an automated video editor that analyzes twitch vods, structures a story outline, selects relevant clips, refines cuts, reviews the draft script, and compiles the final video, premiere pro (.prproj), or after effects (.aep) project.
 
 ---
 
