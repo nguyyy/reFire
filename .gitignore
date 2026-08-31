@@ -9,7 +9,7 @@ assets/**/_cache/
 *.mp4
 *.exe
 *.png
-chat.json
+vods/
 COPYRIGHT.txt
 THIRD-PARTY-LICENSES.txt
 .claude

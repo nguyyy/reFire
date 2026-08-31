@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from reFire.ingest import _done, window_tag
+from refire.ingest import _done, window_tag
 
 
 def test_empty_download_is_not_cached(tmp_path: Path):

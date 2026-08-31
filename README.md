@@ -35,7 +35,7 @@ refire is an automated video editor that analyzes twitch vods, structures a stor
 
 ## prerequisites
 
-- **python 3.10+**
+- **python 3.10+** (`.python-version` pins 3.12, which is what uv resolves to)
 - **ffmpeg** on the system path.
 - **nvidia gpu and cuda** for local transcription acceleration.
 - **ollama** running locally with:
@@ -59,7 +59,7 @@ the exact pinned versions from `uv.lock` — comes from one command:
 
 ```bash
 uv sync --extra dev   # drop --extra dev for a runtime-only install
-uv run pytest         # 170 tests, no activation needed
+uv run pytest         # 294 tests, no activation needed
 uv run refire make ...
 ```
 
@@ -121,6 +121,34 @@ refire make 1762930614 --duration 8m --style ryukStyl.md
 - `--no-deadspace`: keep each clip's internal silence instead of jump-cutting it out (on by default; `--silence-pad` sets the breath left around each phrase).
 - `--no-caption-fix`: skip the claude pass that repairs mistranscribed proper nouns in the captions.
 - `--progress-file <path>`: logs execution progress to a json file.
+
+#### less-used knobs
+the flags above are the ones a cut actually turns on. the rest, grouped by what they touch:
+
+**scope and caching**
+- `--start` / `--end`: edit only a window of the stream (`4h` / `4:00:00` / `14400`). only that window is downloaded and transcribed, so a 6h vod you already know the good hour of costs an hour.
+- `--run-dir`: artifact directory (default `run/<vod_id>/<vod_id>-<phrase>`, a fresh auto-named folder per run). the shared vod cache — audio, transcript, embeddings — stays in `run/<vod_id>` and is reused across runs.
+- `--cache-dir`: where vods download to (default `vods/`).
+- `--assets-dir`: folder holding the `sfx/` and `emotes/` used for the music bed and punch-ins.
+
+**director and cost**
+- `--claude-model`: model for the narrative pass (default `claude-sonnet-5`; `claude-opus-4-8` is pricier and higher quality).
+- `--scout <local|off>`: the chapterize pass that runs before the story pass — free on local ollama by default. `off` is single-shot and only sane on short vods.
+- `--flat`: skip the claude director entirely and fall back to flat brief-relevance selection.
+- `--title`: the stream title, handed to the director as context (and to the caption fix).
+- `--terms`: extra proper nouns — `"Kinich, Arlecchino"` or a path to a file with one per line. merged *ahead* of `--game`'s generated glossary, so it is the escape hatch for anything the local model is too old to know. `genshin.txt` in the repo root is a worked example.
+- `--model`: ollama model used for scoring, and for the director under `--local-director`.
+
+**length and captions**
+- `--tol`: duration slack, 0–1 (default `0.35`). `--duration` is a target, not a cap: the cut may land anywhere in `target*(1-tol)..target*(1+tol)` before beats get trimmed or flagged short.
+- `--words-per-line`: caption grouping (default `3`).
+- `--silence-pad`: breath in seconds left around each phrase when dead space is cut (default `0.3`; smaller is tighter).
+
+**render and output**
+- `--zoom-sens`: punch-zoom amount (default `1.0`; `>1` is more and earlier).
+- `--bgm`: pick the music bed instead of taking a random one from the assets folder.
+- `--encoder`: ffmpeg encoder for `--render` (e.g. `h264_nvenc`).
+- `--no-proxy`: point ae at the raw vod instead of cutting all-intra (dnxhr lb) clip proxies — skips the transcode, but ae previews far slower.
 
 #### style documents
 `--style` takes free text **or a path to a `.md` file**. prose alone can't reach the numbers the cut actually runs on -- the sort order, the snap mode, the beat budgets -- so a style document carries them in a frontmatter block, and everything below the closing fence is the direction the director reads:
@@ -207,6 +235,8 @@ outward by hand once it is on the timeline.
 - `--per-vod`: candidate windows scanned out of each stream (default `12`).
 - `--pad`: extra seconds downloaded each side for snapping and hand-nudging (default `5`).
 - `--baseline`: rolling-median span the spike is measured against (default `60`s).
+- `--out`: output folder (default `run/loud-<name>`).
+- `--threads`: parallel window downloads (the scan is cheap; the fetch is the wait).
 - `--game` / `--terms` / `--words-per-line` / `--whisper-model` etc. behave as in `make`.
 
 the cut spans several vods, so clips ride one virtual timeline (vod *i* at `i * 100000`s)
@@ -335,12 +365,17 @@ python -m refire srt run\<vod>\<run>\ae\manifest.json --offset -0.15
 
 ## testing
 
-run the test suite:
 ```bash
-pytest
+uv run pytest        # 294 tests, ~2s, no network and no gpu
 ```
 
 ---
 
 ## architectural documentation
-detailed notes on the editor's mechanics are located in the [ai editor workflow memory](file:///c:/deving/reFire/docs/ai-editor-workflow-memory.md) file.
+
+- [director pipeline](docs/director-pipeline.md) — how `make` turns a raw multi-hour vod
+  into a titled, ordered set of clips: the scout pass, the story pass, casting, and the
+  pacing audit. start here.
+- [ai editor workflow memory](docs/ai-editor-workflow-memory.md) — the implementation
+  brief the narrative editor was built against. load it before changing `director.py`,
+  `narrative.py`, `select.py`, or the transcription path.
