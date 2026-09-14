@@ -13,14 +13,23 @@ per-clip scoring stay local -- only this whole-stream reasoning call goes to the
 from __future__ import annotations
 
 import json
+import time
 
 from pydantic import BaseModel, field_validator, model_validator
 
 from .pacing import (AVG_SHOT_S, BEAT_INFLATION_CAP,  # thresholds live in pacing;
                      fill_pace, scaled_budget)        # nothing imports back
 
-CLAUDE_MODEL = "claude-sonnet-5"
+# Story shape, continuity and "is this plot-critical or quest filler" are judgment calls,
+# which is the axis Opus is actually better on -- and the caching fix below cut the token
+# volume enough to pay for it. Was sonnet-5.
+CLAUDE_MODEL = "claude-opus-5"
 MAX_TOKENS = 32000   # adaptive thinking + the largest outline JSON both fit comfortably
+
+# Nothing set an effort level before this, on either backend -- both ran at their own
+# default. xhigh is the sweet spot for long-horizon reasoning; sweep it with --effort.
+DEFAULT_EFFORT = "xhigh"
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
 class _JsonModel(BaseModel):
@@ -236,6 +245,24 @@ _SYSTEM = (
     "its ceiling, THIN the run -- drop the weaker attempts but keep the shape of the "
     "escalation -- rather than deleting the middle wholesale. "
     "A single segment equal to the whole span means 'keep everything'.\n"
+    "  CUT BETWEEN EXCHANGES, NEVER INSIDE ONE. The transcript is one flat stream of "
+    "everything audible -- the streamer's commentary AND the game's own dialogue, with no "
+    "labels telling them apart -- so you have to read the shape of it. When a line is "
+    "ANSWERED, the answer is part of that unit: a character speaks and the player reacts, "
+    "a question and its reply, a setup and the laugh after it. Keep such a unit WHOLE or "
+    "drop it WHOLE. A segment that ends the instant a character stops talking, with the "
+    "response left outside it, does not read as a tight edit -- it reads as a non-sequitur, "
+    "because the viewer sees the reaction to something the video never showed. A hole of a "
+    "few seconds in the middle of a conversation is never the edit working; the holes that "
+    "are the edit working are the long ones, BETWEEN moments.\n"
+    "  Story and quest dialogue is exactly two things, and your job is to tell them "
+    "apart. LOAD-BEARING: it turns the plot, reveals something, or the streamer's reaction "
+    "and commentary over it is the entertainment -- keep the whole exchange, it is why the "
+    "viewer is here. SLOP: fetch-quest chatter, objectives restated, menu and tutorial "
+    "narration, NPCs saying nothing anyone will remember -- cut the whole exchange and "
+    "move to the next real moment. Never take half. Half an exchange costs the same "
+    "runtime as the whole thing and delivers none of it, which is the worst trade in the "
+    "edit.\n"
     "- setup_start_s: if the context the joke needs starts earlier than start_s, put it "
     "here (else omit).\n"
     "- payoff_start_s: where the joke/reveal/win/fail actually lands. NEVER cut before "
@@ -346,6 +373,9 @@ _DENSE_BUILD = (
     "else: keep the lines that land and cut everything between them. A beat that keeps "
     "its whole build-up is not thorough, it is slack -- show enough of a repetition for "
     "the viewer to infer the rest, then leave. Never widen a beat to 'complete' it. "
+    "This buys you more SKIPPED MOMENTS, not severed ones: leaving a moment early is this "
+    "cut's signature, but cutting a reply out of the middle of an exchange still just "
+    "breaks it. Skip whole exchanges freely; never take half of one. "
 )
 
 # Rubric bullets in _REVIEW_SYSTEM, each located by its own opening and the next bullet.
@@ -355,10 +385,13 @@ _RUBRIC_SWAPS = [
      "who is half a beat behind is the intent rather than a defect. Do NOT add "
      "setup_start_s to give a moment context. Flag a beat only if it is literally "
      "unreadable -- not merely unexplained.\n"),
-    ("- MISSING BUILD-UP:", "- PAYOFF COMPLETION:",
+    # Ends at SEVERED EXCHANGE, not PAYOFF COMPLETION: that bullet now sits between the
+    # two, and a swap reaching past it would delete the one continuity check a style is
+    # not allowed to switch off. A dense cut skips MOMENTS; it still may not sever one.
+    ("- MISSING BUILD-UP:", "- SEVERED EXCHANGE:",
      "- DENSITY: the failure mode for THIS cut is slackness, not missing build-up. A "
-     "gap inside a beat's span is the edit working. Never RESTORE skipped footage to "
-     "complete a moment; if a beat drags, cut it further.\n"),
+     "LONG gap inside a beat's span is the edit working -- but a few seconds of deleted "
+     "speech is still a broken exchange, not density; see the next item.\n"),
     ("- PAYOFF COMPLETION:", "- ENDING:",
      "- PREMATURE CUTS ARE INTENDED: leaving during a reaction, a moment before a line "
      "finishes, is this cut's signature -- the viewer completes it after the cut has "
@@ -487,6 +520,17 @@ _REVIEW_SYSTEM = (
     "more than ~60s inside its own span and the skipped footage is the moment escalating "
     "(more failed guesses, the spiral getting worse), RESTORE a representative run of it "
     "with extra `segments` up to that role's ceiling. Do not tighten this beat further.\n"
+    "- SEVERED EXCHANGE: the same failure at the small end, and the one that survives "
+    "every round because it is invisible in a joined transcript. The realized cut below "
+    "marks each of its own jump cuts as `-- CUT Ns: \"...\"` with the words that were "
+    "deleted there. READ THOSE. A cut of a few seconds that removed SPEECH from the "
+    "middle of a beat has almost always taken one side of an exchange -- the reply to the "
+    "line you kept, or the line the kept reaction was reacting to -- and the beat now "
+    "plays as a non-sequitur. The transcript mixes the streamer's voice and the game's "
+    "dialogue with no labels, so judge it by sense: does the kept text answer something "
+    "that is no longer there? Fix it by RESTORING the missing side into the beat's "
+    "`segments`, or if the whole exchange is filler, by dropping the whole thing. Never "
+    "by tightening further. The pacing audit flags these as `severed_exchange`.\n"
     "- PAYOFF COMPLETION: does any clip end BEFORE its payoff or reaction lands "
     "(cut off mid-joke)? Extend its end / payoff_start_s / reaction_end_s if so.\n"
     "- ENDING: give the last beats the SAME scrutiny as the hook. Does the central idea "
@@ -599,6 +643,15 @@ def _windows(map_text: str, window_s: float = 1200.0) -> list[tuple[float, float
     return out
 
 
+# `ollama.chat` has no timeout and blocks forever (same hazard `score.SCORE_TIMEOUT_S`
+# guards). Without it the `except -> stub chapter` fallback below is dead code against a
+# real wedge: a blocked socket raises nothing, so the run hangs here with no Claude money
+# spent and nothing written. Generous because this is a legitimately slow call -- a 20-min
+# window on a local 20B measured 1.5-5 min -- and a timeout that trips on a healthy run is
+# worse than none. A reasoning model that never stops thinking is what this catches.
+SCOUT_TIMEOUT_S = 600.0
+
+
 def chapterize(map_text: str, window_s: float = 1200.0, model: str = "llama3.1:8b",
                cache_path=None, progress=None) -> list[Chapter]:
     """Scout pass: one local-Ollama call per ~20-min window -> chapter guide.
@@ -615,27 +668,41 @@ def chapterize(map_text: str, window_s: float = 1200.0, model: str = "llama3.1:8
         except (ValueError, TypeError):
             pass   # corrupt cache -> re-scout
     import ollama
+    client = ollama.Client(timeout=SCOUT_TIMEOUT_S)
     wins = _windows(map_text, window_s)
+    n = max(1, len(wins))
     chapters: list[Chapter] = []
+    t_start = time.monotonic()
     for i, (a, b, text) in enumerate(wins):
+        k = i + 1
+        # Report BEFORE the call as well as after: the call is the multi-minute part, so
+        # a bar that only moves on completion sits still for exactly as long as the thing
+        # the user wants to watch.
         if progress:
-            progress((i + 1) / max(1, len(wins)), f"scouting chapter {i + 1}/{len(wins)}")
+            progress(i / n, f"scouting chapter {k}/{n} "
+                            f"({a / 3600:.2f}h-{b / 3600:.2f}h, {len(text) // 1000}k chars)")
+        t_win = time.monotonic()
         try:
-            resp = ollama.chat(
+            resp = client.chat(
                 model=model, format="json",
                 messages=[{"role": "system", "content": _SCOUT_SYSTEM},
                           {"role": "user", "content": text}],
                 options={"num_ctx": 16384})
             got = _ChapterOut.model_validate(json.loads(resp["message"]["content"]))
-        except Exception as e:   # any window failure -> stub, keep scouting
-            print(f"[scout] window {i + 1} failed ({e}); using stub chapter")
+        except Exception as e:   # any window failure (incl. timeout) -> stub, keep scouting
+            print(f"[scout] window {k} failed ({e}); using stub chapter", flush=True)
             got = _ChapterOut()
+        dt = time.monotonic() - t_win
         first = next((ln for ln in text.splitlines() if ln.strip()), "")
+        title = got.title or first[:60] or f"chapter {k}"
         chapters.append(Chapter(
-            title=got.title or first[:60] or f"chapter {i + 1}",
-            start_s=a, end_s=b, summary=got.summary,
+            title=title, start_s=a, end_s=b, summary=got.summary,
             # clamp hallucinated stamps into the window
-            notable_moments=[n for n in got.notable_moments if a <= n.t_s <= b][:5]))
+            notable_moments=[n_ for n_ in got.notable_moments if a <= n_.t_s <= b][:5]))
+        if progress:
+            eta = (time.monotonic() - t_start) / k * (n - k)
+            progress(k / n, f"chapter {k}/{n} done {dt:.0f}s - {title[:40]} "
+                            f"- ~{eta / 60:.1f}m left")
     if cache_path:
         Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
         Path(cache_path).write_text(
@@ -691,7 +758,8 @@ def _realized_script(outline_log: dict, pace: float = 1.0,
             lines.append(f"   transition_in: {b['transition_in']}")
         if b.get("viewer_question"):
             lines.append(f"   leaves viewer wondering: {b['viewer_question']}")
-        lines.append(f"   [{where} | {ts}] {str(b.get('text', '')).strip()}")
+        lines.append(f"   [{where} | {ts}]")
+        lines.extend(_script_body(b))
         lines.append("")
     lines.append(audit_note(outline_log, pace, keep_build, target_s))
     lines.append("")
@@ -704,6 +772,36 @@ def _realized_script(outline_log: dict, pace: float = 1.0,
                      + ". Tighten other beats with segments instead of re-adding these "
                        "at full length.")
     return "\n".join(lines).strip()
+
+
+DROPPED_PREVIEW = 140   # chars of a hole's transcript shown; enough to see what it was
+
+
+def _script_body(b: dict) -> list[str]:
+    """One beat's realized transcript WITH its jump cuts marked.
+
+    This used to be `b["text"]` on a single line -- the kept spans joined by a space. Read
+    that way a severed exchange is undetectable: a character's line runs straight into the
+    next kept line and the reply deleted between them leaves no trace, so the critic was
+    being asked to notice something it could not see. Now every hole is shown: how long,
+    and what was said in it. That is the whole closed loop for continuity.
+    """
+    from .pacing import _mmss
+
+    parts = b.get("parts") or []
+    seams = b.get("seams") or []
+    if not parts or len(parts) != len(seams) + 1:
+        return [f'   "{str(b.get("text", "")).strip()}"']    # older log, or a single span
+    out = []
+    for i, part in enumerate(parts):
+        if part.strip():
+            out.append(f'   "{part.strip()}"')
+        if i < len(seams):
+            s = seams[i]
+            gone = " ".join(str(s.get("text", "")).split())[:DROPPED_PREVIEW]
+            out.append(f'   -- CUT {s["dur"]:.1f}s at {_mmss(s["at"])}: '
+                       + (f'"{gone}"' if gone else "(no speech in the gap)"))
+    return out
 
 
 # Average finished footage per beat -- sets the beat COUNT only (`_n_beats`); what any
@@ -764,7 +862,8 @@ def _trace_write(trace, name: str, text: str) -> None:
     (d / name).write_text(text, encoding="utf-8")
 
 
-def _complete(client, model, system, user_content, model_cls, tag="claude", trace=None):
+def _complete(client, model, system, user_content, model_cls, tag="claude", trace=None,
+              effort: str = DEFAULT_EFFORT):
     """One JSON-mode Claude call (streamed live to the console) with a retry guard.
 
     Shared by the director and the review pass. The system prompt already asks for a single
@@ -775,11 +874,9 @@ def _complete(client, model, system, user_content, model_cls, tag="claude", trac
     -- and it lets the terminal watch the model think and write the outline in real time
     (`display: "summarized"`; the raw chain of thought is never returned). `trace` = a dir
     that receives the full request/response text per call. If thinking somehow ate the
-    whole budget so no text block was emitted, retry once with thinking off; still empty ->
+    whole budget so no text block was emitted, retry once at effort=low; still empty ->
     raise so the caller falls back instead of silently degrading.
     """
-    import time
-
     user_text = "\n\n".join(b.get("text", "") for b in user_content)
     stamp = time.strftime("%H%M%S")
     print(f"[{tag}] -> {model}: system {len(system):,} chars, "
@@ -790,10 +887,16 @@ def _complete(client, model, system, user_content, model_cls, tag="claude", trac
                      f"=== USER ===\n{user_text}")
         print(f"[{tag}] full prompt -> {trace}\\{stamp}-{tag}-request.txt")
 
-    def _call(thinking):
-        kw = dict(model=model, system=system, max_tokens=MAX_TOKENS,
-                  thinking=({"type": "adaptive", "display": "summarized"} if thinking
-                            else {"type": "disabled"}),
+    def _call(level):
+        # System as a BLOCK, not a bare string, so it can carry a breakpoint: it renders
+        # ahead of the messages, so without one the map block's own marker can never be
+        # reached on a second call. 1h TTL, not the 5-minute default -- review rounds were
+        # measured 6m22s apart start-to-start, so a 5-minute entry expires between them.
+        kw = dict(model=model, max_tokens=MAX_TOKENS,
+                  system=[{"type": "text", "text": system,
+                           "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
+                  thinking={"type": "adaptive", "display": "summarized"},
+                  output_config={"effort": level},
                   messages=[{"role": "user", "content": user_content}])
         phase = ""
         thought: list[str] = []
@@ -819,29 +922,59 @@ def _complete(client, model, system, user_content, model_cls, tag="claude", trac
         if phase:
             print(flush=True)
         text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
-        return text, resp.stop_reason, "".join(thought)
+        return text, resp.stop_reason, "".join(thought), getattr(resp, "usage", None)
 
-    text, stop, thought = _call(thinking=True)
+    text, stop, thought, usage = _call(effort)
     # `max_tokens` with text present = thinking ate most of the budget and the answer got
     # cut off mid-JSON. Unlike the CLI path there is no auto-continuation to stitch back
-    # together here, so take the same escape hatch as the empty case: thinking off hands
-    # the whole of MAX_TOKENS to the answer (a 20-beat outline is ~7.4k tokens).
+    # together here, so take the same escape hatch as the empty case: starve the thinking
+    # and hand the budget to the answer (a 20-beat outline is ~7.4k tokens).
+    #
+    # Effort "low", NOT thinking {"type": "disabled"}, which is what this used to do:
+    # Opus 5 rejects disabled thinking with a 400 at effort xhigh or max, so the old guard
+    # would turn a recoverable truncation into a hard failure on the model we now default
+    # to. Low effort reaches the same place -- barely any thinking -- and is always legal.
     if not text.strip() or stop == "max_tokens":
         print(f"[{tag}] {'empty' if not text.strip() else 'truncated'} answer "
-              f"(stop_reason={stop}); retrying without thinking")
-        text, stop, thought = _call(thinking=False)
+              f"(stop_reason={stop}); retrying at effort=low")
+        text, stop, thought, usage = _call("low")
+    cache = ""
+    if usage is not None:
+        # Nothing read these before, which is why a breakpoint that never fired went
+        # unnoticed for so long. A warm round shows a big `read` and a near-zero `in`.
+        cache = (f"CACHE: read={getattr(usage, 'cache_read_input_tokens', 0):,} "
+                 f"write={getattr(usage, 'cache_creation_input_tokens', 0):,} "
+                 f"in={getattr(usage, 'input_tokens', 0):,} "
+                 f"out={getattr(usage, 'output_tokens', 0):,}\n")
+        print(f"[{tag}] {cache.strip()}")
     print(f"[{tag}] <- stop_reason={stop}, {len(text):,} chars")
     if trace:
         _trace_write(trace, f"{stamp}-{tag}-response.txt",
-                     f"STOP_REASON: {stop}\n\n=== THINKING (summarized) ===\n{thought}\n\n"
+                     f"STOP_REASON: {stop}\n{cache}\n=== THINKING (summarized) ===\n{thought}\n\n"
                      f"=== ANSWER ===\n{text}")
     if not text.strip():
         raise RuntimeError(f"no answer text (stop_reason={stop})")
     return model_cls.model_validate(json.loads(_extract_json(text)))
 
 
+_SPIN = "|/-\\"
+
+
+def _think_tick(tag: str, secs: float, beats: int) -> str:
+    """One live line for a REDACTED thinking delta.
+
+    The subscription CLI streams `thinking_delta` on a ~1.6s heartbeat but blanks the
+    text, so the only honest thing to show is that it is still going, and for how long.
+    Carriage return, not newline: a 7-minute director call ticks ~260 times. ASCII only
+    -- the console is cp1252, where a spinner glyph outside it kills the run mid-call.
+    """
+    return f"\r[{tag}] thinking... {int(secs) // 60}m{int(secs) % 60:02d}s {_SPIN[beats % 4]} "
+
+
 def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=None,
-                  tools: str = "", cwd=None, timeout_s: float = 1200.0):
+                  tools: str = "", cwd=None, timeout_s: float = 1200.0,
+                  effort: str = DEFAULT_EFFORT,
+                  session_id: str | None = None, resume: bool = False):
     """Same contract as `_complete`, but through Claude Code headless mode (`claude -p`)
     instead of the SDK -- the call bills the user's Claude SUBSCRIPTION, not the pay-as-you-
     go API key (~$1.2/video on Opus otherwise). Raises RuntimeError when the CLI is missing
@@ -855,24 +988,43 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
     the point. stream-json deltas mirror the SDK's, so the live console view is identical.
     ponytail: subscription 5h-window rate limits are the ceiling (3 Opus calls x ~45k tok
     per video); --review-rounds 1 or --director-backend api are the pressure valves.
+
+    `session_id` + `resume` are how a run stops paying for the stream map three times. The
+    director call opens a named session (`--session-id`); each review round continues it
+    (`--resume`) and sends ONLY the new material, because the ~240KB map is already in the
+    conversation. Blocks are flattened to one stdin string here, so `cache_control` never
+    survives this path -- session continuation is the CLI's equivalent, and it is better:
+    the map is not re-sent at all rather than re-sent and read warm.
+
+    One constraint that shapes the caller: the system prompt is fixed when a session is
+    created and cannot be swapped on a resume, so a resumed call prepends `system` to the
+    user turn instead. Callers must be ready for a resume to fail (stale session, older
+    CLI) and retry as a normal standalone call -- see `review()`.
     """
     import os
     import shutil
     import subprocess
     import tempfile
-    import time
 
     exe = shutil.which("claude")
     if not exe:
         raise RuntimeError("claude CLI not on PATH")
     user_text = "\n\n".join(b.get("text", "") for b in user_content)
+    warm = bool(resume and session_id)
+    if warm:
+        # The session already holds the map and the director's own answer; --system-prompt-file
+        # is ignored on a resume, so the rubric has to travel as user text.
+        user_text = f"{system}\n\n{user_text}"
     stamp = time.strftime("%H%M%S")
-    print(f"[{tag}] -> {model} via claude CLI (subscription): system {len(system):,} chars, "
+    how = f"resume {session_id[:8]}" if warm else "new session"
+    print(f"[{tag}] -> {model} via claude CLI (subscription, {how}, effort={effort}): "
+          f"system {len(system):,} chars, "
           f"user {len(user_text):,} chars (~{len(user_text) // 4000}k tok)")
     if trace:
         _trace_write(trace, f"{stamp}-{tag}-request.txt",
-                     f"MODEL: {model} (claude CLI)\n\n=== SYSTEM ===\n{system}\n\n"
-                     f"=== USER ===\n{user_text}")
+                     f"MODEL: {model} (claude CLI, {how}, effort={effort})\n\n"
+                     f"=== SYSTEM ===\n{'(in user turn -- resumed session)' if warm else system}"
+                     f"\n\n=== USER ===\n{user_text}")
         print(f"[{tag}] full prompt -> {trace}\\{stamp}-{tag}-request.txt")
 
     env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
@@ -890,8 +1042,14 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
     # them so headless mode never hangs on a prompt
     # (verified live: -p --tools Read --allowedTools Read reads relative paths fine).
     cmd = [exe, "-p", "--model", model, "--tools", tools, "--setting-sources", "",
-           "--system-prompt-file", sp.name, "--output-format", "stream-json",
+           "--effort", effort, "--output-format", "stream-json",
            "--include-partial-messages", "--verbose"]
+    if warm:
+        cmd += ["--resume", session_id]      # system prompt is the session's already
+    else:
+        cmd += ["--system-prompt-file", sp.name]
+        if session_id:
+            cmd += ["--session-id", session_id]   # so the review rounds can resume it
     if tools:
         cmd += ["--allowedTools", tools]
     proc = subprocess.Popen(
@@ -908,6 +1066,7 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
 
     phase = ""
     thought: list[str] = []
+    t_call, beats = time.monotonic(), 0
     # Every assistant TURN's text, not just the last. When thinking eats the output budget
     # the message stops on `max_tokens` and Claude Code silently continues in a second
     # message -- but the `result` event below carries only that FINAL turn, so a JSON
@@ -933,18 +1092,29 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
         elif ev.get("type") == "stream_event":
             d = (ev.get("event") or {}).get("delta") or {}
             kind = d.get("type", "")
-            if kind == "thinking_delta" and d.get("thinking"):
-                chunk = d["thinking"]
-                thought.append(chunk)
+            if kind == "thinking_delta":
+                # The subscription CLI sends these BLANK. Keep them anyway: an empty
+                # chunk is still a heartbeat (~1.6s), and dropping it -- the
+                # `and d.get("thinking")` guard this replaces -- is what left the
+                # terminal dead for the whole think, ~6 of the 7 minutes on a
+                # director call.
+                chunk = d.get("thinking") or ""
+                if chunk:
+                    thought.append(chunk)
             elif kind == "text_delta" and d.get("text"):
                 chunk = d["text"]
             else:
                 continue
             label = "thinking" if kind == "thinking_delta" else "writing"
             if phase != label:
-                print(f"\n[{tag}] --- {label} ---")
+                print(f"\n[{tag}] --- {label} ---", flush=True)
                 phase = label
-            print(chunk, end="", flush=True)
+            if chunk:
+                print(chunk, end="", flush=True)
+            else:
+                beats += 1
+                print(_think_tick(tag, time.monotonic() - t_call, beats),
+                      end="", flush=True)
         elif ev.get("type") == "result":
             text = ev.get("result") or ""
             stop = ev.get("stop_reason") or ev.get("subtype")
@@ -1000,13 +1170,15 @@ def _read_note() -> str:
 
 
 def _header(brief: str | None, title: str, target_s: float,
-            shrink: float = 1.0, style: str | None = None) -> str:
-    """Brief + title + the two runtime numbers the director has to hold at once.
+            style: str | None = None) -> str:
+    """Brief + title + target runtime: the part of the preamble that is the SAME every
+    round, so it can sit in front of the cached stream map without invalidating it.
 
-    `target_s` is FINISHED video; the spans it picks are longer than what they ship,
-    because the dead air inside them is cut out. Stating only the target made the
-    director aim its spans at it and deliver `shrink` x target -- a 14-minute ask
-    shipping under 11. So it gets told the span budget too, and why.
+    Everything derived from the measured `shrink` lives in `_budget_note` instead and is
+    appended AFTER the map. It used to be concatenated here, inside the cache-marked
+    block -- and because `pipeline` re-measures `shrink` every review round, one changed
+    digit ("~1190s" -> "~1154s") moved the prefix and every one of the ~240KB after it
+    missed. Measured on a real 3-call run: 1,695 bytes of shared prefix out of 250,000.
     """
     what = brief or "(none -- find the stream's own best story)"
     # The brief says WHAT to cut; the direction says HOW. Every director call routes
@@ -1014,14 +1186,35 @@ def _header(brief: str | None, title: str, target_s: float,
     how = f"DIRECTION (how to cut it): {style}\n" if style else ""
     runtime = (f"TARGET RUNTIME: ~{int(target_s)}s of FINISHED video "
                f"(rough guide, not a hard limit)\n")
-    if shrink < 1.0:
-        runtime += (
-            f"SPAN BUDGET: pick spans totalling ~{int(target_s / shrink)}s. The silence "
-            f"inside every span you choose is removed automatically -- on this stream "
-            f"that is about {round((1 - shrink) * 100)}% of it -- so spans adding up to "
-            f"the target itself would ship well SHORT of it.\n")
     return (f"STREAM TITLE: {title or '(none given)'}\n"
             f"EDITOR'S BRIEF: {what}\n" + how + runtime + "\n")
+
+
+def _budget_note(target_s: float, shrink: float = CUT_SHRINK, pace: float = 1.0) -> str:
+    """The volatile half of the preamble: everything the measured `shrink` moves.
+
+    `target_s` is FINISHED video; the spans the director picks are longer than what they
+    ship, because the dead air inside them is cut out. Stating only the target made it aim
+    its spans at the target and deliver `shrink` x target -- a 14-minute ask shipping under
+    11. So it gets told the span budget too, and why.
+
+    Small and last on purpose. The system prompt quotes the per-role budgets at the
+    `CUT_SHRINK` prior so it stays byte-identical across rounds; once a cast has MEASURED
+    this stream's real compression, the corrected table is restated here, after the map,
+    where rewriting it costs one cache miss on a few hundred bytes instead of on all of it.
+    """
+    if shrink >= 1.0:
+        return ""
+    out = (f"\n\nSPAN BUDGET: pick spans totalling ~{int(target_s / shrink)}s. The silence "
+           f"inside every span you choose is removed automatically -- on this stream "
+           f"that is about {round((1 - shrink) * 100)}% of it -- so spans adding up to "
+           f"the target itself would ship well SHORT of it.")
+    # Only when the measurement actually disagrees with the prior the system prompt used;
+    # restating an identical table would just be noise the model has to reconcile.
+    if abs(shrink - CUT_SHRINK) > 0.01:
+        out += ("\nMEASURED ROLE BUDGETS (these supersede the per-role seconds in the "
+                f"instructions above, which used an estimate): {_role_note(shrink, pace)}.")
+    return out + "\n"
 
 
 def outline(stream_map_text: str, brief: str, title: str, target_s: float,
@@ -1029,7 +1222,8 @@ def outline(stream_map_text: str, brief: str, title: str, target_s: float,
             backend: str = "cli", run_dir=None,
             shrink: float = CUT_SHRINK, style: str | None = None,
             pace: float = 1.0, stack: int = 0,
-            keep_build: bool = True) -> Outline:
+            keep_build: bool = True, effort: str = DEFAULT_EFFORT,
+            session_id: str | None = None) -> Outline:
     """One Claude call: stream map + brief -> story outline (central idea + beats).
 
     `examples` is the deferred reference-video few-shot hook (prior edits' beat
@@ -1037,17 +1231,23 @@ def outline(stream_map_text: str, brief: str, title: str, target_s: float,
     (subscription, ~$0) and falls through to the API key if the CLI is missing or fails;
     `"api"` goes straight to the SDK. Raises on no-backend-available / API error so the
     caller falls back to the flat pipeline. The map block is cache-marked so the API
-    path's retry-without-thinking guard (same prefix) reads it warm.
+    path's effort=low retry guard (same prefix) reads it warm.
     """
+    # CUT_SHRINK, not the caller's measured `shrink`: the system prompt has to render the
+    # same bytes on every call of a run or it moves the prefix ahead of the whole map.
     system = (pick_system(brief, style, stack, keep_build, pace)
-              .format(n=_n_beats(target_s, pace), roles=_role_note(shrink, pace))
+              .format(n=_n_beats(target_s, pace), roles=_role_note(CUT_SHRINK, pace))
               + _OUTLINE_INSTR)
-    user_content = [{
-        "type": "text",
-        "text": (_header(brief, title, target_s, shrink, style)
-                 + f"STREAM MAP (timestamp -> what was said):\n{stream_map_text}"),
-        "cache_control": {"type": "ephemeral"},
-    }]
+    user_content = [
+        {
+            "type": "text",
+            "text": (_header(brief, title, target_s, style)
+                     + f"STREAM MAP (timestamp -> what was said):\n{stream_map_text}"),
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+        },
+        # After the breakpoint: the only part that moves between calls.
+        {"type": "text", "text": _budget_note(target_s, shrink, pace)},
+    ]
     if backend == "cli":
         try:
             cli_content = user_content
@@ -1056,14 +1256,15 @@ def outline(stream_map_text: str, brief: str, title: str, target_s: float,
             return _complete_cli(model, system, cli_content, Outline,
                                  tag="director", trace=trace,
                                  tools="Read" if run_dir else "",
-                                 cwd=run_dir)
+                                 cwd=run_dir, effort=effort,
+                                 session_id=session_id)
         except (RuntimeError, OSError) as e:
             print(f"[director] claude CLI unavailable ({e}); using API key")
     import anthropic  # optional heavy dep; missing key raises -> caller falls back
 
     client = anthropic.Anthropic()             # reads ANTHROPIC_API_KEY
     return _complete(client, model, system, user_content, Outline,
-                     tag="director", trace=trace)
+                     tag="director", trace=trace, effort=effort)
 
 
 def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
@@ -1071,7 +1272,8 @@ def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
            backend: str = "cli", run_dir=None,
            shrink: float = CUT_SHRINK, style: str | None = None,
            pace: float = 1.0, stack: int = 0,
-           keep_build: bool = True) -> Review:
+           keep_build: bool = True, effort: str = DEFAULT_EFFORT,
+           session_id: str | None = None) -> Review:
     """Critic pass: read the realized rough cut + stream map, approve or return a revised
     Outline. One Claude call; same `backend` semantics as `outline()` (CLI-first, API
     fallthrough). Raises on no-backend-available / API error so the caller keeps the
@@ -1083,7 +1285,7 @@ def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
     round 1's cached map at ~0.1x input price instead of re-paying a multi-hour stream.
     """
     system = (_review_system(keep_build).format(n=_n_beats(target_s, pace),
-                                                roles=_role_note(shrink, pace))
+                                                roles=_role_note(CUT_SHRINK, pace))
               + _MAP_LEGEND)
     if not brief:
         system += ("\nNo editorial brief was given: judge the cut against its own "
@@ -1115,36 +1317,52 @@ def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
                    "itself. Do not collapse it to one clip, and do not ask for context "
                    "inside it; the viewer being half a beat behind is the intent.")
     system += _REVIEW_INSTR
+    # The only part that changes between rounds. Kept separate because a resumed CLI
+    # session sends THIS ALONE -- the map is already in the conversation.
+    tail = {
+        "type": "text",
+        "text": (_budget_note(target_s, shrink, pace)
+                 + "\nCURRENT ROUGH CUT (what the video says, in order):\n"
+                 f"{_realized_script(outline_log, pace, keep_build, target_s)}"),
+    }
     user_content = [
         {
             "type": "text",
-            "text": (_header(brief, title, target_s, shrink, style)
+            "text": (_header(brief, title, target_s, style)
                      + "FULL STREAM MAP (anchor any new or retimed beats to these "
                        f"timestamps):\n{stream_map_text}"),
-            "cache_control": {"type": "ephemeral"},
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
         },
-        {
-            "type": "text",
-            "text": ("CURRENT ROUGH CUT (what the video says, in order):\n"
-                     f"{_realized_script(outline_log, pace, keep_build, target_s)}"),
-        },
+        tail,
     ]
+
     if backend == "cli":
+        read = [{"type": "text", "text": _read_note()}] if run_dir else []
+        tools = "Read" if run_dir else ""
+        if session_id:
+            try:
+                # Warm path: the director opened this session and the ~240KB map is already
+                # in it. Send the new cut ONLY -- three copies of the map per run was most
+                # of the ~15 minutes.
+                return _complete_cli(model, system, [tail] + read, Review,
+                                     tag="review", trace=trace, tools=tools,
+                                     cwd=run_dir, effort=effort,
+                                     session_id=session_id, resume=True)
+            except (RuntimeError, OSError) as e:
+                # Stale session, older CLI, whatever: never let a cache optimisation cost
+                # a run that has already spent a director call. Re-send the map and go on.
+                print(f"[review] session resume failed ({e}); re-sending the full map")
         try:
-            cli_content = user_content
-            if run_dir:
-                cli_content = user_content + [{"type": "text", "text": _read_note()}]
-            return _complete_cli(model, system, cli_content, Review,
-                                 tag="review", trace=trace,
-                                 tools="Read" if run_dir else "",
-                                 cwd=run_dir)
+            return _complete_cli(model, system, user_content + read, Review,
+                                 tag="review", trace=trace, tools=tools,
+                                 cwd=run_dir, effort=effort)
         except (RuntimeError, OSError) as e:
             print(f"[review] claude CLI unavailable ({e}); using API key")
     import anthropic  # optional heavy dep; missing key raises -> caller keeps current cut
 
     client = anthropic.Anthropic()
     return _complete(client, model, system, user_content, Review,
-                     tag="review", trace=trace)
+                     tag="review", trace=trace, effort=effort)
 
 
 def outline_local(stream_map_text: str, brief: str, title: str, target_s: float,
@@ -1156,11 +1374,14 @@ def outline_local(stream_map_text: str, brief: str, title: str, target_s: float,
     shorter streams since the whole map must fit the model's context. Same `Outline`.
     """
     import ollama  # already a project dep
+    # CUT_SHRINK for the same reason as outline(): a measured shrink is restated by
+    # `_budget_note`, whose "supersede the estimate above" wording assumes this prior.
     system = (pick_system(brief, style, stack, keep_build, pace)
-              .format(n=_n_beats(target_s, pace), roles=_role_note(shrink, pace))
+              .format(n=_n_beats(target_s, pace), roles=_role_note(CUT_SHRINK, pace))
               + _OUTLINE_INSTR)
-    user = (_header(brief, title, target_s, shrink, style)
-            + f"STREAM MAP (timestamp -> what was said):\n{stream_map_text}")
+    user = (_header(brief, title, target_s, style)
+            + f"STREAM MAP (timestamp -> what was said):\n{stream_map_text}"
+            + _budget_note(target_s, shrink, pace))
     resp = ollama.chat(
         model=model, format="json",
         messages=[{"role": "system", "content": system},

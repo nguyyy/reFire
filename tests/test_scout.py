@@ -23,18 +23,26 @@ def test_windows_split_by_time():
     assert _windows("", 1200.0) == []
 
 
+def _fake_client(calls, seen=None):
+    """Scout calls go through `ollama.Client(timeout=...)`, not module-level `chat`."""
+    class _Client:
+        def __init__(self, *a, **k):
+            if seen is not None:
+                seen.update(k)
+
+        def chat(self, model, format, messages, options):
+            calls.append(messages[1]["content"])
+            return {"message": {"content": json.dumps({
+                "title": "Boss attempts", "summary": "He tries the boss.",
+                "notable_moments": [{"t_s": 100.0, "why": "first wipe"},
+                                    {"t_s": 99999.0, "why": "outside window"}]})}}
+    return _Client
+
+
 def test_chapterize_uses_ollama_and_caches(tmp_path, monkeypatch):
     calls = []
-
-    def fake_chat(model, format, messages, options):
-        calls.append(messages[1]["content"])
-        return {"message": {"content": json.dumps({
-            "title": "Boss attempts", "summary": "He tries the boss.",
-            "notable_moments": [{"t_s": 100.0, "why": "first wipe"},
-                                {"t_s": 99999.0, "why": "outside window"}]})}}
-
     import ollama
-    monkeypatch.setattr(ollama, "chat", fake_chat)
+    monkeypatch.setattr(ollama, "Client", _fake_client(calls))
     cache = tmp_path / "chapters.json"
     chs = director.chapterize(MAP, window_s=1200.0, cache_path=cache)
     assert len(chs) == 3 and len(calls) == 3
@@ -49,12 +57,48 @@ def test_chapterize_uses_ollama_and_caches(tmp_path, monkeypatch):
 
 def test_chapterize_stub_on_failure(monkeypatch):
     import ollama
-    monkeypatch.setattr(ollama, "chat",
-                        lambda **k: (_ for _ in ()).throw(RuntimeError("down")))
+
+    class _Down:
+        def __init__(self, *a, **k):
+            pass
+
+        def chat(self, **k):
+            raise RuntimeError("down")
+
+    monkeypatch.setattr(ollama, "Client", _Down)
     chs = director.chapterize(MAP, window_s=3600.0)
     assert len(chs) == 1
     assert chs[0].title.startswith("[0s] line at 0.")   # stub from first line
     assert chs[0].notable_moments == []
+
+
+def test_the_scout_call_is_given_a_timeout(monkeypatch):
+    """`ollama.chat` blocks forever, so the stub-chapter fallback above is dead code
+    against a wedged runner unless the call is bounded."""
+    import ollama
+    seen = {}
+    monkeypatch.setattr(ollama, "Client", _fake_client([], seen))
+    director.chapterize(MAP, window_s=1200.0)
+    assert seen.get("timeout") == director.SCOUT_TIMEOUT_S
+
+
+def test_chapterize_reports_progress_before_and_after_each_window(monkeypatch):
+    """The call is the multi-minute part: a report only on completion leaves the bar
+    frozen for exactly as long as the user is waiting."""
+    import ollama
+    monkeypatch.setattr(ollama, "Client", _fake_client([]))
+    seen = []
+    director.chapterize(MAP, window_s=1200.0, progress=lambda f, m: seen.append((f, m)))
+
+    assert len(seen) == 6                       # 3 windows, start + finish each
+    assert seen[0][1].startswith("scouting chapter 1/3")
+    assert "0.00h-0.33h" in seen[0][1]
+    assert seen[1][1].startswith("chapter 1/3 done")
+    assert "Boss attempts" in seen[1][1] and "left" in seen[1][1]
+    assert [f for f, _ in seen] == sorted(f for f, _ in seen)     # never goes backwards
+    assert seen[-1][0] == 1.0
+    # cp1252 console: a non-ASCII glyph here raises UnicodeEncodeError mid-run
+    assert all(m.isascii() for _, m in seen)
 
 
 CHAPTERS = [

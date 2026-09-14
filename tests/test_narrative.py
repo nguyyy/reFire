@@ -255,7 +255,7 @@ def test_director_outline_plumbing(monkeypatch):
     assert calls[0]["thinking"] == {"type": "adaptive", "display": "summarized"}
     blocks = calls[0]["messages"][0]["content"]
     assert "[00:00] hi" in blocks[0]["text"]              # map in the first block
-    assert blocks[0]["cache_control"] == {"type": "ephemeral"}
+    assert blocks[0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
 
 
 def test_director_retries_without_thinking_on_none(monkeypatch):
@@ -268,13 +268,17 @@ def test_director_retries_without_thinking_on_none(monkeypatch):
     assert got.beats[0].title == "A"
     assert len(calls) == 2
     assert calls[0]["thinking"] == {"type": "adaptive", "display": "summarized"}
-    assert calls[1]["thinking"] == {"type": "disabled"}   # retry turns thinking off
+    # Opus 5 400s on disabled thinking at effort xhigh/max, so the retry starves the
+    # thinking with effort=low instead of switching it off.
+    assert calls[1]["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert calls[1]["output_config"] == {"effort": "low"}
+    assert calls[0]["output_config"] == {"effort": director.DEFAULT_EFFORT}
 
 
 def test_director_retries_on_truncated_max_tokens(monkeypatch):
     """Text present but stop_reason=max_tokens -> thinking ate the budget and the JSON got
     cut off mid-object. The API path has no auto-continuation to stitch it back, so it
-    must take the same thinking-off retry as the empty case rather than parse a fragment."""
+    must take the same low-effort retry as the empty case rather than parse a fragment."""
     from refire import director
     want = director.Outline(central_idea="x", beats=[
         director.Beat(title="A", intent="i", query="q", start_s=1.0, end_s=2.0)])
@@ -283,7 +287,8 @@ def test_director_retries_on_truncated_max_tokens(monkeypatch):
     got = director.outline("[00:00] hi", "brief", "title", 600.0)
     assert got.beats[0].title == "A"
     assert len(calls) == 2
-    assert calls[1]["thinking"] == {"type": "disabled"}
+    assert calls[1]["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert calls[1]["output_config"] == {"effort": "low"}
 
 
 def test_director_raises_when_no_outline(monkeypatch):
@@ -428,7 +433,7 @@ def test_review_returns_revised_outline_with_cached_map_first(monkeypatch):
     assert calls[0]["max_tokens"] == director.MAX_TOKENS
     blocks = calls[0]["messages"][0]["content"]
     assert "[0s] the map" in blocks[0]["text"]                # stable map first...
-    assert blocks[0]["cache_control"] == {"type": "ephemeral"}
+    assert blocks[0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
     assert "hi there" in blocks[1]["text"]                    # ...realized cut after
 
 
@@ -756,17 +761,52 @@ def test_the_director_is_given_role_budgets_in_span_seconds_not_finished_seconds
     assert f"escalation {lo * 2}-{hi * 2}s" in scaled
 
 
-def test_the_header_asks_for_more_span_than_the_finished_target():
+def test_the_budget_note_asks_for_more_span_than_the_finished_target():
     """A 14-minute ask used to ship under 11: the director aimed its SPANS at the target,
-    and compression then took ~23% off. It has to be told both numbers."""
+    and compression then took ~23% off. It has to be told both numbers -- but the second
+    one is measured per round, so it lives in _budget_note (after the map), not _header."""
     from refire import director
 
-    h = director._header("b", "t", 840.0, shrink=0.77)
-    assert "~840s of FINISHED video" in h
-    assert "~1090s" in h            # 840 / 0.77 -- the span budget to actually hit it
-    assert "23%" in h               # ...and why it is bigger
+    assert "~840s of FINISHED video" in director._header("b", "t", 840.0)
+    n = director._budget_note(840.0, 0.77)
+    assert "~1090s" in n            # 840 / 0.77 -- the span budget to actually hit it
+    assert "23%" in n               # ...and why it is bigger
     # shrink=1.0 means "no compression downstream", so no second number to explain
-    assert "SPAN BUDGET" not in director._header("b", "t", 840.0)
+    assert director._budget_note(840.0, 1.0) == ""
+    # A measured shrink that disagrees with the prior restates the role table HERE, where
+    # rewriting it costs a few hundred bytes of cache instead of the whole map.
+    assert "MEASURED ROLE BUDGETS" in director._budget_note(840.0, 0.60)
+    assert "MEASURED ROLE BUDGETS" not in director._budget_note(840.0, director.CUT_SHRINK)
+
+
+def test_the_cached_prefix_is_byte_identical_across_review_rounds(monkeypatch):
+    """The 15-minute bug, pinned. `pipeline` re-measures `shrink` every review round; it
+    used to land in the system prompt (via _role_note) AND in _header, which was glued in
+    front of the map inside the cache-marked block. One changed digit moved the prefix and
+    all ~240KB after it missed -- measured on a real run as 1,695 shared bytes of 250,000.
+
+    Everything up to and including the map must now be identical for two different shrinks.
+    """
+    from refire import director
+
+    revised = director.Outline(central_idea="y", beats=[
+        director.Beat(title="B", intent="i", query="q", start_s=1.0, end_s=2.0)])
+    want = director.Review(approved=False, notes="n", outline=revised)
+    log = {"central_idea": "x", "beats": [
+        {"title": "A", "intent": "i", "start": 3.0, "end": 5.0, "score": 9.0, "text": "hi"}]}
+    smap = ("[0s] the map" + chr(10)) * 200
+
+    seen = []
+    for shrink in (0.81, 0.74):          # two rounds, two different measurements
+        calls = _fake_anthropic(monkeypatch, [(want, "end_turn")],
+                                output_format=director.Review)
+        director.review(smap, "brief", "title", log, 600.0, shrink=shrink)
+        blocks = calls[0]["messages"][0]["content"]
+        seen.append((calls[0]["system"], blocks[0]["text"]))
+
+    assert seen[0][0] == seen[1][0], "system prompt moved between rounds"
+    assert seen[0][1] == seen[1][1], "cached map block moved between rounds"
+    assert smap in seen[0][1] and "SPAN BUDGET" not in seen[0][1]
 
 
 def test_cast_reports_the_shrink_this_stream_realized(monkeypatch):
@@ -1256,3 +1296,44 @@ def test_the_style_clause_outranks_the_whole_rubric_not_one_item():
     s = seen["review"]
     assert "the direction wins" in s and "the rubric is what is wrong" in s
     assert "never widen, extend or re-add footage" in s
+
+
+def test_a_reply_sized_hole_merges_but_a_deliberate_skip_does_not():
+    """SEG_MERGE_GAP was 0.75 -- shorter than any conversational turn, so an NPC line and
+    the streamer's answer 2s later stayed two hard jump cuts with the reply deleted. 2.5
+    swallows that; the 30s+ holes that ARE the edit must still survive untouched."""
+    from refire import narrative
+
+    assert narrative.SEG_MERGE_GAP >= 2.0
+    assert narrative.SEG_MERGE_GAP < 5.0      # must not start eating real edits
+
+
+def test_one_moment_drops_spans_stapled_on_from_minutes_away():
+    """14 beats in the existing runs fused footage over 5 minutes apart -- one 'hook'
+    spliced 349s to 2130s. A beat is one moment; the stray group goes."""
+    from refire import narrative
+
+    spans = [(100.0, 120.0), (125.0, 140.0), (2130.0, 2151.0)]   # 33 min apart
+    assert narrative._one_moment(spans) == [(100.0, 120.0), (125.0, 140.0)]
+    # the payoff anchor wins over sheer duration: keep the group the point lands in
+    assert narrative._one_moment(spans, payoff=2140.0) == [(2130.0, 2151.0)]
+    # a normally-cut beat is returned untouched
+    tight = [(100.0, 120.0), (125.0, 140.0)]
+    assert narrative._one_moment(tight) is tight
+    # ...and so is a legitimate build-up run: pacing asks for a repetition sampled across
+    # minutes (BUILD_GAP_S is 60s), so the cap has to sit above that machinery, not inside it
+    spiral = [(100.0, 130.0), (280.0, 300.0), (430.0, 460.0)]
+    assert narrative._one_moment(spiral) is spiral
+
+
+def test_seam_log_records_what_each_jump_cut_deleted():
+    """The closed loop for continuity: the critic can only flag a severed exchange if the
+    realized script tells it what came out of the hole."""
+    from refire import narrative
+
+    seams = narrative._seam_log([(10.0, 20.0), (24.0, 30.0)],
+                                lambda a, b: "the reply nobody kept")
+    assert len(seams) == 1
+    assert seams[0]["dur"] == 4.0 and seams[0]["at"] == 20.0
+    assert seams[0]["text"] == "the reply nobody kept"
+    assert narrative._seam_log([(10.0, 20.0)], lambda a, b: "x") == []

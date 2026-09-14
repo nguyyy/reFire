@@ -324,3 +324,50 @@ def test_audit_defaults_are_unchanged():
     log = _build_gap_timeline()
     tl = cut_timeline(log)
     assert audit(tl) == audit(tl, 1.0, True)
+
+
+def _beat(n_title, segs, seams, role="setup", dur=30.0):
+    return {"title": n_title, "role": role, "energy": 3, "dur": dur,
+            "start": segs[0][0], "end": segs[-1][1], "segments": segs, "seams": seams}
+
+
+def test_severed_exchange_fires_on_a_short_hole_that_had_speech_in_it():
+    """The Archon-Quest bug as a number. A 3.5s hole with talking in it is a line removed
+    from inside a moment -- nothing measured this before, because `skipped_build` does not
+    fire below 60s and only looks before the payoff."""
+    from refire.pacing import audit, cut_timeline
+
+    log = {"beats": [_beat("The Archon's Warning", [[100.0, 120.0], [123.5, 140.0]],
+                           [{"at": 120.0, "dur": 3.5,
+                             "text": "and what do you intend to do about it"}])]}
+    kinds = [f["kind"] for f in audit(cut_timeline(log))]
+    assert "severed_exchange" in kinds
+    said = next(f for f in audit(cut_timeline(log)) if f["kind"] == "severed_exchange")["text"]
+    assert "3.5s of SPEECH" in said and "what do you intend" in said
+
+
+def test_severed_exchange_ignores_dead_air_and_deliberate_skips():
+    """Two things it must NOT fire on, or the critic drowns in noise: a silent hole (the
+    edit cutting dead air, which is the feature) and a long one (a skip BETWEEN moments,
+    which is `skipped_build`'s job)."""
+    from refire.pacing import audit, cut_timeline
+
+    silent = {"beats": [_beat("A", [[100.0, 120.0], [124.0, 140.0]],
+                              [{"at": 120.0, "dur": 4.0, "text": "   "}])]}
+    assert not [f for f in audit(cut_timeline(silent)) if f["kind"] == "severed_exchange"]
+
+    wide = {"beats": [_beat("B", [[100.0, 120.0], [400.0, 430.0]],
+                            [{"at": 120.0, "dur": 280.0, "text": "lots of talking"}])]}
+    assert not [f for f in audit(cut_timeline(wide)) if f["kind"] == "severed_exchange"]
+
+
+def test_severed_exchange_survives_a_dense_style():
+    """keep_build=False silences skipped_build -- a dense cut skips moments on purpose.
+    It must NOT silence this one: severing an exchange is wrong under every style."""
+    from refire.pacing import audit, cut_timeline
+
+    log = {"beats": [_beat("A", [[100.0, 120.0], [123.0, 140.0]],
+                           [{"at": 120.0, "dur": 3.0, "text": "the reply that got deleted"}])]}
+    kinds = [f["kind"] for f in audit(cut_timeline(log), keep_build=False)]
+    assert "severed_exchange" in kinds
+    assert "skipped_build" not in kinds

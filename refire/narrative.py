@@ -13,9 +13,73 @@ from .select import SILENCE_PAD, compress_silence   # pure; imports nothing back
 K_RETRIEVE = 6   # candidates pulled per beat by embedding similarity (fallback path)
 N_SCORE = 4      # of those, how many get the (costlier) local LLM relevance score
 
-SEG_MERGE_GAP = 0.75    # segments closer than this after snapping merge (no stutter cuts)
+# Segments closer than this after snapping merge into one span (no stutter cuts).
+#
+# Was 0.75, which is shorter than any conversational turn: an NPC finishes a line, the
+# streamer answers 2s later, and the director's two segments stayed two hard jump cuts
+# with the reply deleted between them. 2.5s swallows a reply-sized hole and still leaves
+# a deliberate skip (the 30s+ gaps that ARE the edit) untouched -- measured median
+# intra-beat gap across existing runs is 34.7s, nowhere near this.
+# ponytail: one flat threshold, no turn detection. A speaker-aware merge needs
+# diarization, or at minimum an un-downmixed source (audio.py forces -ac 1 mono today).
+SEG_MERGE_GAP = 2.5
+# A beat is ONE moment. Segments further apart than this are two different moments the
+# director stapled together -- measured across the existing runs as one "hook" splicing
+# 349s to 2130s, and 13 beats (8% of them) doing something like it.
+#
+# 300 and not lower BECAUSE of the build-up machinery, which is the opposite failure and
+# is deliberately sanctioned: `pacing.BUILD_GAP_S` fires at 60s and the MISSING BUILD-UP
+# rubric asks the director to keep a representative RUN of a repetition -- a wordle spiral
+# sampled across four minutes is one moment and must survive. Measured: a 180s cap would
+# have hit 14% of beats and thrown 33s per run, much of it legitimate spirals; 300s hits
+# 8% and ~15s. Above the build-up range, below anything defensible as one moment.
+SEG_SPLIT_GAP = 300.0
 WIDEN_SLOP = 15.0       # max s an editorial anchor may widen past the director's own bounds
 WIDEN_SLOP_FINAL = 30.0  # the final beat gets extra room so the ending still breathes
+
+
+def _one_moment(spans, payoff=None, title="") -> list:
+    """Keep only the cluster of spans that is actually ONE moment.
+
+    A beat is a slot in the story, not a folder: when the director returns spans minutes
+    apart it has stapled two unrelated moments into one beat, and the cut plays them back
+    to back as if they belonged together. Cluster on `SEG_SPLIT_GAP` and keep the cluster
+    holding the payoff (the anchor that says where the point lands); with no payoff given,
+    keep the one with the most footage. The rest are dropped, loudly -- silently shedding
+    footage the director asked for is how you get an unexplained short cut.
+    """
+    groups = [[spans[0]]]
+    for x, y in spans[1:]:
+        if x - groups[-1][-1][1] > SEG_SPLIT_GAP:
+            groups.append([])
+        groups[-1].append((x, y))
+    if len(groups) == 1:
+        return spans
+    if payoff is not None:
+        best = max(groups, key=lambda g: (g[0][0] <= float(payoff) <= g[-1][1],
+                                          sum(y - x for x, y in g)))
+    else:
+        best = max(groups, key=lambda g: sum(y - x for x, y in g))
+    lost = sum(y - x for g in groups if g is not best for x, y in g)
+    print(f"[cast] '{title}': dropped {len(groups) - 1} stray span group(s) "
+          f"({int(lost)}s) more than {int(SEG_SPLIT_GAP)}s from the beat's own moment")
+    return best
+
+
+def _seam_log(spans, span_text) -> list[dict]:
+    """What the edit DELETED between kept spans, so the critic can see its own jump cuts.
+
+    The realized transcript handed to the critic is the kept spans joined with a space.
+    Read alone that is a run-on paragraph in which a character's line runs straight into
+    whatever came next -- the reply that was cut out leaves no trace, so the critic cannot
+    flag a severed exchange even in principle. One entry per hole: when, how long, and what
+    was said in it.
+    """
+    out = []
+    for (_, end), (nxt, _) in zip(spans, spans[1:]):
+        if nxt - end > 0:
+            out.append({"at": end, "dur": nxt - end, "text": span_text(end, nxt)})
+    return out
 
 # Budget trimming protects the story instead of shedding whatever the local scorer thinks
 # is boring (that would re-introduce the score-driven selection the director exists to
@@ -321,9 +385,11 @@ def cast(outline, chunks, words: list[dict], target_s: float,
                     spans[-1][1] = max(spans[-1][1], y)
                 else:
                     spans.append([x, y])
-            spans = [(x, y) for x, y in spans]
+            spans = _one_moment(spans, getattr(beat, "payoff_start_s", None), beat.title)
             a, b = spans[0][0], spans[-1][1]          # envelope (ordering + display)
-            text = " ".join(t for x, y in spans if (t := span_text(x, y)))
+            parts = [span_text(x, y) for x, y in spans]
+            text = " ".join(t for t in parts if t)
+            seams = _seam_log(spans, span_text)
             res = score_chunk({"start": a, "end": b, "text": text},
                               brief=beat.intent, model=model)
             sc, reason = res["llm_score"], res.get("reason", "")
@@ -345,6 +411,7 @@ def cast(outline, chunks, words: list[dict], target_s: float,
             a, b = snap_to_sentences(words, c["start"], c["end"])
             spans = [(a, b)]
             text = span_text(a, b)
+            parts, seams = [text], []  # one span, so nothing was cut out of the middle
             s0 = e0 = None             # mark this beat as fallback in the log
         picked.append({"title": beat.title, "intent": beat.intent,
                        "query": getattr(beat, "query", ""),
@@ -370,7 +437,10 @@ def cast(outline, chunks, words: list[dict], target_s: float,
                        # beats it had room for.
                        "dur": _kept_dur(words, spans, deadspace, silence_pad),
                        "score": sc, "reason": reason,
-                       "text": text})   # realized KEPT transcript -> editor-review
+                       "text": text,    # realized KEPT transcript -> editor-review
+                       # ...and what the edit threw away between those spans. `text` alone
+                       # reads as one paragraph, so a severed exchange is invisible in it.
+                       "parts": parts, "seams": seams})
 
     # Budget: only shed beats that overrun the tolerance ceiling, and shed the most
     # expendable first so a low-scoring setup/connective beat isn't cut for being "boring"

@@ -175,6 +175,17 @@ SILENCE_PAD = 0.3   # the "short reasonable breath" left around each phrase
 def compress_silence(words, start: float, end: float, pad: float = SILENCE_PAD):
     """Clip [start, end] -> (keep, retimed, dur) with internal dead air removed.
 
+    ponytail: this cuts UNTRANSCRIBED audio, not silence -- the only evidence it has is the
+    whisper word list, and whisper runs with `vad_filter=True` over a mono downmix
+    (`audio.py` forces `-ac 1`). A game character's line that the VAD dropped is a gap here
+    and gets physically excised, so the streamer's reaction lands on nothing. That is the
+    root cause of the severed-exchange class of bug; the director/critic work only stops
+    the model from ASKING for those cuts. Upgrade path, cheapest first: (1) pass a fine
+    (~100ms) RMS envelope of `audio.wav` in and keep any gap that is not actually quiet --
+    reuses `emphasis.word_rms`/`perception.loudness_signal` machinery and touches
+    `assemble.py` + `ae_export.py` callers; (2) stop the mono downmix and attribute speech
+    by channel; (3) real diarization. Do (1) before touching the thresholds again.
+
     Speech runs (`speech_intervals`) are each padded by `pad` on both sides, clamped
     to the clip, and merged where the padded spans touch -- so a gap smaller than
     ~2*pad survives untouched (nothing worth cutting) while a real silence collapses

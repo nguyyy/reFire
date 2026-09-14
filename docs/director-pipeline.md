@@ -205,8 +205,11 @@ actual footage, **in beat order**:
    the final beat's last segment gets extra slack (`max_pad=8.0`,
    `phrase_fallback=True` — falls back to a natural pause if no terminal punctuation
    is found) so the video's actual ending lands clean, not mid-word.
-4. Merge segments that end up closer than `SEG_MERGE_GAP=0.75s` after snapping (avoids
-   stutter-cuts).
+4. Merge segments that end up closer than `SEG_MERGE_GAP=2.5s` after snapping (a
+   reply-sized hole is never a jump cut), then keep only the span cluster that is one
+   moment (`narrative._one_moment`: groups more than `SEG_SPLIT_GAP=300s` apart are
+   dropped loudly, keeping the group holding `payoff_start_s`, else the longest). What
+   each remaining jump cut deleted is logged per beat as `seams` (`_seam_log`).
 5. Score the joined kept text ONCE against the beat's own `intent` as a mini-brief
    (`score.score_chunk`) — cheap, and mainly feeds the budget trimmer + `outline.json`,
    not selection (the director already selected; local scoring here is not re-picking
@@ -259,14 +262,20 @@ casting, `pipeline.make` loops up to `review_rounds` (default 2; `0` = single pa
 
 1. `narrative._realized_script(outline_log)` renders what the **cast** actually
    produced: central idea, story shape, then each beat with its role/intent/
-   transition/viewer-question **and the real transcript text of its chosen span** (not
-   the director's plan — the critic judges reality). Dropped-for-budget beats are
-   listed explicitly with a note not to re-add them at full length.
+   transition/viewer-question **and the real transcript text of its kept spans** (not
+   the director's plan — the critic judges reality). Every jump cut between spans is
+   marked inline as `-- CUT Ns at mm:ss: "<what was deleted>"` (`director._script_body`),
+   so a severed exchange is visible rather than hidden in one joined paragraph.
+   Dropped-for-budget beats are listed explicitly with a note not to re-add them at
+   full length.
 2. `director.review(map, brief, outline_log, ...)` — one more LLM call. The critic
    judges: HOOK (first ~10s), ARC (does it build, or is it a flat highlight reel?),
    SETUP CLARITY, EXPECTATION (does the next beat pay off what the last one raised?),
    CONNECTIVE TISSUE, REDUNDANCY (cut duplicate beats), DEAD WEIGHT (re-cut rambling
-   beats via `segments`), PAYOFF COMPLETION (don't cut before the payoff lands),
+   beats via `segments`), SEVERED EXCHANGE (a few seconds of deleted speech inside a
+   beat — restore the missing side or drop the whole exchange; audited as
+   `severed_exchange`, and no `--style` can switch it off), PAYOFF COMPLETION (don't
+   cut before the payoff lands),
    ENDING (same scrutiny as the hook — must breathe), PACING (energy variety). This is a
    text-only critic — it judges the realized transcript, not rendered frames (the old
    480p-proxy visual critic was removed with the rest of the vision layer).
@@ -276,10 +285,13 @@ casting, `pipeline.make` loops up to `review_rounds` (default 2; `0` = single pa
 3. If approved, or rounds are exhausted, or the review call itself fails (never
    discard a working cast over a review hiccup), the loop stops. Otherwise `cast()`
    re-runs on the revised outline and the loop repeats.
-4. The stream map is sent as a Claude **prompt-cache-marked** block *before* the
-   realized cut in the user message, and stays byte-identical across rounds — so
-   round 2+ reads the (often huge, multi-hour) map from cache instead of re-paying for
-   it every round.
+4. The map is paid for once per run. **CLI backend:** `pipeline.make` mints one session
+   id; the director opens it (`--session-id`) and each review round `--resume`s it,
+   sending only the budget note + realized cut (a failed resume falls back to a full
+   call). **API backend:** the system prompt and the map block are cache-marked (1h
+   TTL) and byte-identical across rounds — everything the measured `shrink` moves lives
+   in `director._budget_note`, *after* the map — so round 2+ reads the map from cache.
+   The `CACHE: read=` line in the console/trace shows whether it did.
 
 `local_director=True` skips this whole loop (`rounds=0` forced) — the critic is
 always a Claude call, so the fully-free local path stays single-pass by design.

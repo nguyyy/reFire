@@ -41,17 +41,20 @@ def _load_dotenv() -> None:
 def _progress_writer(path):
     """Return a throttled progress(frac, msg) that writes {pct,msg,done} JSON.
 
-    Only writes when the integer pct changes, so a long transcription emits ~100
-    files, not thousands. The GUI polls this file to animate its bar.
+    Writes when the integer pct changes OR the message does, so a long transcription
+    (one constant message) still emits ~100 files rather than thousands, while a stage
+    that moves through many messages inside one pct point -- the scout, 13 chapters
+    across 3 pct -- doesn't leave the panel showing a stale line. The GUI polls this
+    file to animate its bar.
     """
     path = Path(path)
-    state = {"pct": -1}
+    state = {"pct": -1, "msg": ""}
 
     def write(frac, msg, done=False):
         pct = max(0, min(100, int(frac * 100)))
-        if pct == state["pct"] and not done:
+        if pct == state["pct"] and msg == state["msg"] and not done:
             return
-        state["pct"] = pct
+        state["pct"], state["msg"] = pct, msg
         path.write_text(json.dumps({"pct": pct, "msg": msg, "done": done}),
                         encoding="utf-8")
 
@@ -142,9 +145,13 @@ def main(argv: list[str] | None = None) -> None:
                     help="folder with bgm/ sfx/ overlays/ for music + emote punch-ins")
     mk.add_argument("--bgm", default=None, help="music-bed track (overrides a random pick from assets/bgm)")
     mk.add_argument("--title", default="", help="stream title; helps the director understand the story")
-    mk.add_argument("--claude-model", default="claude-sonnet-5",
+    mk.add_argument("--claude-model", default="claude-opus-5",
                     help="Claude model for the narrative director pass "
-                         "(claude-opus-4-8 = pricier/higher quality)")
+                         "(claude-sonnet-5 = cheaper/faster, weaker on story shape)")
+    mk.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"],
+                    default="xhigh",
+                    help="reasoning effort for the director and critic calls "
+                         "(default xhigh; lower = faster and less subscription quota)")
     mk.add_argument("--director-backend", choices=["cli", "api"], default="cli",
                     help="cli = Claude Code headless on your subscription (~$0, default; "
                          "auto-falls back to api); api = ANTHROPIC_API_KEY pay-as-you-go")
@@ -203,7 +210,7 @@ def main(argv: list[str] | None = None) -> None:
     rc.add_argument("--terms", default="", help="glossary: 'Kinich, Zajef' or a file path")
     rc.add_argument("--chat", default=None,
                     help="vods/<id>.chat.json -- viewers spell names the transcriber can't")
-    rc.add_argument("--claude-model", default="claude-sonnet-5")
+    rc.add_argument("--claude-model", default="claude-opus-5")
     rc.add_argument("--director-backend", choices=["cli", "api"], default="cli")
     rc.add_argument("--corrections-dir", default="run",
                     help="where corrections_<game>.json lives (learned across runs)")
@@ -216,7 +223,7 @@ def main(argv: list[str] | None = None) -> None:
     fc.add_argument("--terms", default="", help="glossary: 'Kinich, Zajef' or a file path")
     fc.add_argument("--chat", default=None,
                     help="vods/<id>.chat.json -- viewers spell names the transcriber can't")
-    fc.add_argument("--claude-model", default="claude-sonnet-5")
+    fc.add_argument("--claude-model", default="claude-opus-5")
     fc.add_argument("--director-backend", choices=["cli", "api"], default="cli",
                     help="cli = Claude Code headless on your subscription; api = API key")
     fc.add_argument("--corrections-dir", default="run",
@@ -317,7 +324,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.cmd == "make":
         file_w = _progress_writer(args.progress_file) if args.progress_file else None
-        last = {"pct": -1, "frac": 0.0}
+        last = {"pct": -1, "frac": 0.0, "msg": ""}
         t0 = time.monotonic()
 
         def prog(frac, msg, done=False):
@@ -325,8 +332,13 @@ def main(argv: list[str] | None = None) -> None:
                 frac = max(frac, last["frac"])     # monotonic: never show a backwards %
             last["frac"] = frac
             pct = max(0, min(100, int(frac * 100)))
-            if pct != last["pct"] or done:         # throttle to integer-pct changes
-                last["pct"] = pct
+            # Throttle on the integer pct, but never swallow a NEW message: a stage
+            # that emits many distinct lines inside one pct point had almost all of
+            # them dropped -- the scout spans 0.61..0.64, so 13 chapter lines shared
+            # 3 pct points and 10 of them never printed. The run looked wedged on
+            # "scouting chapters" for 15 minutes while it was working fine.
+            if pct != last["pct"] or msg != last["msg"] or done:
+                last["pct"], last["msg"] = pct, msg
                 # Elapsed minutes on every line: a run self-profiles, so we optimize the
                 # stage that is actually slow instead of the one we assume is. Trails the
                 # message because the AE panel's /^\[ n%\]\s*(.*)$/ shows group 2 as its
@@ -366,6 +378,7 @@ def main(argv: list[str] | None = None) -> None:
                        end=parse_duration(args.end) if args.end else None,
                        assets_dir=args.assets_dir, bgm=args.bgm,
                        title=args.title, claude_model=args.claude_model,
+                       effort=args.effort,
                        director_backend=args.director_backend,
                        flat=args.flat, local_director=args.local_director,
                        review_rounds=args.review_rounds, scout=args.scout,

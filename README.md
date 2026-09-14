@@ -11,6 +11,7 @@ refire is an automated video editor that analyzes twitch vods, structures a stor
 - **beat planning**: the director structures the video into sequential beats with roles (hook, setup, escalation, reversal, climax, payoff, button).
 - **closed-loop critic pass**: an iterative review loop (up to --review-rounds passes, default 2) reads the transcript of the drafted clips. the critic flags issues with context, pacing, redundancy, or endings, and revises the outline.
 - **headless cli execution**: the narrative pass can run via the claude cli (`--director-backend cli`) using a claude subscription, the anthropic api (`--director-backend api`), or locally (`--local-director`) on ollama.
+- **one session per run**: the director opens a named claude session and every review round resumes it, so the ~230kb stream map is sent once instead of once per call. the prompt is also ordered so everything the review rounds re-measure (the span budget, the per-role seconds) sits *after* the map rather than in front of it -- one changed digit there used to move the cache prefix and cost the whole map on every round. measured on real traces: two consecutive review requests shared 1,695 bytes of 250,000; they now share 100%.
 
 ### 2. clip boundaries and cuts
 - **sentence alignment**: clips are snapped to sentence boundaries to prevent mid-word cuts. that snap is also the real floor on shot length, so `--snap` offers two finer modes for dense styles: `phrase` lands on natural speech pauses (still never mid-word), and `transient` lands on the audio peak and cuts a few hundred ms *before* it resolves. the last cut of the video always keeps its sentence snap.
@@ -19,6 +20,8 @@ refire is an automated video editor that analyzes twitch vods, structures a stor
 - **silence compression**: internal silences inside clips are removed using `compress_silence` with a configurable padding buffer.
 - **payoff preservation**: cuts are anchored to explicit setups, payoffs, and reaction times defined by the storyboard.
 - **build-up preservation**: a beat whose comedy is the repetition (a wordle spiral, a run of failed attempts) scores highest at its punchline, so the cheap edit opens on the last guess and reads as a missing scene. the pacing audit measures the largest jump between a beat's kept segments that lands *before* its payoff and flags it (`skipped_build`), so the critic sees the skipped build-up as a measured number instead of being asked to notice it.
+- **exchange continuity**: the transcript is one flat stream -- the streamer's mic and the game's own dialogue, unlabelled -- so a beat used to get cut the instant a character stopped talking, leaving the player's reply outside the span and the moment playing as a non-sequitur. three things now close that loop: segments closer than 2.5s merge (a reply-sized hole is never a jump cut), the realized script handed to the critic marks every jump cut with how long it was and *what was said in it* (it previously joined the kept text into one paragraph, so a severed exchange was literally invisible), and the pacing audit flags a 1-20s hole that contained speech as `severed_exchange` -- the small-gap counterpart to `skipped_build`, and the one continuity check a `--style` cannot switch off. the director is told the rule that matters: cut *between* exchanges, never inside one, and decide whether quest dialogue is load-bearing (keep it whole) or slop (drop it whole) -- never half.
+- **one beat, one moment**: segments more than 5 minutes apart were the director stapling two unrelated moments into one beat (one `hook` spliced 349s to 2130s). the stray group is now dropped, loudly. the threshold sits above the build-up machinery on purpose, so a wordle spiral sampled across four minutes still survives.
 
 ### 3. formatting and styling
 - **motion-triggered punch zooms**: opencv detects frame-to-frame motion bursts to apply camera reframing (webcam corner anchor, 100% to 200% zoom) that holds through speech and releases on pauses.
@@ -59,7 +62,7 @@ the exact pinned versions from `uv.lock` — comes from one command:
 
 ```bash
 uv sync --extra dev   # drop --extra dev for a runtime-only install
-uv run pytest         # 294 tests, no activation needed
+uv run pytest         # 308 tests, no activation needed
 uv run refire make ...
 ```
 
@@ -132,7 +135,8 @@ the flags above are the ones a cut actually turns on. the rest, grouped by what 
 - `--assets-dir`: folder holding the `sfx/` and `emotes/` used for the music bed and punch-ins.
 
 **director and cost**
-- `--claude-model`: model for the narrative pass (default `claude-sonnet-5`; `claude-opus-4-8` is pricier and higher quality).
+- `--claude-model`: model for the narrative pass (default `claude-opus-5`, up from sonnet -- story shape and continuity are the axis opus is better on; `claude-sonnet-5` is cheaper and faster, but weaker at story shape and continuity).
+- `--effort <low|medium|high|xhigh|max>`: reasoning effort for the director and critic calls (default `xhigh`). Lower is faster and spends less subscription quota.
 - `--scout <local|off>`: the chapterize pass that runs before the story pass — free on local ollama by default. `off` is single-shot and only sane on short vods.
 - `--flat`: skip the claude director entirely and fall back to flat brief-relevance selection.
 - `--title`: the stream title, handed to the director as context (and to the caption fix).
@@ -366,7 +370,7 @@ python -m refire srt run\<vod>\<run>\ae\manifest.json --offset -0.15
 ## testing
 
 ```bash
-uv run pytest        # 294 tests, ~2s, no network and no gpu
+uv run pytest        # 308 tests, ~2s, no network and no gpu
 ```
 
 ---

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import random
+import uuid
 from pathlib import Path
 
 from .audio import extract_audio
@@ -138,7 +139,9 @@ def make(
     assets_dir: str | Path = "assets",
     bgm: str | Path | None = None,
     title: str = "",
-    claude_model: str = "claude-sonnet-5",
+    claude_model: str = "claude-opus-5",
+    effort: str = "xhigh",    # low|medium|high|xhigh|max; mirrors director.DEFAULT_EFFORT
+                              # (literal, not the constant -- director is imported lazily)
     director_backend: str = "cli",   # "cli" = claude -p on the subscription; "api" = SDK key
     flat: bool = False,
     local_director: bool = False,
@@ -290,6 +293,9 @@ def make(
                       f"the call overflows.")
 
             trace = out_dir / "trace"   # full prompt/response dumps per Claude call
+            # One CLI session per run: the director opens it, every review round resumes
+            # it. That is what stops the ~240KB stream map being re-sent three times.
+            session_id = str(uuid.uuid4())
             ol = (director.outline_local(director_input, brief, title, duration_s,
                                          model=model, style=style, pace=pace,
                                          stack=stack, keep_build=keep_build)
@@ -298,7 +304,8 @@ def make(
                                         model=claude_model, trace=trace,
                                         backend=director_backend, run_dir=out_dir,
                                         style=style, pace=pace, stack=stack,
-                                        keep_build=keep_build))
+                                        keep_build=keep_build, effort=effort,
+                                        session_id=session_id))
             # Editor-review loop: cast the outline, let a Claude critic read the REALIZED
             # cut and either approve or return a revised outline, re-cast, repeat. This is
             # what turns a relevant-but-reel cut into a story (see okay-refer-to-memories).
@@ -330,7 +337,8 @@ def make(
                                          duration_s, model=claude_model, trace=trace,
                                          backend=director_backend, run_dir=out_dir,
                                          shrink=shrink, style=style, pace=pace,
-                                         stack=stack, keep_build=keep_build)
+                                         stack=stack, keep_build=keep_build,
+                                         effort=effort, session_id=session_id)
                 except Exception as re:   # a review failure must NOT discard a good cast
                     print(f"[review] round {rnd + 1} unavailable ({re}); keeping current cut")
                     break

@@ -25,6 +25,20 @@ FRONT_LOAD_FRAC = 1 / 3.0  # both peaks inside this fraction of the runtime = fr
 BUILD_GAP_S = 60.0    # an internal jump this long BEFORE the payoff skipped the build-up.
 # Deliberately the same 60 the critic rubric already states in prose ("MISSING BUILD-UP"),
 # so the measurement and the instruction it enforces cannot drift apart.
+
+# `skipped_build` above catches the BIG hole (a minute of skipped escalation). These catch
+# the small one at the other end, which nothing measured before: a jump-cut that lands
+# inside a conversation and deletes the answer to the line just kept. An NPC asks, the
+# streamer replies 3s later, the edit keeps the question and drops the reply -- the exact
+# failure that made quest/cutscene beats read as non-sequiturs.
+#
+# The band is bounded at BOTH ends on purpose. Under 1s is a breath, not an edit. Over 20s
+# the hole is a deliberate skip between moments, which is the edit doing its job and is
+# `skipped_build`'s territory. Between them, a hole that CONTAINED SPEECH severed an
+# exchange -- that speech condition is what separates this from cutting dead air, and it is
+# why the flag needs `seams` (what was deleted) rather than just segment arithmetic.
+SEVERED_MIN_S = 1.0
+SEVERED_MAX_S = 20.0
 AVG_SHOT_S = 12.0     # mean shot ceiling when build-up is deliberately skipped, at pace
 # 1.0. Scales with `pace` like every other budget here, so `--pace 0.35` asks for the
 # ~4s average a dense clip reel actually runs at. Only measured when `keep_build=False`:
@@ -173,6 +187,7 @@ def cut_timeline(outline_log: dict) -> list[dict]:
             "setup_lead": lead,
             "build_gap": _build_gap(b),     # build-up skipped inside the beat
             "shots": _shots(b, dur),        # per-segment finished lengths (avg_shot)
+            "seams": b.get("seams") or [],  # what the edit deleted between those segments
         })
         at += dur
     return out
@@ -257,6 +272,25 @@ def audit(timeline: list[dict], pace: float = 1.0, keep_build: bool = True,
                          f"{b['role'] or 'plain'} beat -- tighten it or re-role it."),
             })
 
+    # NOT inside the keep_build branch: a dense style skips more MOMENTS, but severing one
+    # exchange is wrong under every style, so this is the one continuity check a style
+    # cannot switch off.
+    for b in timeline:
+        cuts = [s for s in b["seams"]
+                if SEVERED_MIN_S <= float(s.get("dur") or 0) <= SEVERED_MAX_S
+                and str(s.get("text") or "").strip()]
+        for s in cuts[:2]:      # two examples is enough to make the point actionable
+            said = " ".join(str(s["text"]).split())[:80]
+            flags.append({
+                "kind": "severed_exchange", "at": b["at"], "ns": [b["n"]],
+                "text": (f"beat #{b['n']} ('{b['title']}') cuts {float(s['dur']):.1f}s of "
+                         f"SPEECH out of the middle at {_mmss(float(s['at']))}: "
+                         f'"{said}". A hole this short is not a skipped moment -- it is a '
+                         f"line removed from inside one, and if it answered the line "
+                         f"before it the beat now plays as a non-sequitur. Restore it, or "
+                         f"drop the whole exchange."),
+            })
+
     if keep_build:
         for b in timeline:
             if b["setup_lead"] is not None and b["setup_lead"] > SLOW_PAYOFF_S:
@@ -294,7 +328,9 @@ def audit(timeline: list[dict], pace: float = 1.0, keep_build: bool = True,
                          f"against a {ceiling:.1f}s ceiling for this cut speed -- the cut "
                          f"is not dense enough for the direction it was given. This much "
                          f"footage wants about {want} segments, not {len(shots)}: split "
-                         f"the long beats into more `segments`, do not shorten them."),
+                         f"the long beats into more `segments`, do not shorten them. "
+                         f"Split BETWEEN exchanges -- more segments means more separate "
+                         f"moments kept, never one conversation chopped in half."),
             })
 
     # Runtime. The critic is told (correctly) that the target is a rough guide, so
@@ -308,9 +344,10 @@ def audit(timeline: list[dict], pace: float = 1.0, keep_build: bool = True,
             "text": (f"finished runtime {_mmss(total)} against a {_mmss(target_s)} target "
                      f"-- {100 * (1 - total / target_s):.0f}% short. The beats are "
                      f"under-filled, not too few: widen the strongest ones toward their "
-                     f"role ceilings with MORE `segments` (never longer ones), and add "
-                     f"beats only where the footage genuinely supports another one. Do "
-                     f"not pad with slow footage."),
+                     f"role ceilings with MORE `segments` (never longer ones) -- more "
+                     f"moments kept, not one moment subdivided -- and add beats only where "
+                     f"the footage genuinely supports another one. Do not pad with slow "
+                     f"footage."),
         })
 
     # Thin beats: measured against this cut's own median, so a naturally quiet stream

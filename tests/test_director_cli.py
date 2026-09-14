@@ -108,3 +108,133 @@ def test_pace_cannot_inflate_the_beat_ask_without_bound():
     assert director._n_beats(3600.0, 1.0) == 75       # long-form is NOT clamped
     assert director._n_beats(960.0, 2.0) == 10        # slow pace still thins it out
     assert director._n_beats(30.0, 1.0) == 2          # floor holds
+
+
+def test_think_tick_is_an_inplace_ascii_heartbeat():
+    """The subscription CLI streams `thinking_delta` with the text BLANKED, so these
+    empty chunks are the only live signal during a multi-minute think. They must not
+    spam lines (a 7-min call ticks ~260 times) and must not carry a glyph the cp1252
+    console can't encode -- that raises mid-call and kills the run."""
+    from refire.director import _think_tick
+
+    t = _think_tick("director", 143.0, 1)
+    assert t.startswith(chr(13))          # carriage return: overwrite, don't scroll
+    assert chr(10) not in t               # never a newline
+    assert t.isascii()                    # cp1252-safe
+    assert "2m23s" in t and "director" in t
+
+    assert "0m07s" in _think_tick("d", 7.4, 0)      # zero-padded seconds
+    assert "7m18s" in _think_tick("d", 438.0, 0)    # the real director-call length
+    # spinner advances and wraps at 4
+    spins = [_think_tick("d", 1.0, b).strip()[-1] for b in range(5)]
+    assert len(set(spins[:4])) == 4 and spins[4] == spins[0]
+
+
+def test_blank_thinking_deltas_drive_a_live_tick(monkeypatch, capsys):
+    """The whole point: the subscription CLI sends `thinking_delta` with the text
+    blanked, on a ~1.6s heartbeat. The old `and d.get("thinking")` guard dropped every
+    one, so the terminal showed nothing for ~6 of a director call's 7 minutes."""
+    import json as _json
+    import subprocess
+    from pydantic import BaseModel
+    from refire import director
+
+    class Ans(BaseModel):
+        answer: str
+
+    def ev(delta):
+        return _json.dumps({"type": "stream_event", "event": {"delta": delta}}) + "\n"
+
+    lines = ([ev({"type": "thinking_delta", "thinking": ""}) for _ in range(5)]
+             + [ev({"type": "text_delta", "text": '{"answer": '}),
+                ev({"type": "text_delta", "text": '"done"}'}),
+                _json.dumps({"type": "result", "result": '{"answer": "done"}',
+                             "stop_reason": "end_turn"}) + "\n"])
+
+    class _Proc:
+        returncode = 0
+
+        def __init__(self, *a, **k):
+            self.stdin, self.stdout = _io(), iter(lines)
+
+        def wait(self):
+            return 0
+
+    class _io:
+        def write(self, _): pass
+        def close(self): pass
+
+    monkeypatch.setattr(director.shutil if hasattr(director, "shutil") else __import__("shutil"),
+                        "which", lambda _: "claude")
+    monkeypatch.setattr(subprocess, "Popen", _Proc)
+
+    got = director._complete_cli("m", "sys", [{"type": "text", "text": "u"}], Ans)
+    assert got.answer == "done"
+
+    out = capsys.readouterr().out
+    assert "--- thinking ---" in out and "--- writing ---" in out
+    assert "thinking... 0m00s" in out          # the tick rendered, not swallowed
+    assert out.count(chr(13)) >= 5             # one in-place tick per blank delta
+
+
+REVIEW_JSON = json.dumps({
+    "approved": True, "notes": "reads well",
+    "outline": {"central_idea": "x", "beats": [
+        {"title": "A", "role": "hook", "intent": "i", "query": "q",
+         "start_s": 1.0, "end_s": 2.0}]},
+})
+
+_LOG = {"central_idea": "x", "beats": [
+    {"title": "A", "intent": "i", "start": 3.0, "end": 5.0, "score": 9.0, "text": "hi"}]}
+
+
+def test_director_opens_a_named_session_at_the_chosen_effort(monkeypatch):
+    """Nothing set an effort level before; and without --session-id the review rounds have
+    nothing to resume, which is what made every round re-send the whole stream map."""
+    seen = _fake_cli(monkeypatch, [_result(WHOLE)])
+    director.outline("[0s] map", "brief", "title", 600.0,
+                     effort="max", session_id="11111111-2222-3333-4444-555555555555")
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--effort") + 1] == "max"
+    assert cmd[cmd.index("--session-id") + 1] == "11111111-2222-3333-4444-555555555555"
+    assert "--resume" not in cmd                 # the director OPENS it
+    assert "--system-prompt-file" in cmd
+
+
+def test_review_resumes_the_session_and_drops_the_map(monkeypatch):
+    """The whole point: on a resume the ~240KB map is already in the conversation, so the
+    round sends only the realized cut. The rubric rides in the user turn because
+    --system-prompt-file cannot be swapped on a resumed session."""
+    smap = ("[0s] a very long stream map line" + chr(10)) * 500
+    seen = _fake_cli(monkeypatch, [_result(REVIEW_JSON)])
+    rv = director.review(smap, "brief", "title", _LOG, 600.0,
+                         session_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+    assert rv.approved is True
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--resume") + 1] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    assert "--system-prompt-file" not in cmd
+    assert "--session-id" not in cmd
+    assert smap not in seen["stdin"]             # the map is NOT re-sent
+    assert "CURRENT ROUGH CUT" in seen["stdin"]  # ...but the new cut is
+    assert "senior video editor" in seen["stdin"]   # ...and so is the rubric
+
+
+def test_a_failed_resume_falls_back_to_a_full_call(monkeypatch):
+    """A stale session must never cost a run that already spent a director call."""
+    smap = ("[0s] map line" + chr(10)) * 500
+    calls = []
+
+    real = director._complete_cli
+
+    def flaky(*a, **kw):
+        calls.append(kw.get("resume", False))
+        if kw.get("resume"):
+            raise RuntimeError("no conversation found with session ID")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(director, "_complete_cli", flaky)
+    seen = _fake_cli(monkeypatch, [_result(REVIEW_JSON)])
+    rv = director.review(smap, "brief", "title", _LOG, 600.0, session_id="dead-session")
+    assert rv.approved is True
+    assert calls == [True, False]                # tried warm, then re-sent everything
+    assert smap in seen["stdin"]                 # the fallback carries the full map
