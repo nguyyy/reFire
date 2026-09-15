@@ -11,7 +11,8 @@ from .chat import chat_signal
 from .chunk import make_chunks
 from .glossary import game_glossary
 from .score import DEFAULT_MODEL, score_chunk
-from .transcribe import (DEFAULT_BATCH_SIZE, DEFAULT_WHISPER_MODEL, transcribe)
+from .transcribe import (DEFAULT_BATCH_SIZE, DEFAULT_WHISPER_MODEL, release_whisper,
+                         speech_regions, transcribe)
 
 
 def _noop(*_a, **_k):
@@ -87,6 +88,9 @@ def _detect_core(video, chat, run_dir, model=DEFAULT_MODEL, game="", tx_progress
                        hotwords=hotwords, progress=tx_progress, backend=transcriber,
                        model_size=whisper_model, batch_size=batch_size,
                        compute_type=compute_type)
+    # Nothing past here transcribes again, and every stage after it loads an ollama model
+    # onto the same card -- Whisper left cached there starved the scout to ~5 tok/s.
+    release_whisper()
     if not words:
         return [], [], []
     signal = chat_signal(chat, words[-1]["end"], offset=chat_offset)
@@ -239,6 +243,10 @@ def make(
     # Emphasis (and the per-word RMS it measures) has to exist BEFORE casting, not after:
     # `--snap transient` cuts on that RMS. One wav pass either way, so it simply moved up.
     annotate_emphasis(words, run_dir / "audio.wav")
+    # Speech whisper returned no words for, which `compress_silence` must not cut as dead
+    # air. Cached per VOD beside the transcript; cast and both renderers share this list.
+    voiced = (speech_regions(run_dir / "audio.wav", cache_path=run_dir / "speech.json")
+              if deadspace else None)
 
     # ponytail: embeddings are NOT computed here. Nothing reads `chunk["embedding"]`
     # except retrieve.retrieve_with_vec, which only the flat fallback and narrative's
@@ -319,7 +327,7 @@ def make(
                     progress=lambda f, m: report(0.66 + 0.24 * f, m),
                     # so the beat durations the critic and the budget trimmer read are
                     # the ones this run will actually render
-                    deadspace=deadspace, silence_pad=silence_pad,
+                    deadspace=deadspace, silence_pad=silence_pad, voiced=voiced,
                     order=order, snap=snap, stack=stack, truncate=truncate)
                 if outline_log.get("dropped"):
                     print("[cast] dropped for budget: "
@@ -419,7 +427,7 @@ def make(
                         overlays_by_clip=overlays, bgm=music,
                         motion_zoom=motion_zoom, deadspace=deadspace,
                         silence_pad=silence_pad, cards=cards, proxy=proxy,
-                        captions=captions)
+                        captions=captions, voiced=voiced)
     if caption_fix:
         # The transcriber never knew the game or the streamer's friends; this is the first
         # point where the captions exist as readable lines, and it's before the human opens
@@ -436,7 +444,7 @@ def make(
         rough = render_clips(video, out_dir, flat_clips, words,
                              music=music, encoder=encoder, silence_pad=silence_pad,
                              motion_zoom=motion_zoom, deadspace=deadspace,
-                             loudnorm=loudnorm)
+                             loudnorm=loudnorm, voiced=voiced)
         print("Rough cut:", rough)
     report(1.0, "done")
     if warning:

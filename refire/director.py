@@ -161,11 +161,14 @@ _REVIEW_INSTR = (
 # given -- the runtime target and the per-role budgets both -- is scaled up by this before
 # it goes in the prompt, and the results are read back in finished seconds.
 #
-# 0.77 is the measured median over real runs and is only the PRIOR: after the first cast,
-# `pipeline` feeds the shrink this stream actually realized into the review rounds. It
-# matters on its own only when --review-rounds is 0. Calibrate here if cuts start landing
-# consistently long (raise) or short (lower).
-CUT_SHRINK = 0.77
+# 0.84 is the median over the 7 real cuts in run/, re-measured once `compress_silence`
+# stopped cutting speech whisper returned no words for (`voiced`, 2026-09-13): 0.73-0.92
+# per cut, where the same cuts measured ~0.81 before that fix (the older 0.77 predates
+# both). It is only the PRIOR: after the first cast, `pipeline` feeds the shrink this
+# stream actually realized into the review rounds. It matters on its own only when
+# --review-rounds is 0. Calibrate here if cuts start landing consistently long (raise) or
+# short (lower).
+CUT_SHRINK = 0.84
 
 
 def _role_note(shrink: float = 1.0, pace: float = 1.0) -> str:

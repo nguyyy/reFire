@@ -727,6 +727,22 @@ def test_beat_dur_is_the_compressed_length_the_renderer_will_ship(monkeypatch):
     assert tight["beats"][0]["dur"] < span - 15.0
 
 
+def test_beat_dur_counts_speech_the_transcript_missed(monkeypatch):
+    """`voiced` has to reach the cast too: the renderer keeps that speech, so a `dur` that
+    still subtracted it would audit and budget a beat shorter than it ships."""
+    monkeypatch.setattr("refire.score.score_chunk",
+                        lambda c, brief="", model="": {"llm_score": 9.0, "reason": "r"})
+    words = _gapped_words()
+    ol = SimpleNamespace(central_idea="x", beats=[
+        SimpleNamespace(title="T", intent="i", query="q", start_s=0.0, end_s=25.8)])
+
+    _s, cut, _w = narrative.cast(ol, [], words, target_s=1000.0, model="m")
+    _s, kept, _w = narrative.cast(ol, [], words, target_s=1000.0, model="m",
+                                  voiced=[[8.0, 14.0]])
+    # the 6s line inside the dead air, plus a breath either side
+    assert kept["beats"][0]["dur"] == pytest.approx(cut["beats"][0]["dur"] + 6.6, abs=0.05)
+
+
 # --- the role budget reaches the prompts -----------------------------------
 
 def test_both_system_prompts_survive_format_with_the_role_budget_spliced_in():
@@ -741,8 +757,9 @@ def test_both_system_prompts_survive_format_with_the_role_budget_spliced_in():
     for system in (director.pick_system("a brief"), director.pick_system(""),
                    director._REVIEW_SYSTEM):
         rendered = system.format(n=20, roles=roles)   # must not raise
-        assert "escalation 39-117s" in rendered       # ...and the budget actually arrived
-        assert "climax 58-169s" in rendered
+        # ...and the budget actually arrived. Not pinned to literal seconds: those move
+        # with every CUT_SHRINK calibration; the scaling itself is tested just below.
+        assert roles in rendered and "escalation" in roles and "climax" in roles
 
 
 def test_the_director_is_given_role_budgets_in_span_seconds_not_finished_seconds():
@@ -846,7 +863,7 @@ def test_the_styled_system_prompt_also_survives_format():
     for system in (director.pick_system("a brief", "highlight reel"),
                    director.pick_system(None, "highlight reel")):
         rendered = system.format(n=20, roles=roles)   # must not raise
-        assert "escalation 39-117s" in rendered
+        assert roles in rendered and "escalation" in roles   # not pinned to CUT_SHRINK
 
 
 def test_dense_styles_are_told_the_shot_length_they_are_graded_on():

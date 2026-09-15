@@ -80,6 +80,20 @@ def test_build_manifest_cuts_dead_space(tmp_path):
     assert clip["overlays"][0]["start"] < clip["dur"]
 
 
+def test_build_manifest_keeps_speech_the_transcript_missed(tmp_path):
+    """A wordless stretch Silero heard (game dialogue whisper returned nothing for) is
+    speech, not dead air: cutting it is what severed quest exchanges mid-conversation."""
+    from refire.select import compress_silence
+
+    cut = _deadspace_manifest(tmp_path)
+    kept = _deadspace_manifest(tmp_path, voiced=[[6.0, 10.0], [30.0, 40.0]])  # 2nd is off-clip
+    assert any(a <= 6.0 and b >= 10.0 for a, b in kept["keep"])     # the 4s line survived
+    assert kept["dur"] == __import__("pytest").approx(cut["dur"] + 4.6)   # 4s + 2 pads
+    assert kept["captions"][-1]["end"] <= kept["dur"] + 1e-6          # captions still retime
+    # only ever keeps MORE: a clip with no words is still kept whole, voiced or not
+    assert compress_silence([], 0.0, 5.0, voiced=[[1.0, 2.0]])[2] == 5.0
+
+
 def test_build_manifest_deadspace_off_keeps_the_gap(tmp_path):
     clip = _deadspace_manifest(tmp_path, deadspace=False)
     assert "keep" not in clip and "dur" not in clip

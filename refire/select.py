@@ -172,19 +172,20 @@ def speech_intervals(words, max_gap: float = 0.4) -> list[tuple[float, float]]:
 SILENCE_PAD = 0.3   # the "short reasonable breath" left around each phrase
 
 
-def compress_silence(words, start: float, end: float, pad: float = SILENCE_PAD):
+def compress_silence(words, start: float, end: float, pad: float = SILENCE_PAD,
+                     voiced=None):
     """Clip [start, end] -> (keep, retimed, dur) with internal dead air removed.
 
-    ponytail: this cuts UNTRANSCRIBED audio, not silence -- the only evidence it has is the
-    whisper word list, and whisper runs with `vad_filter=True` over a mono downmix
-    (`audio.py` forces `-ac 1`). A game character's line that the VAD dropped is a gap here
-    and gets physically excised, so the streamer's reaction lands on nothing. That is the
-    root cause of the severed-exchange class of bug; the director/critic work only stops
-    the model from ASKING for those cuts. Upgrade path, cheapest first: (1) pass a fine
-    (~100ms) RMS envelope of `audio.wav` in and keep any gap that is not actually quiet --
-    reuses `emphasis.word_rms`/`perception.loudness_signal` machinery and touches
-    `assemble.py` + `ae_export.py` callers; (2) stop the mono downmix and attribute speech
-    by channel; (3) real diarization. Do (1) before touching the thresholds again.
+    Words alone are not a speech map: whisper returns no words for some speech it was
+    handed (quest dialogue under the streamer's mic), and a wordless stretch reads as a gap
+    here -- cut, severing the exchange. Measured over 7 real cuts, 239s of 1762s removed was
+    Silero speech, sitting >20dB under the mic, so a loudness test can't see it either.
+    `voiced` (absolute [s, e] spans from `transcribe.speech_regions`) is that evidence. It
+    only ever KEEPS more: its spans join the word runs before padding, and a clip with no
+    words at all is still kept whole, exactly as without it. Pass the SAME list to every
+    caller (`narrative.cast` measures durations with this function too).
+    ponytail: `voiced` is filtered linearly per call (~5k spans on a 4h stream, ~200 calls
+    a cast); bisect it if that ever shows in a profile.
 
     Speech runs (`speech_intervals`) are each padded by `pad` on both sides, clamped
     to the clip, and merged where the padded spans touch -- so a gap smaller than
@@ -203,6 +204,8 @@ def compress_silence(words, start: float, end: float, pad: float = SILENCE_PAD):
                     "end": w["end"] - start, "emph": bool(w.get("emph"))}
                    for w in words if start <= w["start"] < end]
         return [(0.0, end - start)], retimed, end - start
+    if voiced:
+        runs = sorted(runs + [(s, e) for s, e in voiced if e > start and s < end])
 
     # pad + clamp to clip, then merge spans that touch after padding
     merged: list[list[float]] = []

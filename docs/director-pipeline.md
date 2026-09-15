@@ -41,7 +41,11 @@ downloads/caches the VOD (`ingest.ensure_vod`), then runs `_detect_core`:
    `words: [{text,start,end}, ...]`. This is the longest single stage in a run, hence
    the batching + VAD (which skips the dead air a multi-hour stream is full of); the
    cache key covers glossary **and** backend **and** model, so changing any of them
-   re-transcribes rather than serving the wrong engine's words.
+   re-transcribes rather than serving the wrong engine's words. `transcribe.py::speech_regions`
+   separately caches Silero speech spans (`run/<vod>/speech.json`, ~18s per 4h stream)
+   because the word list is not a speech map: whisper returns no words for some dialogue
+   it was handed, and `select.compress_silence` takes those spans as `voiced` so dead-air
+   removal never cuts them.
 4. `chat.py::chat_signal` — Twitch chat message-rate **z-score** over time buckets:
    `chat_z: [(t_center, z), ...]`.
 5. `chunk.py::make_chunks` — groups words into ~30-90s windows (`chunks`), each

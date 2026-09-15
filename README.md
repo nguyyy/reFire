@@ -17,7 +17,7 @@ refire is an automated video editor that analyzes twitch vods, structures a stor
 - **sentence alignment**: clips are snapped to sentence boundaries to prevent mid-word cuts. that snap is also the real floor on shot length, so `--snap` offers two finer modes for dense styles: `phrase` lands on natural speech pauses (still never mid-word), and `transient` lands on the audio peak and cuts a few hundred ms *before* it resolves. the last cut of the video always keeps its sentence snap.
 - **play order**: the cut runs chronologically by default. `--order whiplash` reorders the beats to maximise the tonal jolt between neighbours instead — chaos into calm — for styles whose comedy is the juxtaposition rather than the story.
 - **cold open**: one flash-forward teaser by default, or `--stack n` for a montage stack of `n` unexplained 1–2.5s moments ordered so the best lands last. every moment is checked against footage a later beat actually delivers, so the open can't promise something the cut never reaches.
-- **silence compression**: internal silences inside clips are removed using `compress_silence` with a configurable padding buffer.
+- **silence compression**: internal silences inside clips are removed using `compress_silence` with a configurable padding buffer. "silence" is checked against a cached silero speech pass (`run/<vod>/speech.json`), not just the transcript: whisper returns no words for some game dialogue under the streamer's mic, and cutting those wordless stretches as dead air used to delete one side of a quest exchange. measured over 7 real cuts, 239s of the 1762s removed was speech.
 - **payoff preservation**: cuts are anchored to explicit setups, payoffs, and reaction times defined by the storyboard.
 - **build-up preservation**: a beat whose comedy is the repetition (a wordle spiral, a run of failed attempts) scores highest at its punchline, so the cheap edit opens on the last guess and reads as a missing scene. the pacing audit measures the largest jump between a beat's kept segments that lands *before* its payoff and flags it (`skipped_build`), so the critic sees the skipped build-up as a measured number instead of being asked to notice it.
 - **exchange continuity**: the transcript is one flat stream -- the streamer's mic and the game's own dialogue, unlabelled -- so a beat used to get cut the instant a character stopped talking, leaving the player's reply outside the span and the moment playing as a non-sequitur. three things now close that loop: segments closer than 2.5s merge (a reply-sized hole is never a jump cut), the realized script handed to the critic marks every jump cut with how long it was and *what was said in it* (it previously joined the kept text into one paragraph, so a severed exchange was literally invisible), and the pacing audit flags a 1-20s hole that contained speech as `severed_exchange` -- the small-gap counterpart to `skipped_build`, and the one continuity check a `--style` cannot switch off. the director is told the rule that matters: cut *between* exchanges, never inside one, and decide whether quest dialogue is load-bearing (keep it whole) or slop (drop it whole) -- never half.
@@ -62,7 +62,7 @@ the exact pinned versions from `uv.lock` — comes from one command:
 
 ```bash
 uv sync --extra dev   # drop --extra dev for a runtime-only install
-uv run pytest         # 308 tests, no activation needed
+uv run pytest         # 311 tests, no activation needed
 uv run refire make ...
 ```
 
@@ -370,7 +370,7 @@ python -m refire srt run\<vod>\<run>\ae\manifest.json --offset -0.15
 ## testing
 
 ```bash
-uv run pytest        # 308 tests, ~2s, no network and no gpu
+uv run pytest        # 311 tests, ~2s, no network and no gpu
 ```
 
 ---

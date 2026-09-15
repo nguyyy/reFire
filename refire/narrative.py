@@ -112,7 +112,7 @@ def _realized_shrink(picked: list[dict]) -> float | None:
     return round(sum(_dur(p) for p in picked) / raw, 4) if raw > 0 else None
 
 
-def _kept_dur(words: list[dict], spans, deadspace: bool, pad: float) -> float:
+def _kept_dur(words: list[dict], spans, deadspace: bool, pad: float, voiced=None) -> float:
     """The FINISHED length of `spans`: what the viewer sees, not what the spans cover.
 
     With `deadspace` on, the renderer strips each span's internal silence, so the honest
@@ -124,7 +124,7 @@ def _kept_dur(words: list[dict], spans, deadspace: bool, pad: float) -> float:
         return sum(y - x for x, y in spans)
     # ponytail: compress_silence re-derives speech_intervals(words) per span -- ~50 calls
     # per cast, invisible beside the model passes. Hoist it if it ever shows in a profile.
-    return sum(compress_silence(words, x, y, pad=pad)[2] for x, y in spans)
+    return sum(compress_silence(words, x, y, pad=pad, voiced=voiced)[2] for x, y in spans)
 
 
 def _trim_to_budget(picked: list[dict], target_s: float, tol: float):
@@ -295,6 +295,7 @@ def _valid_bounds(s0, e0, stream_end: float) -> bool:
 def cast(outline, chunks, words: list[dict], target_s: float,
          model: str, tol: float = 0.35, progress=None,
          deadspace: bool = True, silence_pad: float = SILENCE_PAD,
+         voiced=None,   # transcribe.speech_regions -- the renderer must get the same list
          # the style's machinery half (see refire/styles.py); all identity-defaulted, so
          # an unstyled cast is byte-identical to the one this module has always produced
          order: str = "chrono", snap: str = "sentence", stack: int = 0,
@@ -435,7 +436,7 @@ def cast(outline, chunks, words: list[dict], target_s: float,
                        # longer than it ships (a 16:33 cut audited as 21:28), so the
                        # audit flagged beats that were never long and the trimmer shed
                        # beats it had room for.
-                       "dur": _kept_dur(words, spans, deadspace, silence_pad),
+                       "dur": _kept_dur(words, spans, deadspace, silence_pad, voiced),
                        "score": sc, "reason": reason,
                        "text": text,    # realized KEPT transcript -> editor-review
                        # ...and what the edit threw away between those spans. `text` alone

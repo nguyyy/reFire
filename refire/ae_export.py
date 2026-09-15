@@ -255,7 +255,8 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
                    overlays_by_clip=None, bgm=None, bgm_db: float = -18.0,
                    motion_zoom: bool = True, deadspace: bool = True,
                    silence_pad: float = SILENCE_PAD, cards: bool = True,
-                   proxy: bool = True, captions: str = "all", sources=None) -> Path:
+                   proxy: bool = True, captions: str = "all", sources=None,
+                   voiced=None) -> Path:
     """Write run_dir/ae/manifest.json from already-chosen sections. Returns its path.
 
     Shared by `export_ae` (legacy detect path) and `pipeline.make` (brief path).
@@ -267,7 +268,8 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
     (`zoom_episodes: []`) for faster, calmer builds.
     `deadspace=True` drops each clip's internal dead air: the manifest gains a per-clip
     `keep` (clip-relative source spans) + `dur` (tightened length) that AE jump-cuts with
-    Time Remap, and captions/zoom/overlays are retimed onto that tight timeline.
+    Time Remap, and captions/zoom/overlays are retimed onto that tight timeline. `voiced`
+    keeps speech the transcript has no words for (see `select.compress_silence`).
     `cards=False` marks every section `card: False`, so the Master runs clip-to-clip with
     no section title cards (titles stay in the manifest for the outline/debugging).
     `proxy=True` cuts each clip to an all-intra DNxHR LB proxy and points AE at those
@@ -303,7 +305,7 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
             keep = tight = None
             if deadspace:
                 keep, retimed, cdur = compress_silence(words, seg["start"], seg["end"],
-                                                       pad=silence_pad)
+                                                       pad=silence_pad, voiced=voiced)
                 tight = _tighten(keep)
                 groups = group_words(retimed, 0.0, cdur, wpl)
             else:

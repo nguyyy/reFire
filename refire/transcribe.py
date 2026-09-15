@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import difflib
+import gc
 import glob
 import json
 import os
@@ -53,6 +54,52 @@ def _wav_duration(wav_path: str | Path) -> float:
             return wf.getnframes() / float(wf.getframerate() or 1)
     except (wave.Error, OSError, ZeroDivisionError):
         return 0.0
+
+
+# Whisper's own batched-VAD threshold and silence gap, so "speech" means the same thing
+# here as it did when the words were decoded. No pad: `compress_silence` adds its own.
+VAD_OPTS = {"threshold": 0.5, "min_silence_duration_ms": 160,
+            "min_speech_duration_ms": 250, "speech_pad_ms": 0}
+VAD_CHUNK_S = 600.0   # wav read in 10-min slices; a 6h stream is ~1.4GB as float32
+
+
+def speech_regions(wav_path: str | Path, cache_path: str | Path | None = None) -> list[list[float]]:
+    """Absolute [start, end] seconds where Silero hears speech, words or not. [] if unreadable.
+
+    The word list is not a speech map. Whisper is handed some speech and returns no words
+    for it -- measured across 7 real cuts, 239s of the 1762s `compress_silence` removed held
+    Silero speech at this very threshold (a 22s quest exchange in one beat). That audio was
+    cut as silence. ~18s per 4h stream on CPU; cached, keyed on `VAD_OPTS`.
+    """
+    cache_path = Path(cache_path) if cache_path else None
+    if cache_path and cache_path.exists():
+        try:
+            got = json.loads(cache_path.read_text(encoding="utf-8"))
+            if got["opts"] == VAD_OPTS:
+                return got["regions"]
+        except (ValueError, KeyError, TypeError):
+            pass   # corrupt/old cache -> rescan
+    import numpy as np
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
+
+    regions: list[list[float]] = []
+    try:
+        with wave.open(str(wav_path), "rb") as wf:
+            sr, step = wf.getframerate(), int(VAD_CHUNK_S * wf.getframerate())
+            for pos in range(0, wf.getnframes(), step):
+                x = np.frombuffer(wf.readframes(step), dtype=np.int16).astype(np.float32) / 32768.0
+                for c in get_speech_timestamps(x, VadOptions(**VAD_OPTS), sampling_rate=sr):
+                    s, e = (pos + c["start"]) / sr, (pos + c["end"]) / sr
+                    if regions and s - regions[-1][1] < 0.05:   # rejoin across a slice edge
+                        regions[-1][1] = round(e, 3)
+                    else:
+                        regions.append([round(s, 3), round(e, 3)])
+    except (wave.Error, OSError, ValueError):
+        return []
+    if cache_path:
+        cache_path.write_text(json.dumps({"opts": VAD_OPTS, "regions": regions}),
+                              encoding="utf-8")
+    return regions
 
 
 def transcribe(
@@ -156,6 +203,18 @@ def _whisper(model_size: str, device: str, compute_type: str):
     """
     from faster_whisper import WhisperModel
     return WhisperModel(model_size, device=device, compute_type=compute_type)
+
+
+def release_whisper() -> None:
+    """Drop the cached WhisperModel so its VRAM is free before the next ollama load.
+
+    The cache outlives transcription for the whole process. On a 16GB card, gpt-oss:20b
+    (12GB) loaded beside it spills into shared memory while `ollama ps` still says 100% GPU:
+    the scout window measured 4.9 tok/s with Whisper cached vs 159 after this -- a run that
+    looked frozen on "scouting" with the GPU pinned.
+    """
+    _whisper.cache_clear()
+    gc.collect()
 
 
 def _stt_local(wav_path, hotwords="", model_size=DEFAULT_WHISPER_MODEL, device="cuda",

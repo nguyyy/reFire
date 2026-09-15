@@ -64,6 +64,7 @@ def render_clips(
     motion_zoom: bool = True,
     deadspace: bool = True,
     loudnorm: bool = False,
+    voiced=None,
 ) -> Path:
     """Render a flat list of {start,end} clips into a watchable rough cut.
 
@@ -93,7 +94,7 @@ def render_clips(
             wpl, c_enter, c_exit = 3, ENTER, EXIT
         if deadspace:
             keep, retimed, cdur = compress_silence(words, seg["start"], seg["end"],
-                                                   pad=silence_pad)
+                                                   pad=silence_pad, voiced=voiced)
         else:                                   # keep=None -> ffmpeg trims, cuts nothing
             keep, cdur = None, seg["end"] - seg["start"]
             retimed = [{"text": w["text"], "start": w["start"] - seg["start"],

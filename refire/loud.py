@@ -135,6 +135,7 @@ def loud(
     """
     from .ae_export import build_manifest
     from .emphasis import annotate_emphasis
+    from .transcribe import speech_regions
     from .glossary import game_glossary
     from .pipeline import _run_name
     from .srt import write_srt
@@ -159,7 +160,7 @@ def loud(
           f"~{sum(c['end'] - c['start'] for c in picked) / 60:.1f}m before tightening")
 
     hotwords = ", ".join(game_glossary(game, model=model, cache_dir=out_dir, extra=terms))
-    clips, sources, words = [], [], []
+    clips, sources, words, voiced = [], [], [], []
     for i, c in enumerate(picked):
         # ponytail: the downloader crops on INTEGER seconds, so a window's offset is the
         # floor/ceil of what we asked for -- exact, as long as --trim-mode stays Exact
@@ -191,11 +192,14 @@ def loud(
         clips.append({"start": a, "end": max(b, a + 1.0), "src": i})
         sources.append((video, off))
         words.extend(w)
+        if deadspace:   # lifted onto the same laid-out timeline as the words
+            voiced += [[s + off, e + off]
+                       for s, e in speech_regions(wav, cache_path=wdir / "speech.json")]
 
     mp = build_manifest(sources[0][0], out_dir, words, [{"title": "", "clips": clips}],
                         words_per_line, motion_zoom=False, deadspace=deadspace,
                         silence_pad=silence_pad, cards=False, proxy=False,
-                        sources=sources)
+                        sources=sources, voiced=voiced)
     srt = write_srt(mp)
     print(f"Manifest: {mp}\nCaptions: {srt}")
     if warning:
