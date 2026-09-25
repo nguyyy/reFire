@@ -13,6 +13,7 @@ per-clip scoring stay local -- only this whole-stream reasoning call goes to the
 from __future__ import annotations
 
 import json
+import sys
 import time
 
 from pydantic import BaseModel, field_validator, model_validator
@@ -266,6 +267,13 @@ _SYSTEM = (
     "move to the next real moment. Never take half. Half an exchange costs the same "
     "runtime as the whole thing and delivers none of it, which is the worst trade in the "
     "edit.\n"
+    "  OFF-AIR TIME is not content. The streamer fighting their own setup (audio devices, "
+    "headset, mic, monitor, capture card, OBS, a crashing PC), loading, 'one sec', waiting "
+    "on a timer, AFK and bathroom breaks -- that is what the viewer came to skip. Default "
+    "to cutting the whole stretch. Keep it only when it pays off on its own, a reveal or "
+    "reaction that is funny with no context, and then keep that payoff and its reaction, "
+    "never the troubleshooting run that led there. Being loud, or being flagged as a "
+    "glitch in the chapter guide, does not earn it a beat.\n"
     "- setup_start_s: if the context the joke needs starts earlier than start_s, put it "
     "here (else omit).\n"
     "- payoff_start_s: where the joke/reveal/win/fail actually lands. NEVER cut before "
@@ -516,6 +524,11 @@ _REVIEW_SYSTEM = (
     ". That budget is the SUM OF A BEAT'S SEGMENTS -- the footage that reaches the "
     "viewer -- not the width of start_s..end_s. Flag a beat only against its OWN "
     "ceiling, and a beat sitting far UNDER its ceiling is under-filled, not tight.\n"
+    "- OFF-AIR TIME: is any beat the streamer dealing with their setup, loading, waiting "
+    "or being away rather than playing or entertaining? Judge it as a viewer with no "
+    "stake in their hardware: if only the reveal or reaction lands, cut the beat down to "
+    "that; if nothing lands, drop it and fill the slot from the stream map with a moment "
+    "that serves the brief.\n"
     "- MISSING BUILD-UP: the opposite failure, and the easier one to miss. An escalation "
     "or climax made of a short opener and a distant payoff, with the attempts between "
     "them skipped, is NOT a tight beat -- it is a beat with its build-up deleted, and it "
@@ -609,7 +622,8 @@ _SCOUT_SYSTEM = (
     'what the streamer is trying to do, how it goes>", "notable_moments": '
     '[{"t_s": <number, copied from a [Ns] label>, "why": "<one line: why an editor '
     'would care>"}, ...]}. List at most 5 notable moments; strong reactions, fails, '
-    "wins, running jokes, and chat/loudness spikes are what count."
+    "wins, running jokes, and chat/loudness spikes are what count; technical "
+    "difficulties, loading and waiting are NOT notable unless the reaction itself is funny."
 )
 
 
@@ -1069,7 +1083,8 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
 
     phase = ""
     thought: list[str] = []
-    t_call, beats = time.monotonic(), 0
+    t_call, beats, t_line = time.monotonic(), 0, float("-inf")
+    tty = sys.stdout.isatty()
     # Every assistant TURN's text, not just the last. When thinking eats the output budget
     # the message stops on `max_tokens` and Claude Code silently continues in a second
     # message -- but the `result` event below carries only that FINAL turn, so a JSON
@@ -1114,10 +1129,15 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
                 phase = label
             if chunk:
                 print(chunk, end="", flush=True)
-            else:
+            elif tty:
                 beats += 1
                 print(_think_tick(tag, time.monotonic() - t_call, beats),
                       end="", flush=True)
+            elif time.monotonic() - t_line >= 30:
+                # Piped (the panels read line by line): a bare-\r tick never ends a line, so
+                # a 12-minute think piled up unseen and dumped all at once on Cancel.
+                t_line = time.monotonic()
+                print(_think_tick(tag, t_line - t_call, beats).strip(), flush=True)
         elif ev.get("type") == "result":
             text = ev.get("result") or ""
             stop = ev.get("stop_reason") or ev.get("subtype")

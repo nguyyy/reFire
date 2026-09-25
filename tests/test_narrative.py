@@ -1274,6 +1274,17 @@ def test_review_rubric_flips_when_build_up_is_deliberately_skipped():
     assert s.format(n=5, roles="r")
 
 
+def test_off_air_rule_survives_every_prompt_swap():
+    """Setup trouble / loading / AFK sat in a real cut as a 38s beat. The rule sits outside
+    every swap region; a swap reaching past its markers would silently delete it."""
+    from refire import director
+
+    for s in (director.pick_system("b"), director.pick_system(None),
+              director.pick_system("b", "fast", stack=6, keep_build=False, pace=0.35),
+              director._review_system(), director._review_system(keep_build=False)):
+        assert "OFF-AIR TIME" in s
+
+
 def test_outline_prompt_stops_demanding_the_whole_build_up():
     from refire import director
 

@@ -220,7 +220,11 @@ def make(
         # cropped file, so add `start` back if you need real stream time.
         print(f"[window] {(start or 0) / 3600:.2f}h .. "
               f"{'end' if end is None else f'{end / 3600:.2f}h'} of the stream only")
-    video, chat = ensure_vod(vod_id, cache_dir, start=start, end=end)
+    # the downloader's own phases fill 0..0.10 -- without them a 40m download is a
+    # single motionless line (see `ingest._run`)
+    video, chat = ensure_vod(
+        vod_id, cache_dir, start=start, end=end,
+        progress=lambda f, m: report(0.10 * f, f"downloading VOD -- {m}"))
     # transcription is the long pole -> map its segment progress into 0.10..0.55
     report(0.10, "transcribing")
     words, chunks, _chat_z = _detect_core(   # chat_z rides on chunks for the flat fallback

@@ -167,7 +167,9 @@ def test_blank_thinking_deltas_drive_a_live_tick(monkeypatch, capsys):
     monkeypatch.setattr(director.shutil if hasattr(director, "shutil") else __import__("shutil"),
                         "which", lambda _: "claude")
     monkeypatch.setattr(subprocess, "Popen", _Proc)
+    import sys
 
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     got = director._complete_cli("m", "sys", [{"type": "text", "text": "u"}], Ans)
     assert got.answer == "done"
 
@@ -175,6 +177,14 @@ def test_blank_thinking_deltas_drive_a_live_tick(monkeypatch, capsys):
     assert "--- thinking ---" in out and "--- writing ---" in out
     assert "thinking... 0m00s" in out          # the tick rendered, not swallowed
     assert out.count(chr(13)) >= 5             # one in-place tick per blank delta
+
+    # Piped (the panels): no bare \r -- a line reader holds it until EOF. One
+    # newline-terminated tick, throttled, instead of one per heartbeat.
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+    director._complete_cli("m", "sys", [{"type": "text", "text": "u"}], Ans)
+    out = capsys.readouterr().out
+    assert chr(13) not in out
+    assert out.count("thinking... 0m00s") == 1
 
 
 REVIEW_JSON = json.dumps({

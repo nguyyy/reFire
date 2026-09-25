@@ -95,6 +95,30 @@ def test_recaption_button_is_wired():
         encoding="utf-8")
 
 
+def test_every_pipeline_stage_is_on_the_bar():
+    """The progress bar finds its segment by message prefix. A report() message no
+    STAGES entry claims leaves the bar parked on the previous stage for the rest of
+    the run, with nothing on the Python side to notice."""
+    table = re.search(r"var STAGES = \[(.*?)\];", PANEL.read_text(encoding="utf-8"), re.S)
+    assert table, "STAGES table moved -- re-point this test"
+    # entries close with `]}` -- a bare `]` would stop inside the "[review]" prefix
+    prefixes = [p for m in re.findall(r"match: \[(.*?)\]\}", table.group(1), re.S)
+                for p in re.findall(r'"([^"]+)"', m)]
+    msgs = re.findall(r'report\([^,]+,\s*f?"([^"{]+)',
+                      (ROOT / "refire" / "pipeline.py").read_text(encoding="utf-8"))
+    assert len(msgs) > 10, "no report() messages parsed out of pipeline.py"
+    loose = [m for m in msgs if m != "done" and not any(m.startswith(p) for p in prefixes)]
+    assert not loose, f"report() messages no panel stage claims: {loose}"
+
+
+def test_preview_shim_never_ships():
+    """preview.py injects the fake Premiere into index.html in flight. The file on disk
+    must never load it, or the real panel would run against a mock."""
+    panel = PANEL.read_text(encoding="utf-8")
+    assert "preview.js" not in panel
+    assert panel.count("<head>") == 1, "preview.py injects right after <head>"
+
+
 def test_chk_label_is_a_containing_block():
     """`.chk input` is position:absolute. Without a positioned ancestor its containing
     block is the INITIAL one, so the hidden input stops scrolling with `main`, pushes

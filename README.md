@@ -309,6 +309,10 @@ powershell -ExecutionPolicy Bypass -File refire\ppro\install.ps1
 restart premiere, then **window > extensions > refire**. devtools on
 `http://localhost:8089`.
 
+no premiere open? `uv run python refire/ppro/preview.py` serves the same panel at
+`http://127.0.0.1:8090/` with a fake premiere and a replayed `make` (`?speed=120`,
+`?run=fail`), and reloads whenever a file in `refire/ppro/` changes. nothing real runs.
+
 **scope: clip selection + subtitling, nothing else.** premiere's extendscript
 cannot create text layers, cannot set keyframe easing, and has no documented
 transition api — so the zoom punches, emote overlays, sfx, section cards and
