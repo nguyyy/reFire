@@ -38,6 +38,7 @@ var r=document.documentElement;r.dataset.theme=t;r.classList.add("js")})();
   --beam:rgba(140,207,244,.11); --beam-core:rgba(205,235,252,.07); --beam-2:rgba(140,207,244,.05); --glow:rgba(140,207,244,.08);
   --vignette:rgba(0,0,0,.72);
   --grain:.07; --grain-invert:0;
+  --shine:#E9F7FF;                /* the light that crosses the footer wordmark */
   --sans:"Google Sans",system-ui,sans-serif;
   --detail:Arial,"Helvetica Neue",Helvetica,sans-serif;
   --ease:cubic-bezier(.16,1,.3,1);
@@ -60,6 +61,7 @@ var r=document.documentElement;r.dataset.theme=t;r.classList.add("js")})();
   --beam:rgba(120,196,240,.32); --beam-core:rgba(255,255,255,.45); --beam-2:rgba(120,196,240,.16); --glow:rgba(120,196,240,.24);
   --vignette:rgba(60,85,110,.2);
   --grain:.05; --grain-invert:1;
+  --shine:#FFFFFF;
   color-scheme:light;
 }
 
@@ -170,8 +172,8 @@ code,code *,pre,pre *,.mono,.pill,.labels span{font-family:var(--detail);letter-
 .labels{position:fixed;inset:0;z-index:1;pointer-events:none;overflow:hidden}
 .labels span{
   position:absolute;left:0;top:0;opacity:0;white-space:nowrap;
-  font-size:13px;font-weight:500;line-height:1;color:var(--sky-text);
-  padding:6px 10px;border-radius:999px;background:color-mix(in srgb,var(--ground) 85%,transparent);border:1px solid var(--sky-line);
+  font-size:12px;font-weight:500;line-height:1;letter-spacing:.08em;text-transform:uppercase;color:var(--sky-text);
+  text-shadow:0 0 6px var(--ground),0 0 2px var(--ground);
   transform:translate(-50%,-100%);will-change:transform,opacity;
 }
 main,footer{position:relative;z-index:2;overflow-x:clip}
@@ -211,13 +213,10 @@ main,footer{position:relative;z-index:2;overflow-x:clip}
 .step p{margin-top:24px;font-size:clamp(19px,1.45vw,23px);color:var(--text)}
 .map{margin-top:28px;padding:16px 18px;border-radius:14px;background:var(--surface);border:1px solid var(--line);box-shadow:inset 0 1px 0 var(--edge);color:var(--mute);white-space:pre;overflow-x:auto;font-size:14px}
 .map b{font-weight:500;color:var(--strong)}
-.roles{display:flex;flex-wrap:wrap;gap:8px;margin-top:28px}
 .pill{
   display:inline-flex;align-items:center;height:34px;padding:0 14px;border-radius:999px;
   border:1px solid var(--line);background:var(--surface);color:var(--text);font-size:14px;line-height:1;
 }
-.roles .pill{border-color:var(--sky-line);color:var(--sky-text)}
-.outs{display:flex;flex-wrap:wrap;gap:8px;margin-top:28px}
 @media (max-width:760px){
   .step{align-items:flex-end;padding-bottom:9vh}
   .map{font-size:12px}
@@ -225,6 +224,8 @@ main,footer{position:relative;z-index:2;overflow-x:clip}
 
 /* ---- sections ------------------------------------------------------------------------ */
 .sec{padding-block:clamp(96px,11vw,160px);scroll-margin-top:var(--nav)}
+/* back-to-back sections: the previous one's bottom padding already makes the gap */
+.sec+.sec{padding-top:clamp(32px,4vw,56px)}
 .sec h2.display{font-size:clamp(48px,6.4vw,128px)}
 [data-reveal]{transition:opacity .9s var(--ease),transform .9s var(--ease);transition-delay:calc(var(--i,0) * 70ms)}
 .js [data-reveal]:not(.in){opacity:0;transform:translateY(34px)}
@@ -288,19 +289,8 @@ main,footer{position:relative;z-index:2;overflow-x:clip}
 .pstat.big .n{font-size:clamp(76px,8.4vw,160px);color:var(--sky-ink)}
 .pstat.big p{color:var(--sky-ink)}
 .fine{margin-top:18px;font-size:15px;color:var(--mute)}
-.top{margin-top:clamp(48px,6vw,80px)}
-.top ol{margin-top:18px;border-top:1px solid var(--line)}
-.top a{display:grid;grid-template-columns:2.4rem minmax(0,1fr) auto auto;gap:20px;align-items:baseline;padding:20px 0;border-bottom:1px solid var(--line);transition:color .2s}
-.top a:hover{color:var(--sky-text)}
-.top .rank{color:var(--sky-text)}
-.top .t{font-size:clamp(20px,1.7vw,26px);color:var(--strong)}
-.top a:hover .t{color:var(--sky-text)}
-.top .m{font-size:16px;color:var(--mute);white-space:nowrap;font-variant-numeric:tabular-nums}
 @media (max-width:960px){.pstats{grid-template-columns:1fr 1fr}}
-@media (max-width:560px){
-  .pstats{grid-template-columns:1fr}.pstat.big{grid-column:auto}
-  .top a{grid-template-columns:2rem minmax(0,1fr);row-gap:8px}.top .m{grid-column:2}
-}
+@media (max-width:560px){.pstats{grid-template-columns:1fr}.pstat.big{grid-column:auto}.pstat{min-height:0;gap:10px}}
 
 /* split: what the model decides, what code decides */
 .split{display:grid;grid-template-columns:1fr 1fr;margin-top:clamp(56px,7vw,96px);border-top:1px solid var(--line)}
@@ -416,6 +406,26 @@ main,footer{position:relative;z-index:2;overflow-x:clip}
 .cta .mono{color:var(--mute);transition:color .35s var(--ease)}
 .cta:hover{background:var(--sky);border-color:var(--sky)}
 .cta:hover .display,.cta:hover .mono{color:var(--sky-ink)}
+/* The finale, staged by JS: .lit once the card is well in view, .settled when it has played.
+   The surface fills in as a beam passes over it, the word rises out of blur, and the
+   wordmark below catches the light. */
+.cta{position:relative;isolation:isolate}
+.cta .ch,.cta .arr{display:inline-block}
+.sheen{position:absolute;inset:0;z-index:-1;border-radius:inherit;overflow:hidden;pointer-events:none}
+.sheen::before{
+  content:"";position:absolute;top:-30%;bottom:-30%;left:0;width:max(26%,140px);
+  background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--sky) 16%,transparent) 38%,color-mix(in srgb,var(--sky) 38%,transparent) 50%,color-mix(in srgb,var(--sky) 16%,transparent) 62%,transparent);
+  transform:translateX(-130%) skewX(-18deg);
+}
+.cta.lit .sheen::before{animation:sweep 1.6s cubic-bezier(.45,0,.2,1) .05s both}
+@keyframes sweep{to{transform:translateX(max(420%,110vw)) skewX(-18deg)}}
+.js .cta:not(.lit){background:transparent;border-color:transparent;box-shadow:none}
+.js .cta:not(.settled){transition:background-color .9s var(--ease),border-color .9s var(--ease) .1s,box-shadow .9s var(--ease)}
+.js .cta:not(.settled) .ch,.js .cta:not(.settled) .arr{transition:opacity .7s var(--ease),transform 1s var(--ease),filter 1s var(--ease);transition-delay:calc(.1s + var(--c,0) * 50ms)}
+.js .cta:not(.lit) .ch{opacity:0;transform:translateY(.45em);filter:blur(16px)}
+.js .cta:not(.lit) .arr{opacity:0;transform:translate(-.6em,.6em) scale(.5);filter:blur(10px)}
+.js .cta:not(.lit) .mono{opacity:0;letter-spacing:.5em}
+.js .cta:not(.settled) .mono{transition:opacity .9s var(--ease) .45s,letter-spacing 1.3s var(--ease) .4s,color .35s var(--ease)}
 @media (max-width:640px){.steps li{grid-template-columns:1fr;gap:10px}}
 
 /* footer: the wordmark, whole, at the foot */
@@ -430,6 +440,19 @@ footer .sec-head{margin-bottom:0}
   color:var(--card-2);white-space:nowrap;user-select:none;
 }
 .giant span{color:var(--sky-text)}
+/* the finale's light reaches the wordmark: one beam across the letters (a copy of the word,
+   clipped to its own glyphs), then "Fire" keeps a glow and "re" stays a little lit */
+.giant{position:relative;transition:color 2s var(--ease) .6s}
+.giant span{transition:text-shadow 2s var(--ease) .6s}
+.giant::after{
+  content:"reFire";position:absolute;inset:0;padding:inherit;color:transparent;pointer-events:none;
+  background:linear-gradient(100deg,transparent 42%,var(--shine) 50%,transparent 58%) 0 0/300% 100% no-repeat;
+  -webkit-background-clip:text;background-clip:text;
+}
+.giant.lit{color:color-mix(in srgb,var(--card-2) 78%,var(--sky-text))}
+.giant.lit span{text-shadow:0 0 .1em color-mix(in srgb,var(--sky) 40%,transparent)}
+.giant.lit::after{animation:shine 2.2s cubic-bezier(.45,0,.2,1) both}
+@keyframes shine{from{background-position:100% 0}to{background-position:0 0}}
 @supports (animation-timeline:view()){
   @media (prefers-reduced-motion:no-preference){
     .giant{animation:lift linear both;animation-timeline:view();animation-range:entry 0% entry 90%}
@@ -489,33 +512,29 @@ footer .sec-head{margin-bottom:0}
         <div class="spec"><span class="label">Story outline<br>one Claude session, whole stream</span><span class="tag">[outline.json]</span></div>
         <h2 class="display">Plan it like an editor.</h2>
         <p>Claude reads the entire map in one session, decides what the video is about, then casts moments into beats that each have a job. Loud is a hint, not the plan.</p>
-        <div class="roles"><span class="pill">hook</span><span class="pill">setup</span><span class="pill">escalation</span><span class="pill">reversal</span><span class="pill">climax</span><span class="pill">payoff</span><span class="pill">button</span></div>
       </div>
     </article>
     <article class="step edge">
       <div class="step-card">
         <div class="spec"><span class="label">Rough cut, then a critic<br>up to two review rounds</span><span class="tag">[rough.mp4]</span></div>
         <h2 class="display">Cut clean. Reread it.</h2>
-        <p>Beats snap to sentence boundaries and dead air comes out. Then a critic reads the cut as it actually plays and sends back a revised outline, up to two rounds.</p>
-        <div class="outs"><span class="pill">rough.mp4</span><span class="pill">ae/manifest.json</span><span class="pill">captions.srt</span></div>
-      </div>
+        <p>Beats snap to sentence boundaries and dead air comes out. Then a critic reads the cut as it actually plays and sends back a revised outline, up to two rounds.</p>      </div>
     </article>
   </section>
 
-  <!-- Real YouTube Studio exports (2026-09-25), nothing adjusted. The chart is zy0x clips' daily
-       engaged views (the before/after story). The tiles consolidate both channels, lifetime:
-       zy0x's ten long-form cuts plus the four reFire v1 edits (Su-57, F-35, F-22, Oppenheimer),
-       which are 99.2% of that channel's views. Average % viewed replaces average view duration
-       because a merged duration of 30s edits and 15min cuts describes neither. -->
+  <!-- Real YouTube Studio exports (2026-09-25), nothing adjusted. The chart is one channel's daily
+       engaged views (the before/after story). The tiles consolidate every reFire cut, lifetime.
+       Average % viewed replaces average view duration because a merged duration of short
+       edits and long cuts describes neither. -->
   <section class="sec wrap" id="proof" aria-labelledby="proof-h">
     <div class="sec-head" data-reveal><span class="label">In the wild</span><span class="label idx">/02</span></div>
     <h2 class="display" id="proof-h" data-reveal>14 views a day.<br><span class="sky">Then 1,855.</span></h2>
-    <p class="proof-lede" data-reveal>zy0x clips posted Shorts until August 2026, then switched to long-form story cuts made with reFire. Below: YouTube Studio numbers across every channel reFire cuts for.</p>
+    <p class="proof-lede" data-reveal>Shorts until August 2026, then long-form story cuts made with reFire. Below: YouTube Studio numbers, unedited.</p>
 
     <figure class="chart surface" data-reveal>
-      <figcaption class="chart-top"><span class="label">Daily engaged views</span><span class="mono">zy0x clips, Jul 25 to Sep 25, 2026</span></figcaption>
+      <figcaption class="chart-top"><span class="label">Daily engaged views</span><span class="mono">Jul 25 to Sep 25, 2026</span></figcaption>
       <div class="plot" id="plot">
-        <svg id="chart" role="img" aria-label="Daily engaged views. zy0x clips: about 14 a day until the first long-form cut, then an average of 1,855 a day after the first long-form cut on August 7, peaking at 12,086 on September 17."></svg>
+        <svg id="chart" role="img" aria-label="Daily engaged views: about 14 a day until the first long-form cut, then an average of 1,855 a day after the first long-form cut on August 7, peaking at 12,086 on September 17."></svg>
         <div class="tip" id="tip" hidden></div>
       </div>
       <div class="chart-foot">
@@ -537,17 +556,7 @@ footer .sec-head{margin-bottom:0}
       <div class="pstat surface" data-reveal style="--i:2"><div class="n">79%</div><p>of each video watched, on average</p></div>
       <div class="pstat surface" data-reveal style="--i:3"><div class="n">8.30%</div><p>click-through, up to 11.1%</p></div>
     </div>
-    <p class="fine" data-reveal>All reFire cuts across both channels, current and v1, lifetime. YouTube Studio exports, Sep 25, 2026.</p>
-
-    <div class="top" data-reveal>
-      <p class="label">Top cuts</p>
-      <ol>
-        <li><a href="https://www.youtube.com/watch?v=uOz6n-YvVT8"><span class="rank mono">01</span><span class="t">The Su-57 (edit)</span><span class="m">460K views</span><span class="m">9.00% CTR &nearr;</span></a></li>
-        <li><a href="https://www.youtube.com/watch?v=BC4gHXCuRys"><span class="rank mono">02</span><span class="t">zy0x plays DIRE STYGIAN with 3 of his BOYFRIENDS</span><span class="m">49.1K views</span><span class="m">6.63% CTR &nearr;</span></a></li>
-        <li><a href="https://www.youtube.com/watch?v=JHpsvWjNtjA"><span class="rank mono">03</span><span class="t">the BEST 4 STAR BOW? (zy0x 7.1 weapon banner review)</span><span class="m">41.6K views</span><span class="m">7.59% CTR &nearr;</span></a></li>
-        <li><a href="https://www.youtube.com/watch?v=SJftrrrgULQ"><span class="rank mono">04</span><span class="t">I Reviewed ZAJEF's Genshin Account... FINALLY</span><span class="m">37.6K views</span><span class="m">5.76% CTR &nearr;</span></a></li>
-      </ol>
-    </div>
+    <p class="fine" data-reveal>All reFire cuts, lifetime. YouTube Studio exports, Sep 25, 2026.</p>
   </section>
 
   <section class="sec wrap" aria-labelledby="split-h">
@@ -714,7 +723,8 @@ Never let a moment fully resolve.</pre>
       <span class="pill">TwitchDownloaderCLI.exe</span>
       <span class="pill">Claude CLI, an API key, or --local-director</span>
     </div>
-    <a class="cta surface" href="https://github.com/nguyyy/reFire" data-reveal>
+    <a class="cta surface" href="https://github.com/nguyyy/reFire" aria-label="reFire on GitHub: nguyyy/reFire">
+      <span class="sheen" aria-hidden="true"></span>
       <span class="display">GitHub &nearr;</span>
       <span class="mono">nguyyy/reFire</span>
     </a>
@@ -781,6 +791,28 @@ if (matchMedia("(hover: hover) and (pointer: fine)").matches) {
   }, { passive: true });
 }
 
+/* ---- finale: the GitHub card fills in and the word rises ------------------------------ */
+{
+  const cta = document.querySelector(".cta"), giant = document.querySelector(".giant");
+  cta.querySelector(".display").innerHTML = [..."GitHub"].map((c, i) => `<span class="ch" style="--c:${i}">${c}</span>`).join("")
+    + ' <span class="arr" style="--c:8">&nearr;</span>';
+  let lit = false, giantIn = false;
+  // the wordmark catches the light once the card has lit, or when it's scrolled to after that
+  const lightGiant = () => { if (lit && giantIn) giant.classList.add("lit"); };
+  // start as soon as a sliver shows, so scrolling past fast never finds an empty box
+  new IntersectionObserver(([e], o) => {
+    if (!e.isIntersecting) return;
+    o.disconnect();
+    cta.classList.add("lit");
+    setTimeout(() => { lit = true; lightGiant(); }, reduce ? 0 : 900);
+    setTimeout(() => cta.classList.add("settled"), reduce ? 0 : 2000);
+  }, { rootMargin: "0px 0px -10% 0px" }).observe(cta);
+  new IntersectionObserver(([e]) => {
+    giantIn = e.intersectionRatio >= 0.35;
+    lightGiant();
+  }, { threshold: [0, 0.35] }).observe(giant);
+}
+
 /* ---- copy the command ----------------------------------------------------------------- */
 const copy = document.getElementById("copy");
 copy.addEventListener("click", async () => {
@@ -834,8 +866,10 @@ function drawChart() {
     s += `<text class="ax" x="${x(dayIdx(d))}" y="${H - 6}" text-anchor="middle">${dfmt.format(Date.parse(d)).replace(/, \d{4}$/, "")}</text>`;
   }
   const first = dayIdx(UPLOADS[0]), fx = x(first);
-  // on narrow plots the peak label owns the top edge, so this note drops to mid-height
-  s += `<line class="mark" x1="${fx}" x2="${fx}" y1="${T}" y2="${y(0)}"/><text class="note" x="${fx - 10}" y="${W < 640 ? y(6500) : T + 14}" text-anchor="end">First long-form cut</text>`;
+  // on narrow plots the peak label owns the top edge and there's no room left of the line,
+  // so the note drops to mid-height on the right, above the early cuts' ~4K days
+  const narrow = W < 640;
+  s += `<line class="mark" x1="${fx}" x2="${fx}" y1="${T}" y2="${y(0)}"/><text class="note" x="${narrow ? fx + 8 : fx - 10}" y="${narrow ? y(7000) : T + 14}" text-anchor="${narrow ? "start" : "end"}">First long-form cut</text>`;
   s += `<path class="area" d="M${x(0)},${y(0)} L${pts} L${x(n - 1)},${y(0)} Z"/><path class="line" pathLength="1" d="M${pts}"/>`;
   for (const i of upSet) s += `<rect class="up" x="${(x(i) - 1.5).toFixed(1)}" y="${y(0) + 6}" width="3" height="10" rx="1.5"/>`;
   const pk = VIEWS.indexOf(Math.max(...VIEWS));
