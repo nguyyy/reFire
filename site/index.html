@@ -1,0 +1,1294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>reFire | Story cuts from long streams</title>
+<meta name="description" content="reFire reads a multi-hour Twitch VOD, plans a story, and cuts it for Premiere, After Effects or ffmpeg.">
+<meta name="theme-color" content="#08090C">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%238CCFF4'/%3E%3Ctext x='4' y='27' font-family='Arial,sans-serif' font-weight='700' font-size='16' letter-spacing='-1' fill='%2307131C'%3ErF%3C/text%3E%3C/svg%3E">
+<script>
+/* resolve the theme before first paint: saved choice, else the OS preference, else dark */
+(function(){var t;try{t=localStorage.getItem("refire-theme")}catch(e){}
+if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";
+var r=document.documentElement;r.dataset.theme=t;r.classList.add("js")})();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Google+Sans:ital,wght@0,400..700;1,400..700&display=swap">
+<style>
+/* reFire site. Google Sans, set tight: every glyph sits ~1.5px from its neighbour and every
+   line's cap tops sit 2px under the baseline above, at any size (see the * rule). Arial for the small
+   print: pills, tags, flags, code and timecodes (Google Sans Code read as "AI"). One sky-blue accent. Text hugs the screen edges so the 3D owns the middle; a
+   projector beam with dust in it lights the page. Radius rule: cards 14px, buttons and
+   pills fully round. Dark is the default; light is a full token swap. */
+:root{
+  --ground:#08090C; --ground-2:#0C0F13; --card:#14191F; --card-2:#1A2029; --line:#29303A; --rule:#414B58;
+  --surface:rgba(20,25,31,.84);   /* cards */
+  --edge:rgba(255,255,255,.07);   /* top highlight on cards */
+  --lift:0 24px 60px -28px rgba(0,0,0,.8);
+  --mute:#A0A9B4;                 /* 8.37:1 on ground */
+  --text:#D8DDE3; --strong:#F4F7F9;
+  --sky:#8CCFF4;                  /* blocks */
+  --sky-text:#9AD6F7;             /* accent as text, 12.6:1 */
+  --sky-ink:#07131C;              /* text on sky blocks, 11:1 */
+  --sky-line:rgba(140,207,244,.4);
+  --chart:#3A9AD9;                /* chart line: passes the dataviz validator on this ground */
+  --spot:rgba(140,207,244,.09); --spot-edge:rgba(140,207,244,.7);
+  --beam:rgba(140,207,244,.11); --beam-core:rgba(205,235,252,.07); --beam-2:rgba(140,207,244,.05); --glow:rgba(140,207,244,.08);
+  --vignette:rgba(0,0,0,.72);
+  --grain:.07; --grain-invert:0;
+  --sans:"Google Sans",system-ui,sans-serif;
+  --detail:Arial,"Helvetica Neue",Helvetica,sans-serif;
+  --ease:cubic-bezier(.16,1,.3,1);
+  --gutter:clamp(20px,3.4vw,72px);
+  --max:1680px;
+  --nav:68px;
+  color-scheme:dark;
+}
+:root[data-theme="light"]{
+  --ground:#E6ECF1; --ground-2:#DDE5EB; --card:#FFFFFF; --card-2:#D2DBE3; --line:#C5CFD8; --rule:#94A1AE;
+  --surface:rgba(255,255,255,.9);
+  --edge:#FFFFFF;
+  --lift:0 1px 2px rgba(30,50,70,.08),0 24px 48px -24px rgba(30,50,70,.3);
+  --mute:#4A5460;                 /* 6.46:1 on ground */
+  --text:#1C242D; --strong:#070B10;
+  --sky-text:#16679A;             /* 5.12:1 on ground, 6.1 on white */
+  --sky-line:rgba(22,103,154,.4);
+  --chart:#16679A;
+  --spot:rgba(120,196,240,.22); --spot-edge:rgba(22,103,154,.6);
+  --beam:rgba(120,196,240,.32); --beam-core:rgba(255,255,255,.45); --beam-2:rgba(120,196,240,.16); --glow:rgba(120,196,240,.24);
+  --vignette:rgba(60,85,110,.2);
+  --grain:.05; --grain-invert:1;
+  color-scheme:light;
+}
+
+/* Tight setting, measured on Google Sans 400: the median ink gap between neighbouring
+   glyphs is .07em, caps and ascenders stand .72em (Arial: .72em). So 1.5px - .07em
+   leaves ~1.5px between letters at any size (never looser than the font's own spacing), and
+   .72em + 2px puts each line's cap tops 2px under the baseline above. Descenders (.24em)
+   dip into the line below by design. Declared on every element so each computes from its
+   own size; --lh is the same rule for overrides to reuse. */
+:root{--lh:calc(.72em + 2px)}
+*{letter-spacing:min(0px,calc(1.5px - .07em));line-height:var(--lh)}
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;background:var(--ground)}
+html.lenis,html.lenis body{height:auto}
+.lenis.lenis-smooth{scroll-behavior:auto!important}
+body{margin:0;background:var(--ground);color:var(--text);font-family:var(--sans);font-size:19px;font-weight:400;-webkit-font-smoothing:antialiased;overflow-x:clip}
+/* film grain: fixed, never repaints with scroll */
+body::after{
+  content:"";position:fixed;inset:0;z-index:60;pointer-events:none;opacity:var(--grain);filter:invert(var(--grain-invert));
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 .55 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+h1,h2,h3,p,ul,ol,figure{margin:0}
+h1,h2,h3{font-weight:400}
+ul,ol{padding:0;list-style:none}
+a{color:inherit;text-decoration:none}
+img{display:block;max-width:100%;height:auto}
+/* the small print (.mono is the historical class name): untracked, it is set small */
+code,code *,pre,pre *,.mono,.pill,.labels span{font-family:var(--detail);letter-spacing:0}
+::selection{background:var(--sky);color:var(--sky-ink)}
+:focus-visible{outline:2px solid var(--sky-text);outline-offset:3px;border-radius:4px}
+::view-transition-old(root),::view-transition-new(root){animation:none;mix-blend-mode:normal}
+
+.display{color:var(--strong)}
+.wrap{width:100%;max-width:var(--max);margin:0 auto;padding:0 var(--gutter)}
+.edge{width:100%;padding-inline:var(--gutter)}
+.mono{font-size:14px}
+.label{font:500 13px/1 var(--sans);letter-spacing:.04em;text-transform:uppercase}
+.sky{color:var(--sky-text)}
+/* spec marks, after anduril.com: a bracketed designation in Arial, under a two-line uppercase
+   descriptor. Every code is a real name from the repo (a file, a module, a flag, a model) */
+.tag{display:block;font:400 12px/1 var(--detail);letter-spacing:.06em;text-transform:uppercase;color:var(--mute)}
+.spec{display:grid;justify-items:start;gap:16px;margin-bottom:26px}
+.spec .label{font-size:12px;line-height:var(--lh);color:var(--strong)}
+.spec .tag{color:var(--sky-text)}
+.num{font-variant-numeric:tabular-nums}
+
+/* masked headline lines: the hero plays on load, section headlines play on reveal.
+   Padding is room for the ink the tight line box leaves out (ascenders .02em above it,
+   descenders .22em below). Between two lines the negative margins collapse to the larger
+   one instead of adding, so the second line carries the whole sum. */
+.ln{display:block;overflow:hidden;padding:.06em 0 .26em;margin:-.06em 0 -.26em}
+.ln+.ln{margin-top:-.32em}
+.ln>span{display:block}
+
+/* ---- atmosphere: two beams, a floor glow, a vignette. Moved by transform only ---------- */
+.atmos{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden}
+.atmos i{position:absolute;left:50%;top:50%;display:block;will-change:transform}
+.beam{width:170vmax;height:44vmax;margin:-22vmax 0 0 -85vmax;background:radial-gradient(closest-side,var(--beam),transparent);transform:translate(-18vw,-22vh) rotate(26deg)}
+.beam.core{height:9vmax;margin-top:-4.5vmax;background:radial-gradient(closest-side,var(--beam-core),transparent)}
+.beam.b2{height:30vmax;margin-top:-15vmax;background:radial-gradient(closest-side,var(--beam-2),transparent);transform:translate(24vw,-30vh) rotate(-34deg)}
+.glow{width:90vmax;height:90vmax;margin:-45vmax 0 0 -45vmax;background:radial-gradient(closest-side,var(--glow),transparent);transform:translate(38vw,40vh)}
+.atmos::after{content:"";position:absolute;inset:0;background:radial-gradient(130% 100% at 50% 35%,transparent 40%,var(--vignette))}
+@media (prefers-reduced-motion:no-preference){
+  .beam{animation:breathe 9s ease-in-out infinite alternate}
+  .beam.core{animation-duration:5.5s}
+  .beam.b2{animation-duration:13s;animation-delay:-6s}
+}
+@keyframes breathe{from{opacity:.8}to{opacity:1}}
+
+/* ---- buttons: pill, one label per intent ------------------------------------------- */
+.btn{
+  display:inline-flex;align-items:center;gap:10px;height:52px;padding:0 26px;border-radius:999px;
+  font:500 17px/1 var(--sans);white-space:nowrap;cursor:pointer;
+  border:1px solid transparent;background:transparent;color:inherit;
+  transition:background-color .25s var(--ease),border-color .25s var(--ease),color .25s var(--ease),transform .15s var(--ease);
+}
+.btn:active{transform:scale(.97)}
+.btn-sky{background:var(--sky);color:var(--sky-ink)}
+.btn-sky:hover{background:var(--strong);color:var(--ground)}
+.btn-line{border-color:var(--line);color:var(--strong)}
+.btn-line:hover{border-color:var(--mute)}
+
+/* ---- nav ----------------------------------------------------------------------------- */
+.nav{
+  position:fixed;top:0;left:0;right:0;z-index:40;height:var(--nav);
+  display:flex;align-items:center;gap:30px;padding:0 var(--gutter);
+  transition:background-color .4s var(--ease),border-color .4s var(--ease);
+  border-bottom:1px solid transparent;
+}
+.nav.solid{background:color-mix(in srgb,var(--ground) 80%,transparent);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom-color:var(--line)}
+.brand{display:flex;align-items:center;gap:12px;color:var(--strong);font:500 21px/1 var(--sans)}
+.mark{position:relative;width:32px;height:32px;border-radius:7px;background:var(--sky);flex:none}
+.mark b{position:absolute;left:5px;bottom:4px;font:700 15px/1 var(--sans);color:var(--sky-ink)}
+.nav ul{display:flex;gap:28px;margin-left:auto}
+.nav ul a{font-size:17px;color:var(--mute);transition:color .2s}
+.nav ul a:hover{color:var(--strong)}
+.nav .btn{height:40px;padding:0 18px;font-size:15px}
+.theme{
+  display:inline-flex;align-items:center;height:40px;padding:3px;border-radius:999px;cursor:pointer;
+  border:1px solid var(--line);background:transparent;font:500 14px/1 var(--sans);
+}
+.theme span{display:grid;place-items:center;height:32px;padding:0 13px;border-radius:999px;color:var(--mute);transition:background-color .3s,color .3s}
+:root[data-theme="dark"] .theme [data-t="dark"],:root[data-theme="light"] .theme [data-t="light"]{background:var(--card-2);color:var(--strong)}
+@media (max-width:860px){.nav{gap:10px}.nav ul{display:none}.theme{margin-left:auto}}
+
+/* ---- the 3D stage: fixed behind everything ----------------------------------------- */
+#scene{position:fixed;inset:0;width:100%;height:100vh;z-index:0;pointer-events:none;display:block}
+.labels{position:fixed;inset:0;z-index:1;pointer-events:none;overflow:hidden}
+.labels span{
+  position:absolute;left:0;top:0;opacity:0;white-space:nowrap;
+  font-size:13px;font-weight:500;line-height:1;color:var(--sky-text);
+  padding:6px 10px;border-radius:999px;background:color-mix(in srgb,var(--ground) 85%,transparent);border:1px solid var(--sky-line);
+  transform:translate(-50%,-100%);will-change:transform,opacity;
+}
+main,footer{position:relative;z-index:2;overflow-x:clip}
+
+/* ---- section heads: a rule that draws in, the section's name and its index ------------- */
+.sec-head{position:relative;display:flex;justify-content:space-between;align-items:center;gap:16px;padding-top:20px;margin-bottom:clamp(44px,5.5vw,80px);color:var(--strong)}
+.sec-head::before{content:"";position:absolute;left:0;right:0;top:0;height:1px;background:var(--rule);transform-origin:left;transition:transform 1.4s var(--ease)}
+.js .sec-head:not(.in)::before{transform:scaleX(0)}
+.sec-head .idx{color:var(--sky-text)}
+
+/* ---- hero: all copy in the bottom-left corner, the reel gets the rest ------------------ */
+.hero{
+  min-height:100dvh;display:flex;flex-direction:column;justify-content:flex-end;
+  padding-block:calc(var(--nav) + 40px) clamp(40px,9vh,96px);
+}
+.hero .motto{margin-bottom:clamp(22px,2.4vw,36px)}
+.hero h1{font-size:clamp(52px,7.2vw,176px)}
+.hero h1 .ln{white-space:nowrap}
+.hero p{margin-top:26px;max-width:28ch;font-size:clamp(20px,1.55vw,26px);color:var(--text)}
+.hero .ctas{display:flex;gap:12px;flex-wrap:wrap;margin-top:34px}
+@media (prefers-reduced-motion:no-preference){
+  .hero h1 .ln>span{animation:rise 1.1s var(--ease) both}
+  .hero h1 .ln:nth-child(2)>span{animation-delay:.09s}
+  .hero .motto,.hero p,.hero .ctas{animation:fade 1s .35s var(--ease) both}
+}
+@keyframes rise{from{transform:translateY(150%)}}
+@keyframes fade{from{opacity:0;transform:translateY(14px)}}
+
+/* ---- pipeline story: a narrow column on the left edge, the 3D on the right ------------ */
+.story{position:relative;padding-top:24px}
+.story .sec-head{margin-bottom:0}
+.step{min-height:100vh;display:flex;align-items:center}
+.step-card{max-width:28rem;transition:opacity .7s var(--ease),transform .7s var(--ease)}
+.js .step-card{opacity:.12;transform:translateY(28px)}
+.js .step.on .step-card{opacity:1;transform:none}
+.step h2{font-size:clamp(48px,5vw,104px)}
+.step p{margin-top:24px;font-size:clamp(19px,1.45vw,23px);color:var(--text)}
+.map{margin-top:28px;padding:16px 18px;border-radius:14px;background:var(--surface);border:1px solid var(--line);box-shadow:inset 0 1px 0 var(--edge);color:var(--mute);white-space:pre;overflow-x:auto;font-size:14px}
+.map b{font-weight:500;color:var(--strong)}
+.roles{display:flex;flex-wrap:wrap;gap:8px;margin-top:28px}
+.pill{
+  display:inline-flex;align-items:center;height:34px;padding:0 14px;border-radius:999px;
+  border:1px solid var(--line);background:var(--surface);color:var(--text);font-size:14px;line-height:1;
+}
+.roles .pill{border-color:var(--sky-line);color:var(--sky-text)}
+.outs{display:flex;flex-wrap:wrap;gap:8px;margin-top:28px}
+@media (max-width:760px){
+  .step{align-items:flex-end;padding-bottom:9vh}
+  .map{font-size:12px}
+}
+
+/* ---- sections ------------------------------------------------------------------------ */
+.sec{padding-block:clamp(96px,11vw,160px);scroll-margin-top:var(--nav)}
+.sec h2.display{font-size:clamp(48px,6.4vw,128px)}
+[data-reveal]{transition:opacity .9s var(--ease),transform .9s var(--ease);transition-delay:calc(var(--i,0) * 70ms)}
+.js [data-reveal]:not(.in){opacity:0;transform:translateY(34px)}
+.js h2.display[data-reveal]{opacity:1;transform:none}
+.js h2.display[data-reveal] .ln>span{transition:transform 1.05s var(--ease)}
+.js h2.display[data-reveal] .ln:nth-child(2)>span{transition-delay:.08s}
+.js h2.display[data-reveal]:not(.in) .ln>span{transform:translateY(150%)}
+
+/* surfaces: lit top edge, and a spotlight that follows the cursor */
+.surface{background:var(--surface);border:1px solid var(--line);box-shadow:inset 0 1px 0 var(--edge),var(--lift)}
+.spot{position:relative;isolation:isolate}
+.spot::before,.spot::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;opacity:0;transition:opacity .45s var(--ease)}
+.spot::before{z-index:-1;background:radial-gradient(380px circle at var(--mx,50%) var(--my,50%),var(--spot),transparent 70%)}
+.spot::after{padding:1px;background:radial-gradient(260px circle at var(--mx,50%) var(--my,50%),var(--spot-edge),transparent 70%);
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude}
+.spot:hover::before,.spot:hover::after{opacity:1}
+
+/* ---- proof: the channel's own YouTube Studio export ----------------------------------- */
+.proof-lede{margin-top:30px;max-width:40ch;font-size:clamp(20px,1.7vw,26px);color:var(--mute)}
+.chart{margin-top:clamp(44px,5vw,72px);padding:26px 26px 20px;border-radius:14px}
+.chart-top{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;color:var(--strong)}
+.chart-top .mono{color:var(--mute)}
+.plot{position:relative;height:clamp(280px,30vw,440px);margin-top:18px;touch-action:pan-y;cursor:crosshair}
+.plot svg{display:block;width:100%;height:100%;overflow:visible}
+.plot .grid{stroke:var(--line);stroke-width:1}
+.plot .base{stroke:var(--rule);stroke-width:1}
+.plot text{font-family:var(--sans);font-size:14px;fill:var(--mute);letter-spacing:0}
+.plot .ax{font-family:var(--detail);font-size:13px}
+.plot .peak{fill:var(--strong);font-weight:500;font-size:15px}
+.plot .note{fill:var(--strong);font-size:14px}
+.plot .mark{stroke:var(--rule);stroke-width:1;stroke-dasharray:3 4}
+.plot .line{fill:none;stroke:var(--chart);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.plot .area{fill:url(#fade)}
+.plot .fade-stop{stop-color:var(--chart)}
+.plot .up{fill:var(--chart)}
+.plot .cross{stroke:var(--mute);stroke-width:1;opacity:0}
+.plot .dot{fill:var(--chart);stroke:var(--ground);stroke-width:2;opacity:0}
+.plot.hover .cross,.plot.hover .dot{opacity:1}
+.js .chart:not(.in) .line{stroke-dashoffset:1}
+.plot .line{stroke-dasharray:1;stroke-dashoffset:0;transition:stroke-dashoffset 2.6s var(--ease) .25s}
+.plot .area{transition:opacity 1.2s var(--ease) 1.4s}
+.js .chart:not(.in) .area{opacity:0}
+.tip{position:absolute;left:0;top:0;z-index:2;pointer-events:none;padding:9px 12px;border-radius:10px;background:var(--card);border:1px solid var(--line);box-shadow:var(--lift);white-space:nowrap;font-size:14px;color:var(--mute)}
+.tip b{display:block;margin-top:4px;font-weight:500;font-size:19px;color:var(--strong)}
+.tip em{display:block;margin-top:6px;font-style:normal;color:var(--sky-text)}
+.chart-foot{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-top:14px;color:var(--mute);font-size:15px}
+.chart-foot .key{display:inline-flex;align-items:center;gap:8px}
+.chart-foot .key i{width:3px;height:11px;border-radius:2px;background:var(--chart)}
+.data{margin-top:12px;font-size:15px}
+.data summary{display:inline-block;cursor:pointer;color:var(--sky-text);list-style:none;font-size:15px}
+.data summary::-webkit-details-marker{display:none}
+.data table{width:100%;max-width:520px;margin-top:14px;border-collapse:collapse;font-size:15px;font-variant-numeric:tabular-nums}
+.data th,.data td{padding:6px 0;text-align:left;font-weight:400}
+.data th{color:var(--mute)}
+.data td+td,.data th+th{text-align:right;color:var(--strong)}
+.pstats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:14px}
+.pstat{display:flex;flex-direction:column;justify-content:space-between;gap:20px;min-height:180px;padding:26px;border-radius:14px}
+.pstat .n{font-size:clamp(46px,4.4vw,80px);color:var(--strong);font-variant-numeric:tabular-nums}
+.pstat p{font-size:18px;color:var(--mute)}
+.pstat.big{grid-column:span 2;background:var(--sky);border:1px solid var(--sky);box-shadow:var(--lift)}
+.pstat.big .n{font-size:clamp(76px,8.4vw,160px);color:var(--sky-ink)}
+.pstat.big p{color:var(--sky-ink)}
+.fine{margin-top:18px;font-size:15px;color:var(--mute)}
+.top{margin-top:clamp(48px,6vw,80px)}
+.top ol{margin-top:18px;border-top:1px solid var(--line)}
+.top a{display:grid;grid-template-columns:2.4rem minmax(0,1fr) auto auto;gap:20px;align-items:baseline;padding:20px 0;border-bottom:1px solid var(--line);transition:color .2s}
+.top a:hover{color:var(--sky-text)}
+.top .rank{color:var(--sky-text)}
+.top .t{font-size:clamp(20px,1.7vw,26px);color:var(--strong)}
+.top a:hover .t{color:var(--sky-text)}
+.top .m{font-size:16px;color:var(--mute);white-space:nowrap;font-variant-numeric:tabular-nums}
+@media (max-width:960px){.pstats{grid-template-columns:1fr 1fr}}
+@media (max-width:560px){
+  .pstats{grid-template-columns:1fr}.pstat.big{grid-column:auto}
+  .top a{grid-template-columns:2rem minmax(0,1fr);row-gap:8px}.top .m{grid-column:2}
+}
+
+/* split: what the model decides, what code decides */
+.split{display:grid;grid-template-columns:1fr 1fr;margin-top:clamp(56px,7vw,96px);border-top:1px solid var(--line)}
+.split>div{padding:40px clamp(0px,3vw,48px) 0 0}
+.split>div+div{padding-left:clamp(20px,3vw,48px);border-left:1px solid var(--line)}
+.split h3{font-size:clamp(36px,3.3vw,54px)}
+.split ul{margin-top:30px;display:grid;gap:20px}
+.split li{font-size:clamp(20px,1.65vw,25px);color:var(--text);max-width:30ch}
+.split .who{margin-bottom:16px;color:var(--mute)}
+.thesis{margin-top:clamp(56px,7vw,88px);max-width:40ch;font-size:clamp(26px,2.5vw,36px);color:var(--mute)}
+.thesis b{font-weight:500;color:var(--strong)}
+@media (max-width:760px){
+  .split{grid-template-columns:1fr}
+  .split>div+div{padding-left:0;border-left:0;margin-top:40px;border-top:1px solid var(--line)}
+}
+
+/* bento */
+.bento{display:grid;grid-template-columns:repeat(6,1fr);gap:14px}
+.cell{
+  display:flex;flex-direction:column;justify-content:space-between;gap:28px;
+  min-height:330px;padding:32px;border-radius:14px;overflow:hidden;
+}
+.cell h3{font-size:clamp(30px,2.6vw,42px)}
+.cell h3+p{margin-top:12px}
+.cell p{max-width:40ch;color:var(--mute);font-size:19px}
+.cell .tag{margin-bottom:18px}
+.cell-sky .tag{color:var(--sky-ink)}
+.c4{grid-column:span 4}.c3{grid-column:span 3}.c2{grid-column:span 2}
+.cell-sky{background:var(--sky);border:1px solid var(--sky);color:var(--sky-ink);box-shadow:var(--lift)}
+.cell-sky h3,.cell-sky p{color:var(--sky-ink)}
+.cell-sky .big{font-size:clamp(68px,7.4vw,128px)}
+@media (max-width:960px){.c4,.c3,.c2{grid-column:span 6}}
+
+/* karaoke demo: always a dark video frame, in either theme */
+.karaoke{
+  position:relative;display:grid;place-items:center;height:220px;border-radius:10px;overflow:hidden;
+  background:radial-gradient(120% 90% at 30% 20%,#1d2630 0%,#0e1217 70%);
+}
+.karaoke .line{display:flex;gap:.26em;font-weight:700;font-size:clamp(28px,3.2vw,44px);color:#fff;
+  text-shadow:0 0 1px #000,0 2px 0 #000,2px 0 0 #000,-2px 0 0 #000,0 -2px 0 #000;transition:transform .35s var(--ease)}
+.karaoke .line.shout{transform:scale(1.14)}
+.karaoke .w{transition:color .12s}
+.karaoke .w.hot{color:var(--sky)}
+.karaoke .tc{position:absolute;left:14px;top:12px;color:#9AA3AD}
+
+/* names demo */
+.fixes{display:grid;gap:14px;font-size:clamp(24px,2.2vw,32px)}
+.fix{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.fix s{text-decoration:none;color:var(--mute);background:linear-gradient(var(--mute),var(--mute)) 0 55%/0 1.5px no-repeat;transition:background-size .6s var(--ease) .3s}
+.fix em{font-style:normal;color:var(--sky-text);opacity:0;transform:translateX(-8px);transition:opacity .5s var(--ease) .75s,transform .5s var(--ease) .75s}
+.in .fix s{background-size:100% 1.5px}
+.in .fix em{opacity:1;transform:none}
+
+/* code blocks */
+/* Arial is proportional, so aligned comments use a tab stop past the longest key: value */
+.code{tab-size:9em;margin:0;padding:18px 20px;border-radius:10px;background:var(--ground-2);border:1px solid var(--line);color:var(--text);white-space:pre;overflow-x:auto;font-size:15px}
+.code .k{color:var(--sky-text)}
+.code .c{color:var(--mute)}
+
+/* snap modes */
+.snaps{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+.snaps div{padding-top:14px;border-top:1px solid var(--line)}
+.snaps b{display:block;margin-bottom:10px;font-size:15px;font-weight:500;color:var(--sky-text)}
+.snaps span{font-size:18px;color:var(--mute)}
+@media (max-width:560px){.snaps{grid-template-columns:1fr}}
+
+/* annotated command */
+.cmd-grid{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:clamp(32px,5vw,80px);align-items:start}
+.cmd-grid>div:first-child p{margin-top:26px;max-width:30ch;color:var(--mute);font-size:clamp(20px,1.6vw,24px)}
+.cmd{padding:12px 0;border-radius:14px}
+.cmd-row{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:20px;padding:14px 24px;align-items:baseline}
+.cmd-row code{color:var(--strong);font-size:15px;overflow-wrap:anywhere}
+.cmd-row code i{font-style:normal;color:var(--sky-text)}
+.cmd-row span{color:var(--mute);font-size:18px}
+.cmd-row:first-of-type span{padding-right:72px}
+.copy{position:absolute;top:14px;right:14px;height:34px;padding:0 15px;font-size:14px}
+@media (max-width:900px){.cmd-grid{grid-template-columns:1fr}}
+@media (max-width:560px){.cmd-row{grid-template-columns:1fr;gap:6px}}
+
+/* panels */
+.panels{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,6fr);gap:clamp(40px,7vw,120px);align-items:center}
+.shot{position:relative;justify-self:start;width:min(calc(100% - 36px),420px);margin-bottom:36px}
+.shot::before{content:"";position:absolute;inset:36px -36px -36px 36px;border-radius:14px;background:var(--sky)}
+.shot img{position:relative;border-radius:14px;border:1px solid var(--line);box-shadow:0 30px 80px -20px rgba(3,6,10,.6)}
+.panels h2{margin-bottom:30px}
+.panels .lede{font-size:clamp(21px,1.75vw,26px);color:var(--text);max-width:34ch}
+.hosts{display:grid;grid-template-columns:1fr 1fr;gap:28px;margin-top:48px}
+.hosts h3{font-size:32px;margin-bottom:12px}
+.hosts p{color:var(--mute);font-size:19px}
+@media (max-width:900px){.panels{grid-template-columns:1fr}}
+@media (max-width:560px){.hosts{grid-template-columns:1fr}}
+
+/* engineering numbers */
+.stats{display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr;gap:clamp(24px,3vw,48px);margin-top:clamp(48px,6vw,80px);padding-top:36px;border-top:1px solid var(--line)}
+.stat .n{font-size:clamp(68px,7.2vw,144px);color:var(--strong)}
+.stat:first-child .n{color:var(--sky-text)}
+.stat p{margin-top:18px;font-size:19px;color:var(--mute);max-width:26ch}
+@media (max-width:960px){.stats{grid-template-columns:1fr 1fr}}
+@media (max-width:520px){.stats{grid-template-columns:1fr}}
+
+/* install */
+.steps{display:grid;gap:14px;margin-top:clamp(48px,6vw,72px)}
+.steps li{display:grid;grid-template-columns:minmax(180px,1fr) minmax(0,3fr);gap:24px;align-items:center}
+.steps h3{font-size:clamp(28px,2.5vw,38px)}
+.needs{display:flex;flex-wrap:wrap;gap:8px;margin-top:40px}
+.needs .pill{height:38px}
+.cta{
+  display:grid;place-items:center;gap:16px;margin-top:clamp(64px,8vw,112px);min-height:260px;padding:40px 20px;
+  border-radius:14px;text-align:center;
+  transition:background-color .35s var(--ease),border-color .35s var(--ease);
+}
+.cta .display{font-size:clamp(64px,8vw,148px);transition:color .35s var(--ease)}
+.cta .mono{color:var(--mute);transition:color .35s var(--ease)}
+.cta:hover{background:var(--sky);border-color:var(--sky)}
+.cta:hover .display,.cta:hover .mono{color:var(--sky-ink)}
+@media (max-width:640px){.steps li{grid-template-columns:1fr;gap:10px}}
+
+/* footer: the wordmark, whole, at the foot */
+footer{overflow:hidden}
+footer .sec-head{margin-bottom:0}
+.foot{display:flex;flex-wrap:wrap;justify-content:space-between;gap:20px;padding-top:28px;color:var(--mute);font-size:18px}
+.foot nav{display:flex;gap:26px;flex-wrap:wrap}
+.foot a:hover{color:var(--strong)}
+.giant{
+  display:block;margin-top:clamp(32px,4vw,64px);padding:0 var(--gutter) clamp(20px,2.4vw,40px);
+  font-weight:700;font-size:30vw;line-height:.86;letter-spacing:-.065em;
+  color:var(--card-2);white-space:nowrap;user-select:none;
+}
+.giant span{color:var(--sky-text)}
+@supports (animation-timeline:view()){
+  @media (prefers-reduced-motion:no-preference){
+    .giant{animation:lift linear both;animation-timeline:view();animation-range:entry 0% entry 90%}
+  }
+}
+@keyframes lift{from{transform:translateY(35%);opacity:.4}}
+
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{transition-duration:.01ms!important;animation:none!important}
+}
+</style>
+</head>
+<body>
+
+<div class="atmos" aria-hidden="true"><i class="glow"></i><i class="beam b2"></i><i class="beam"></i><i class="beam core"></i></div>
+<canvas id="scene" aria-hidden="true"></canvas>
+<div class="labels" aria-hidden="true"></div>
+
+<header class="nav" id="nav">
+  <a class="brand" href="#top" aria-label="reFire home"><span class="mark"><b>rF</b></span>reFire</a>
+  <ul>
+    <li><a href="#pipeline">Pipeline</a></li>
+    <li><a href="#proof">Proof</a></li>
+    <li><a href="#features">Features</a></li>
+    <li><a href="#panels">Panels</a></li>
+    <li><a href="#install">Install</a></li>
+  </ul>
+  <button class="theme" id="theme" type="button" aria-label="Switch theme"><span data-t="dark">Dark</span><span data-t="light">Light</span></button>
+  <a class="btn btn-line" href="https://github.com/nguyyy/reFire">GitHub</a>
+</header>
+
+<main id="top">
+  <section class="hero edge">
+    <span class="tag motto">Six hours in. Twelve minutes out.</span>
+    <h1 class="display"><span class="ln"><span>Find the story</span></span><span class="ln"><span>in the stream.</span></span></h1>
+    <p>reFire reads a multi-hour Twitch VOD, plans a story, and cuts it for Premiere, After Effects or ffmpeg.</p>
+    <div class="ctas">
+      <a class="btn btn-sky" href="#install">Install</a>
+      <a class="btn btn-line" href="https://github.com/nguyyy/reFire">GitHub</a>
+    </div>
+  </section>
+
+  <section class="story" id="pipeline" aria-label="How a cut is made">
+    <div class="edge"><div class="sec-head" data-reveal><span class="label">How a cut is made</span><span class="label idx">/01</span></div></div>
+    <article class="step edge">
+      <div class="step-card">
+        <div class="spec"><span class="label">Word-timed transcript<br>faster-whisper large-v3-turbo</span><span class="tag">[map_v2.txt]</span></div>
+        <h2 class="display">Hear all of it.</h2>
+        <p>faster-whisper transcribes the whole stream on your GPU. Every sentence gets a timestamp in raw seconds and a mark where the room got loud.</p>
+        <pre class="map mono">[541s] okay okay, one more try.
+<b>[546s] (LOUD) NO WAY, did you see that?!</b>
+[552s] (loud) chat, clip it. clip it.</pre>
+      </div>
+    </article>
+    <article class="step edge">
+      <div class="step-card">
+        <div class="spec"><span class="label">Story outline<br>one Claude session, whole stream</span><span class="tag">[outline.json]</span></div>
+        <h2 class="display">Plan it like an editor.</h2>
+        <p>Claude reads the entire map in one session, decides what the video is about, then casts moments into beats that each have a job. Loud is a hint, not the plan.</p>
+        <div class="roles"><span class="pill">hook</span><span class="pill">setup</span><span class="pill">escalation</span><span class="pill">reversal</span><span class="pill">climax</span><span class="pill">payoff</span><span class="pill">button</span></div>
+      </div>
+    </article>
+    <article class="step edge">
+      <div class="step-card">
+        <div class="spec"><span class="label">Rough cut, then a critic<br>up to two review rounds</span><span class="tag">[rough.mp4]</span></div>
+        <h2 class="display">Cut clean. Reread it.</h2>
+        <p>Beats snap to sentence boundaries and dead air comes out. Then a critic reads the cut as it actually plays and sends back a revised outline, up to two rounds.</p>
+        <div class="outs"><span class="pill">rough.mp4</span><span class="pill">ae/manifest.json</span><span class="pill">captions.srt</span></div>
+      </div>
+    </article>
+  </section>
+
+  <!-- Real YouTube Studio exports (2026-09-25), nothing adjusted. The chart is zy0x clips' daily
+       engaged views (the before/after story). The tiles consolidate both channels, lifetime:
+       zy0x's ten long-form cuts plus the four reFire v1 edits (Su-57, F-35, F-22, Oppenheimer),
+       which are 99.2% of that channel's views. Average % viewed replaces average view duration
+       because a merged duration of 30s edits and 15min cuts describes neither. -->
+  <section class="sec wrap" id="proof" aria-labelledby="proof-h">
+    <div class="sec-head" data-reveal><span class="label">In the wild</span><span class="label idx">/02</span></div>
+    <h2 class="display" id="proof-h" data-reveal>14 views a day.<br><span class="sky">Then 1,855.</span></h2>
+    <p class="proof-lede" data-reveal>zy0x clips posted Shorts until August 2026, then switched to long-form story cuts made with reFire. Below: YouTube Studio numbers across every channel reFire cuts for.</p>
+
+    <figure class="chart surface" data-reveal>
+      <figcaption class="chart-top"><span class="label">Daily engaged views</span><span class="mono">zy0x clips, Jul 25 to Sep 25, 2026</span></figcaption>
+      <div class="plot" id="plot">
+        <svg id="chart" role="img" aria-label="Daily engaged views. zy0x clips: about 14 a day until the first long-form cut, then an average of 1,855 a day after the first long-form cut on August 7, peaking at 12,086 on September 17."></svg>
+        <div class="tip" id="tip" hidden></div>
+      </div>
+      <div class="chart-foot">
+        <span class="key"><i></i>Long-form upload</span>
+        <span>Average before the first cut: <b class="num">14</b> a day. After: <b class="num">1,855</b> a day.</span>
+      </div>
+      <details class="data">
+        <summary>Show the data, by week</summary>
+        <table><thead><tr><th>Week</th><th>Engaged views</th></tr></thead><tbody id="weeks"></tbody></table>
+      </details>
+    </figure>
+
+    <div class="pstats">
+      <div class="pstat big" data-reveal><div class="n">4.94M</div><p>thumbnail impressions</p></div>
+      <div class="pstat surface" data-reveal style="--i:1"><div class="n">624K</div><p>views</p></div>
+      <div class="pstat surface" data-reveal style="--i:2"><div class="n">+1,052</div><p>subscribers gained</p></div>
+      <div class="pstat surface" data-reveal><div class="n">13,070</div><p>hours watched</p></div>
+      <div class="pstat surface" data-reveal style="--i:1"><div class="n">98.7%</div><p>likes</p></div>
+      <div class="pstat surface" data-reveal style="--i:2"><div class="n">79%</div><p>of each video watched, on average</p></div>
+      <div class="pstat surface" data-reveal style="--i:3"><div class="n">8.30%</div><p>click-through, up to 11.1%</p></div>
+    </div>
+    <p class="fine" data-reveal>All reFire cuts across both channels, current and v1, lifetime. YouTube Studio exports, Sep 25, 2026.</p>
+
+    <div class="top" data-reveal>
+      <p class="label">Top cuts</p>
+      <ol>
+        <li><a href="https://www.youtube.com/watch?v=uOz6n-YvVT8"><span class="rank mono">01</span><span class="t">The Su-57 (edit)</span><span class="m">460K views</span><span class="m">9.00% CTR &nearr;</span></a></li>
+        <li><a href="https://www.youtube.com/watch?v=BC4gHXCuRys"><span class="rank mono">02</span><span class="t">zy0x plays DIRE STYGIAN with 3 of his BOYFRIENDS</span><span class="m">49.1K views</span><span class="m">6.63% CTR &nearr;</span></a></li>
+        <li><a href="https://www.youtube.com/watch?v=JHpsvWjNtjA"><span class="rank mono">03</span><span class="t">the BEST 4 STAR BOW? (zy0x 7.1 weapon banner review)</span><span class="m">41.6K views</span><span class="m">7.59% CTR &nearr;</span></a></li>
+        <li><a href="https://www.youtube.com/watch?v=SJftrrrgULQ"><span class="rank mono">04</span><span class="t">I Reviewed ZAJEF's Genshin Account... FINALLY</span><span class="m">37.6K views</span><span class="m">5.76% CTR &nearr;</span></a></li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="sec wrap" aria-labelledby="split-h">
+    <div class="sec-head" data-reveal><span class="label">Architecture</span><span class="label idx">/03</span></div>
+    <h2 class="display" id="split-h" data-reveal>Judgment from the model.<br><span class="sky">Cuts from code.</span></h2>
+    <div class="split">
+      <div data-reveal>
+        <p class="who label">Claude, once per run</p>
+        <h3 class="display">Decides</h3>
+        <ul>
+          <li>What story the stream tells, and what it promises the viewer.</li>
+          <li>Which moments become beats, and the job each one does.</li>
+          <li>Whether quest dialogue carries the plot or is filler to drop whole.</li>
+          <li>Whether the finished cut actually reads.</li>
+        </ul>
+      </div>
+      <div data-reveal style="--i:2">
+        <p class="who label">Deterministic, local</p>
+        <h3 class="display">Executes</h3>
+        <ul>
+          <li>Exact in and out points, snapped so nothing ends mid-word.</li>
+          <li>Which silence is dead air, checked against a speech pass.</li>
+          <li>Captions, timestamps and the project manifest.</li>
+          <li>Caching, so a second cut of the same VOD skips the heavy work.</li>
+        </ul>
+      </div>
+    </div>
+    <p class="thesis" data-reveal><b>Expensive reasoning once, cheap local work many times.</b> Transcription, chaptering and per-clip scoring stay on your machine with faster-whisper and ollama.</p>
+  </section>
+
+  <section class="sec wrap" id="features" aria-labelledby="feat-h">
+    <div class="sec-head" data-reveal><span class="label">Features</span><span class="label idx">/04</span></div>
+    <h2 class="display" id="feat-h" data-reveal style="margin-bottom:clamp(48px,6vw,80px)">Every rule came<br>from a bad cut.</h2>
+    <div class="bento">
+      <article class="cell c4 surface spot" data-reveal>
+        <div class="karaoke" id="karaoke" aria-label="Karaoke caption preview">
+          <span class="tc mono" id="kara-tc">[1204s]</span>
+          <div class="line" id="kara-line"></div>
+        </div>
+        <div>
+          <span class="tag">[emphasis.py]</span>
+          <h3 class="display">Captions that shout back</h3>
+          <p>Word-by-word karaoke subtitles, lowercase by default and uppercase when the audio spikes.</p>
+        </div>
+      </article>
+      <article class="cell c2 surface spot" data-reveal style="--i:1">
+        <div class="fixes" aria-label="Caption corrections">
+          <div class="fix"><s>mawika</s><em>Mavuika</em></div>
+          <div class="fix"><s>kinnich</s><em>Kinich</em></div>
+          <div class="fix"><s>arlekino</s><em>Arlecchino</em></div>
+        </div>
+        <div>
+          <span class="tag">[caption_fix.py]</span>
+          <h3 class="display">Names, spelled right</h3>
+          <p>One pass rereads the captions against the game glossary and the VOD's own chat. Accepted fixes are learned and reapplied free next time.</p>
+        </div>
+      </article>
+      <article class="cell c3 surface spot" data-reveal>
+        <pre class="code mono"><span class="c">---</span>
+<span class="k">pace:</span> 0.35	<span class="c"># 1.5-4s shots</span>
+<span class="k">snap:</span> transient	<span class="c"># cut on the peak</span>
+<span class="k">stack:</span> 8	<span class="c"># montage cold open</span>
+<span class="k">keep_build:</span> false
+<span class="k">captions:</span> emph
+<span class="c">---</span>
+Cut on the peak, not after it.
+Never let a moment fully resolve.</pre>
+        <div>
+          <span class="tag">[style.py]</span>
+          <h3 class="display">Style as a document</h3>
+          <p>Prose tells the director how to cut. Frontmatter sets the numbers prose can't reach. Any flag on the command line still wins.</p>
+        </div>
+      </article>
+      <article class="cell c3 cell-sky" data-reveal style="--i:1">
+        <div class="big">239s &rarr; 24s</div>
+        <div>
+          <span class="tag">[silero vad]</span>
+          <h3 class="display">Silence that wasn't</h3>
+          <p>Speech the dead-air cutter deleted across seven real cuts, before silence was checked against a Silero speech pass instead of the transcript alone.</p>
+        </div>
+      </article>
+      <article class="cell c2 surface spot" data-reveal>
+        <code class="mono sky" style="font-size:17px">--stack 8</code>
+        <div>
+          <span class="tag">[pacing.py]</span>
+          <h3 class="display">Cold opens that pay off</h3>
+          <p>A montage of unexplained moments before beat one, best last. Each is footage a later beat actually delivers.</p>
+        </div>
+      </article>
+      <article class="cell c4 surface spot" data-reveal style="--i:1">
+        <div class="snaps">
+          <div><b>sentence</b><span>The default. A cut never lands mid-sentence.</span></div>
+          <div><b>phrase</b><span>Lands on natural pauses for denser styles. Still never mid-word.</span></div>
+          <div><b>transient</b><span>Lands on the audio peak and leaves 0.3s before the joke resolves.</span></div>
+        </div>
+        <div>
+          <span class="tag">[--snap]</span>
+          <h3 class="display">Cuts land where you choose</h3>
+          <p>The snap mode is the real floor on shot length. The last cut of the video always keeps its sentence, so the ending never stops dead.</p>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <section class="sec wrap" aria-labelledby="cmd-h">
+    <div class="sec-head" data-reveal><span class="label">Usage</span><span class="label idx">/05</span></div>
+    <div class="cmd-grid">
+      <div data-reveal>
+        <h2 class="display" id="cmd-h">One command.</h2>
+        <p>Only the VOD is required. Every flag moves a number the pipeline runs on, not an adjective in a prompt.</p>
+      </div>
+      <div class="cmd surface spot" data-reveal style="--i:1">
+        <button class="btn btn-line copy" id="copy" type="button">Copy</button>
+        <div class="cmd-row"><code class="mono">refire make <i>1762930614</i></code><span>Any Twitch VOD id. Downloaded once, cached.</span></div>
+        <div class="cmd-row"><code class="mono">--brief <i>"the gacha pulls and the rage"</i></code><span>What the cut is about. Leave it out and the director finds the stream's own story.</span></div>
+        <div class="cmd-row"><code class="mono">--style <i>ryukStyl.md</i></code><span>How to cut it: free text, or a style document.</span></div>
+        <div class="cmd-row"><code class="mono">--duration <i>12m</i></code><span>A target, not a cap. The cut may land within 35% of it.</span></div>
+        <div class="cmd-row"><code class="mono">--pace <i>0.8</i></code><span>Below 1 means shorter shots and more beats.</span></div>
+        <div class="cmd-row"><code class="mono">--render</code><span>Also renders an ffmpeg draft to rough.mp4.</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec wrap" id="panels" aria-labelledby="panels-h">
+    <div class="sec-head" data-reveal><span class="label">Editors</span><span class="label idx">/06</span></div>
+    <div class="panels">
+      <figure class="shot" data-reveal>
+        <img src="panel.webp" width="840" height="1340" alt="The reFire Premiere Pro panel during a run, on the Story stage: Claude is writing the story outline." loading="lazy">
+      </figure>
+      <div>
+        <h2 class="display" id="panels-h" data-reveal>Or never leave<br>your editor.</h2>
+        <p class="lede" data-reveal>The panel runs the whole pipeline, streams its progress, and loads the result when it lands. Recut by hand, press Recaption, and the captions follow your edit.</p>
+        <div class="hosts">
+          <div data-reveal><h3 class="display">Premiere Pro</h3><p>Every chosen clip on V1 in story order, dead air already cut, with a captions track in the reFire bin.</p></div>
+          <div data-reveal style="--i:1"><h3 class="display">After Effects</h3><p>The full treatment: keyframed punch zooms, emotes and sfx, section cards and a ducked music bed.</p></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec wrap" aria-labelledby="num-h">
+    <div class="sec-head" data-reveal><span class="label">Under the hood</span><span class="label idx">/07</span></div>
+    <h2 class="display" id="num-h" data-reveal>Cheap to run.<br>Quick to redo.</h2>
+    <div class="stats">
+      <div class="stat" data-reveal><div class="n">440 MB</div><p>to scan a six-hour stream for its loudest moments with <code class="mono">refire loud</code>, instead of about 15 GB. Video is fetched only for the picks.</p></div>
+      <div class="stat" data-reveal style="--i:1"><div class="n">&lt;1s</div><p>to rank 4.8 hours of cached audio. No whisper pass, no Claude call.</p></div>
+      <div class="stat" data-reveal style="--i:2"><div class="n">100%</div><p>of the stream map reused between review rounds. It was 0.7% before the prompt was reordered.</p></div>
+      <div class="stat" data-reveal style="--i:3"><div class="n">318</div><p>tests in about two seconds, with no network and no GPU.</p></div>
+    </div>
+  </section>
+
+  <section class="sec wrap" id="install" aria-labelledby="inst-h">
+    <div class="sec-head" data-reveal><span class="label">Install</span><span class="label idx">/08</span></div>
+    <h2 class="display" id="inst-h" data-reveal>Runs on your machine.</h2>
+    <ol class="steps">
+      <li data-reveal><h3 class="display">Install uv</h3><pre class="code mono">winget install astral-sh.uv</pre></li>
+      <li data-reveal style="--i:1"><h3 class="display">Sync</h3><pre class="code mono">uv sync</pre></li>
+      <li data-reveal style="--i:2"><h3 class="display">Make a cut</h3><pre class="code mono">uv run refire make <span class="k">&lt;vod_id&gt;</span> --duration 12m --render</pre></li>
+    </ol>
+    <div class="needs" data-reveal>
+      <span class="pill">ffmpeg on PATH</span>
+      <span class="pill">NVIDIA GPU with CUDA</span>
+      <span class="pill">ollama + nomic-embed-text</span>
+      <span class="pill">TwitchDownloaderCLI.exe</span>
+      <span class="pill">Claude CLI, an API key, or --local-director</span>
+    </div>
+    <a class="cta surface" href="https://github.com/nguyyy/reFire" data-reveal>
+      <span class="display">GitHub &nearr;</span>
+      <span class="mono">nguyyy/reFire</span>
+    </a>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="sec-head" data-reveal><span class="label">reFire</span><span class="label idx">Story cuts from long streams</span></div>
+    <div class="foot">
+      <span>Built for long Twitch streams. Runs on your machine.</span>
+      <nav aria-label="Footer">
+        <a href="https://github.com/nguyyy/reFire#readme">README</a>
+        <a href="https://github.com/nguyyy/reFire/blob/master/docs/director-pipeline.md">Director pipeline</a>
+        <a href="https://github.com/nguyyy/reFire">GitHub</a>
+      </nav>
+    </div>
+  </div>
+  <span class="giant" aria-hidden="true">re<span>Fire</span></span>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/lenis@1.1.13/dist/lenis.min.js"></script>
+<script type="module">
+const root = document.documentElement;
+const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/* ---- section headlines become masked lines, like the hero ------------------------------ */
+document.querySelectorAll("h2.display[data-reveal]").forEach(h => {
+  h.innerHTML = h.innerHTML.split(/<br\s*\/?>/i).map(l => `<span class="ln"><span>${l}</span></span>`).join("");
+});
+
+/* ---- reveals, nav state, active story step: IntersectionObserver only ----------------- */
+const once = new IntersectionObserver(es => es.forEach(e => {
+  if (e.isIntersecting) { e.target.classList.add("in"); once.unobserve(e.target); }
+}), { rootMargin: "0px 0px -8% 0px" });
+document.querySelectorAll("[data-reveal]").forEach(el => once.observe(el));
+
+const band = new IntersectionObserver(es => es.forEach(e => e.target.classList.toggle("on", e.isIntersecting)),
+  { rootMargin: "-38% 0px -38% 0px" });
+document.querySelectorAll(".step").forEach(el => band.observe(el));
+
+const nav = document.getElementById("nav");
+new IntersectionObserver(([e]) => nav.classList.toggle("solid", !e.isIntersecting))
+  .observe(document.querySelector(".hero h1"));
+
+/* ---- smooth scroll -------------------------------------------------------------------- */
+const lenis = !reduce && window.Lenis ? new window.Lenis({ lerp: 0.09 }) : null;
+document.querySelectorAll('a[href^="#"]').forEach(a => a.addEventListener("click", ev => {
+  const id = a.getAttribute("href"), el = id === "#top" ? 0 : document.querySelector(id);
+  if (el === null) return;
+  ev.preventDefault();
+  if (lenis) lenis.scrollTo(el, { duration: 1.4 });
+  else (el === 0 ? window.scrollTo(0, 0) : el.scrollIntoView());
+}));
+
+/* ---- cursor spotlight on cards (hover-capable pointers only) --------------------------- */
+if (matchMedia("(hover: hover) and (pointer: fine)").matches) {
+  document.addEventListener("pointermove", e => {
+    const el = e.target.closest && e.target.closest(".spot");
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    el.style.setProperty("--mx", `${(e.clientX - r.left).toFixed(0)}px`);
+    el.style.setProperty("--my", `${(e.clientY - r.top).toFixed(0)}px`);
+  }, { passive: true });
+}
+
+/* ---- copy the command ----------------------------------------------------------------- */
+const copy = document.getElementById("copy");
+copy.addEventListener("click", async () => {
+  const text = [...document.querySelectorAll(".cmd-row code")].map(c => c.textContent).join(" \\\n  ");
+  try { await navigator.clipboard.writeText(text); copy.textContent = "Copied"; }
+  catch { copy.textContent = "Select it"; }
+  setTimeout(() => (copy.textContent = "Copy"), 1600);
+});
+
+/* ---- karaoke preview: 3 words per line (reFire's default), uppercase on the spike ------ */
+const LINES = [["okay", "last", "pull"], ["i", "promise", "chat"], ["NO", "WAY", "WHAT"], ["IS", "THAT", "HER"]];
+const kLine = document.getElementById("kara-line"), kTc = document.getElementById("kara-tc");
+let kl = 2, kw = 1, kTimer = null;
+function kDraw() {
+  const words = LINES[kl];
+  kLine.classList.toggle("shout", /^[A-Z]+$/.test(words[0]));
+  kLine.innerHTML = words.map((w, i) => `<span class="w${i === kw ? " hot" : ""}">${w}</span>`).join("");
+  kTc.textContent = `[${1204 + kl * 2}s]`;
+}
+kDraw();
+if (!reduce) new IntersectionObserver(([e]) => {
+  clearInterval(kTimer);
+  if (e.isIntersecting) kTimer = setInterval(() => {
+    if (++kw >= LINES[kl].length) { kw = 0; kl = (kl + 1) % LINES.length; }
+    kDraw();
+  }, 340);
+}).observe(document.getElementById("karaoke"));
+
+/* ---- proof chart: daily engaged views, straight from the YouTube Studio export --------- */
+const VIEWS_ALL = [14,14,14,16,14,8,15,10,14,26,13,13,14,11,16,14,9,14,24,20,18,24,4,16,20,14,12,11,10,12,13,21,21,18,17,16,17,9,10,18,11,10,10,13,17,10,15,8,10,8,8,11,16,6,14,14,16,10,10,18,20,14,14,19,22,18,11,24,26,21,16,11,12,16,15,7,11,15,11,12,8,24,11,12,15,10,15,16,10,20,91,49,333,2089,733,884,3612,3237,1870,3722,3321,3152,3057,3563,2407,1962,2008,2152,1959,2198,1303,1324,911,3160,1243,552,464,451,377,222,266,152,171,159,144,154,192,203,151,155,2149,12086,3540,4637,3544,4942,3993,1406,1237,1057];
+const WEEKS = [["2026-05-09",95],["2026-05-16",101],["2026-05-23",115],["2026-05-30",101],["2026-06-06",112],["2026-06-13",91],["2026-06-20",83],["2026-06-27",77],["2026-07-04",102],["2026-07-11",141],["2026-07-18",88],["2026-07-25",93],["2026-08-01",177],["2026-08-08",10937],["2026-08-15",21092],["2026-08-22",12906],["2026-08-29",7158],["2026-09-05",1268],["2026-09-12",18476],["2026-09-19",20816]];
+const UPLOADS = ["2026-08-07","2026-08-12","2026-08-13","2026-08-16","2026-08-18","2026-08-20","2026-08-26","2026-08-30","2026-09-16","2026-09-17"];
+// the chart opens on Jul 25: two weeks of "before" read as flat, three months just read as empty
+const VIEWS = VIEWS_ALL.slice(77);
+const DAY = 864e5, START = Date.UTC(2026, 6, 25), YMAX = 13000, YTICKS = [0, 4000, 8000, 12000];
+const dayIdx = s => Math.round((Date.parse(s) - START) / DAY);
+const upSet = new Set(UPLOADS.map(dayIdx));
+const dfmt = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+const nfmt = n => n.toLocaleString("en-US");
+const plot = document.getElementById("plot"), svg = document.getElementById("chart"), tip = document.getElementById("tip");
+document.getElementById("weeks").innerHTML = WEEKS.filter(([d]) => d >= "2026-07-25").map(([d, n]) =>
+  `<tr><td>${dfmt.format(Date.parse(d)).replace(/, \d{4}$/, "")}</td><td>${nfmt(n)}</td></tr>`).join("");
+let G = null;
+function drawChart() {
+  const W = plot.clientWidth, H = plot.clientHeight, L = 48, R = 12, T = 12, B = 40, n = VIEWS.length;
+  const x = i => L + (i / (n - 1)) * (W - L - R), y = v => T + (1 - v / YMAX) * (H - T - B);
+  const pts = VIEWS.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" L");
+  let s = `<defs><linearGradient id="fade" x1="0" y1="0" x2="0" y2="1"><stop class="fade-stop" offset="0" stop-opacity=".28"/><stop class="fade-stop" offset="1" stop-opacity="0"/></linearGradient></defs>`;
+  for (const t of YTICKS) s += `<line class="${t ? "grid" : "base"}" x1="${L}" x2="${W - R}" y1="${y(t)}" y2="${y(t)}"/><text class="ax" x="${L - 10}" y="${y(t) + 4}" text-anchor="end">${t ? t / 1000 + "K" : "0"}</text>`;
+  for (const d of ["2026-08-01", "2026-08-15", "2026-09-01", "2026-09-15"]) {   // date labels, twice a month
+    s += `<text class="ax" x="${x(dayIdx(d))}" y="${H - 6}" text-anchor="middle">${dfmt.format(Date.parse(d)).replace(/, \d{4}$/, "")}</text>`;
+  }
+  const first = dayIdx(UPLOADS[0]), fx = x(first);
+  // on narrow plots the peak label owns the top edge, so this note drops to mid-height
+  s += `<line class="mark" x1="${fx}" x2="${fx}" y1="${T}" y2="${y(0)}"/><text class="note" x="${fx - 10}" y="${W < 640 ? y(6500) : T + 14}" text-anchor="end">First long-form cut</text>`;
+  s += `<path class="area" d="M${x(0)},${y(0)} L${pts} L${x(n - 1)},${y(0)} Z"/><path class="line" pathLength="1" d="M${pts}"/>`;
+  for (const i of upSet) s += `<rect class="up" x="${(x(i) - 1.5).toFixed(1)}" y="${y(0) + 6}" width="3" height="10" rx="1.5"/>`;
+  const pk = VIEWS.indexOf(Math.max(...VIEWS));
+  s += `<text class="peak" x="${x(pk) - 12}" y="${y(VIEWS[pk]) + 12}" text-anchor="end">${nfmt(VIEWS[pk])} on Sep 17</text>`;
+  s += `<line class="cross" id="cross" y1="${T}" y2="${y(0)}"/><circle class="dot" id="dot" r="5"/>`;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML = s;
+  G = { x, y, L, R, W, H, n };
+}
+drawChart();
+new ResizeObserver(drawChart).observe(plot);
+function hover(clientX) {
+  const r = svg.getBoundingClientRect();
+  const i = Math.max(0, Math.min(G.n - 1, Math.round((clientX - r.left - G.L) / (G.W - G.L - G.R) * (G.n - 1))));
+  const cx = G.x(i), cy = G.y(VIEWS[i]);
+  const cross = svg.querySelector("#cross"), dot = svg.querySelector("#dot");
+  cross.setAttribute("x1", cx); cross.setAttribute("x2", cx);
+  dot.setAttribute("cx", cx); dot.setAttribute("cy", cy);
+  tip.innerHTML = `${dfmt.format(START + i * DAY)}<b>${nfmt(VIEWS[i])} engaged views</b>${upSet.has(i) ? "<em>Long-form upload</em>" : ""}`;
+  tip.hidden = false;
+  // above the point when there is room; otherwise beside the crosshair, never over the header
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  let tx = cx - tw / 2, ty = cy - th - 16;
+  if (ty < 0) { ty = Math.min(G.H - th, Math.max(0, cy - th / 2)); tx = cx - tw - 16 >= 0 ? cx - tw - 16 : cx + 16; }
+  tip.style.transform = `translate(${Math.max(0, Math.min(G.W - tw, tx))}px, ${ty}px)`;
+  plot.classList.add("hover");
+}
+plot.addEventListener("pointermove", e => hover(e.clientX));
+plot.addEventListener("pointerleave", () => { plot.classList.remove("hover"); tip.hidden = true; });
+
+/* ---- theme: saved choice wins, otherwise follow the OS -------------------------------- */
+const themeBtn = document.getElementById("theme");
+const osLight = matchMedia("(prefers-color-scheme: light)");
+let sceneTheme = null;   // set once the 3D scene exists
+let saved = null;
+try { saved = localStorage.getItem("refire-theme"); } catch {}
+function setTheme(t) {
+  root.dataset.theme = t;
+  document.querySelector('meta[name="theme-color"]').content = t === "light" ? "#E6ECF1" : "#08090C";
+  themeBtn.setAttribute("aria-label", t === "light" ? "Switch to dark theme" : "Switch to light theme");
+  if (sceneTheme) sceneTheme(t);
+}
+setTheme(root.dataset.theme);
+osLight.addEventListener("change", e => { if (!saved) setTheme(e.matches ? "light" : "dark"); });
+themeBtn.addEventListener("click", () => {
+  const t = root.dataset.theme === "light" ? "dark" : "light";
+  saved = t;
+  try { localStorage.setItem("refire-theme", t); } catch {}
+  if (!document.startViewTransition || reduce) return setTheme(t);
+  // the new theme opens as a circle from the switch
+  const r = themeBtn.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
+  const end = Math.hypot(Math.max(x, innerWidth - x), Math.max(y, innerHeight - y));
+  document.startViewTransition(() => setTheme(t)).ready.then(() => root.animate(
+    { clipPath: [`circle(0px at ${x}px ${y}px)`, `circle(${end}px at ${x}px ${y}px)`] },
+    { duration: 700, easing: "cubic-bezier(.16,1,.3,1)", pseudoElement: "::view-transition-new(root)" }));
+});
+
+/* ---- the atmosphere: drifts with page progress and sways slowly on its own ------------- */
+const beams = document.querySelectorAll(".atmos .beam:not(.b2)"), beam2 = document.querySelector(".atmos .b2"), glow = document.querySelector(".atmos .glow");
+const beamAt = (p, s) => ({
+  tx: -18 + p * 16 + Math.sin(s * 0.07) * 1.8,
+  ty: -22 + p * 20 + Math.cos(s * 0.05) * 1.4,
+  a: 26 - p * 8 + Math.sin(s * 0.11) * 2.6,
+});
+function atmos(p, s) {
+  if (reduce) return;
+  const B = beamAt(p, s), tf = `translate(${B.tx.toFixed(2)}vw, ${B.ty.toFixed(2)}vh) rotate(${B.a.toFixed(2)}deg)`;
+  beams.forEach(el => (el.style.transform = tf));
+  // a fainter searchlight crossing the other way, sweeping on a slower clock
+  beam2.style.transform = `translate(${(24 + Math.sin(s * 0.05) * 5).toFixed(2)}vw, ${(-30 + p * 18).toFixed(2)}vh) rotate(${(-34 + Math.sin(s * 0.085) * 6).toFixed(2)}deg)`;
+  glow.style.transform = `translate(${(38 - p * 22 + Math.sin(s * 0.06) * 6).toFixed(2)}vw, ${(40 - p * 30 + Math.cos(s * 0.045) * 5).toFixed(2)}vh)`;
+}
+const progress = () => { const max = root.scrollHeight - innerHeight; return max > 0 ? Math.min(1, scrollY / max) : 0; };
+
+/* ---- the 3D reel ------------------------------------------------------------------------
+   One Twitch VOD as ~1500 frame slabs, height = loudness. Scrolling the pipeline section
+   unwinds the reel into a flat timeline (map_v2.txt), lights the beats the director cast
+   (outline.json), then pulls only those together into the short cut (rough.mp4). Dust drifts
+   through the projector beam for the whole page.
+   The loudness curve is synthetic and seeded, for illustration only. */
+let THREE;
+try { THREE = await import("https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.min.js"); }
+catch { THREE = null; }
+
+const canvas = document.getElementById("scene");
+const story = document.getElementById("pipeline");
+let renderer = null;
+if (THREE) {
+  try { renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: "high-performance" }); }
+  catch { renderer = null; }
+}
+
+if (!renderer) {
+  canvas.remove();
+  (function tick(t) { lenis && lenis.raf(t); atmos(progress(), t / 1000); requestAnimationFrame(tick); })(0);
+} else {
+  const PALETTE = {
+    dark:  { ground: 0x08090c, dim: 0x6e7a88, lit: 0xc3ccd6, hot: 0xf2f6f9, dark: 0x3c4550, sky: 0x8ccff4, line: 0x3a4450, mote: 0xe2f3fd, moteA: 0.7 },
+    light: { ground: 0xe6ecf1, dim: 0xa3aeb9, lit: 0x55616d, hot: 0x121920, dark: 0xcfd7de, sky: 0x1a86c7, line: 0xa9b4be, mote: 0x225c85, moteA: 0.35 },
+  };
+  const C = { dim: new THREE.Color(), lit: new THREE.Color(), hot: new THREE.Color(), dark: new THREE.Color(), sky: new THREE.Color() };
+
+  renderer.setClearColor(0x000000, 0);
+  const scene = new THREE.Scene();
+  scene.fog = new THREE.Fog(0x08090c, 10, 25);
+  const camera = new THREE.PerspectiveCamera(36, 1, 0.1, 60);
+  scene.add(new THREE.HemisphereLight(0xdcecf7, 0x0a0c0f, 1.5));
+  const sun = new THREE.DirectionalLight(0xffffff, 2);
+  sun.position.set(3, 6, 8);
+  scene.add(sun);
+
+  // seeded PRNG so the reel is the same on every load
+  let seed = 11;
+  const rand = () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+
+  const N = 1500;
+  const loud = new Float32Array(N), beat = new Int8Array(N).fill(-1);
+  const p0 = rand() * 6.3, p1 = rand() * 6.3, p2 = rand() * 6.3;
+  for (let i = 0; i < N; i++) {
+    const x = i / N;
+    loud[i] = 0.2 + 0.08 * Math.sin(x * 41 + p0) + 0.06 * Math.sin(x * 127 + p1) + 0.05 * Math.sin(x * 293 + p2) + 0.16 * rand() * rand();
+  }
+  const spike = (c, amp) => { for (let k = -14; k <= 14; k++) { const i = c + k; if (i < 0 || i >= N) continue;
+    loud[i] = Math.max(loud[i], amp * Math.exp(-(k * k) / 30) + 0.12 * rand()); } };
+  const ROLES = ["hook", "setup", "escalation", "reversal", "climax", "payoff", "button"];
+  const AT = [0.08, 0.2, 0.33, 0.46, 0.6, 0.74, 0.9];
+  AT.forEach((a, b) => {
+    const c = Math.round(a * N);
+    for (let i = c - 20; i < c - 9; i++) beat[i] = b;   // the setup segment
+    for (let i = c - 3; i < c + 9; i++) beat[i] = b;    // jump cut, then the payoff segment
+    spike(c + 1, 0.9 + 0.1 * rand());
+  });
+  [0.14, 0.27, 0.53, 0.67, 0.83].forEach(a => spike(Math.round(a * N), 0.85));  // loud, not story
+  for (let i = 0; i < N; i++) loud[i] = Math.min(1, Math.max(0.04, loud[i]));
+
+  // state A: an Archimedean spiral, stream start on the outside like tape on a reel
+  const reelX = new Float32Array(N), reelY = new Float32Array(N), reelA = new Float32Array(N);
+  { let th = 0; const r0 = 0.5, b = 0.068;
+    for (let j = 0; j < N; j++) { const i = N - 1 - j, r = r0 + b * th;
+      reelX[i] = Math.cos(th) * r; reelY[i] = Math.sin(th) * r; reelA[i] = th; th += 0.05 / r; } }
+  // state B/C: a flat timeline. state D: selected slabs packed into the cut.
+  const L = 22, lineX = new Float32Array(N), cutX = new Float32Array(N);
+  let cutSpan = 0;
+  { const sel = []; for (let i = 0; i < N; i++) { lineX[i] = (i / (N - 1) - 0.5) * L; if (beat[i] >= 0) sel.push(i); }
+    let x = 0, prev = -1;
+    sel.forEach((i, k) => { if (k) x += beat[i] !== beat[prev] ? 0.26 : i - prev > 1 ? 0.09 : 0.052; cutX[i] = x; prev = i; });
+    sel.forEach(i => (cutX[i] -= x / 2));
+    cutSpan = x + 0.1; }
+  // the reel's outer diameter, spikes included, so it can be fitted to its slot
+  let reelD = 0;
+  for (let i = 0; i < N; i++) reelD = Math.max(reelD, Math.hypot(reelX[i], reelY[i]) + 0.2);
+  reelD *= 2;
+  const beatMid = AT.map(a => Math.round(a * N) + 1);
+
+  // Metal only reads as metal with something to reflect: a studio baked into an environment
+  // map, one per theme. A floor-to-ceiling gradient, a softbox overhead (the lit top edges),
+  // a sky rim on the left, and rings of light around the horizon with dark between them, so
+  // the faces show bright bands that slide up and down them as the camera orbits, the way
+  // chrome catches a studio. The rings sit at the angles the camera corners reflect.
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  const bakeStudio = (floor, ceil, k) => {
+    const studio = new THREE.Scene(), room = new THREE.SphereGeometry(20, 32, 16), yp = room.attributes.position;
+    const rc = new Float32Array(yp.count * 3), g = new THREE.Color();
+    for (let i = 0; i < yp.count; i++) g.setScalar(floor).lerp(ceil, Math.max(0, yp.getY(i) / 20) ** 0.6).toArray(rc, i * 3);
+    room.setAttribute("color", new THREE.BufferAttribute(rc, 3));
+    studio.add(new THREE.Mesh(room, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide })));
+    const light = (geo, c, s) => new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: new THREE.Color(c).multiplyScalar(s * k), side: THREE.DoubleSide }));
+    const box = light(new THREE.PlaneGeometry(18, 2.2), 0xffffff, 8); box.position.set(0, 10, 3); box.lookAt(0, 0, 0); studio.add(box);
+    const rim = light(new THREE.PlaneGeometry(2.5, 14), 0x8ccff4, 3); rim.position.set(-11, 1, 1); rim.lookAt(0, 0, 0); studio.add(rim);
+    for (const [deg, h, s] of [[38, 2.4, 3], [15, 1.6, 4], [-12, 0.9, 2], [-30, 1.4, 1.2]]) {
+      const ring = light(new THREE.CylinderGeometry(15, 15, h, 64, 1, true), 0xffffff, s);
+      ring.position.y = 15 * Math.tan(deg * Math.PI / 180); studio.add(ring);
+    }
+    return pmrem.fromScene(studio, 0.03).texture;
+  };
+  const STUDIO = { dark: bakeStudio(0.05, new THREE.Color(0.42, 0.47, 0.52), 1), light: bakeStudio(0.55, new THREE.Color(0.95, 0.97, 1), 0.6) };
+  pmrem.dispose();
+  const slabMat = new THREE.MeshStandardMaterial({ roughness: 0.16, metalness: 0.95, transparent: true });
+  const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), slabMat, N);
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(N * 3), 3);
+  mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+  const group = new THREE.Group();
+  group.add(mesh);
+  scene.add(group);
+
+
+  // dust: brightest inside the projector beam, rising with time and scroll
+  const tall0 = innerWidth / innerHeight < 0.9, M = tall0 ? 600 : 1300;
+  const mPos = new Float32Array(M * 3), mSeed = new Float32Array(M);
+  for (let i = 0; i < M; i++) {
+    mPos[i * 3] = (rand() - 0.5) * 22; mPos[i * 3 + 1] = (rand() - 0.5) * 12; mPos[i * 3 + 2] = -6 + rand() * 9;
+    mSeed[i] = rand();
+  }
+  const moteGeo = new THREE.BufferGeometry();
+  moteGeo.setAttribute("position", new THREE.BufferAttribute(mPos, 3));
+  moteGeo.setAttribute("aSeed", new THREE.BufferAttribute(mSeed, 1));
+  const moteMat = new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    uniforms: { uTime: { value: 0 }, uScroll: { value: 0 }, uPR: { value: 1 }, uColor: { value: new THREE.Color() }, uAlpha: { value: 0.9 },
+      uBeam: { value: new THREE.Vector4(-2, 1.5, 0.9, -0.44) }, uBeamW: { value: 1.3 } },
+    vertexShader: `
+      attribute float aSeed;
+      uniform float uTime, uScroll, uPR, uBeamW;
+      uniform vec4 uBeam;
+      varying float vA;
+      void main() {
+        vec3 p = position;
+        p.y = mod(p.y + uScroll + uTime * (0.05 + aSeed * 0.08) + 6.0, 12.0) - 6.0;
+        p.x += sin(uTime * 0.3 + aSeed * 40.0) * 0.45;
+        vec2 q = p.xy - uBeam.xy;
+        float along = dot(q, uBeam.zw);
+        float off = length(q - uBeam.zw * along) / uBeamW;
+        float beam = exp(-off * off * 0.7);
+        vec4 mv = modelViewMatrix * vec4(p, 1.0);
+        float twinkle = 0.55 + 0.45 * sin(uTime * (0.7 + aSeed * 1.3) + aSeed * 30.0);
+        vA = (0.16 + 0.84 * beam) * twinkle * (1.0 - smoothstep(8.0, 20.0, -mv.z));
+        gl_PointSize = (1.6 + aSeed * 2.8) * uPR * (10.0 / -mv.z);
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: `
+      uniform vec3 uColor;
+      uniform float uAlpha;
+      varying float vA;
+      void main() {
+        float r = length(gl_PointCoord - 0.5);
+        if (r > 0.5) discard;
+        gl_FragColor = vec4(uColor, (1.0 - smoothstep(0.05, 0.5, r)) * vA * uAlpha);
+      }`,
+  });
+  scene.add(new THREE.Points(moteGeo, moteMat));
+
+  const labelBox = document.querySelector(".labels");
+  const labels = ROLES.map(r => { const s = document.createElement("span"); s.textContent = r; labelBox.appendChild(s); return s; });
+
+  sceneTheme = t => {
+    const P = PALETTE[t];
+    for (const k in C) C[k].set(P[k]);
+    scene.fog.color.set(P.ground);
+    scene.environment = STUDIO[t];
+    moteMat.uniforms.uColor.value.set(P.mote);
+    moteMat.uniforms.uAlpha.value = P.moteA;
+    moteMat.blending = t === "light" ? THREE.NormalBlending : THREE.AdditiveBlending;
+    moteMat.needsUpdate = true;
+    draw(performance.now());   // repaint now so a view transition captures the new colours
+  };
+
+  // Where the 3D goes: a screen rectangle measured from the layout (beside the copy on wide
+  // screens, above it on tall ones), projected onto z = 0 every frame. Each state is fitted
+  // to that rectangle and kept level, so the reel, the timeline and the cut always sit
+  // square in the space the text leaves, at any window size and under mouse parallax.
+  const slot = { l: 0, r: 0, t: 0, b: 0 };
+  const heroH1 = document.querySelector(".hero h1"), stepCard = document.querySelector(".step-card");
+  // right edge of the actual glyphs: the headline's lines are block spans, so the element's
+  // own box is full width and would claim the whole screen
+  function inkRight(el) {
+    const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT), rg = document.createRange();
+    let right = 0;
+    while (walk.nextNode()) { rg.selectNodeContents(walk.currentNode); right = Math.max(right, rg.getBoundingClientRect().right); }
+    return right;
+  }
+  function measureSlot() {
+    const vw = innerWidth, vh = innerHeight, g = parseFloat(getComputedStyle(heroH1.parentElement).paddingLeft) || 20;
+    if (vw / vh < 0.9) return Object.assign(slot, { l: g, r: vw - g, t: 84, b: vh * 0.42 });
+    const textRight = Math.max(inkRight(heroH1), stepCard.getBoundingClientRect().right);
+    Object.assign(slot, { l: textRight + 56, r: vw - g, t: 92, b: vh - 32 });
+  }
+  const ray = new THREE.Vector3(), wc = new THREE.Vector3(), wl = new THREE.Vector3(), wr = new THREE.Vector3(), wt = new THREE.Vector3(), wb = new THREE.Vector3();
+  function toWorld(px, py, out) {   // screen pixel -> point on the z = 0 plane
+    ray.set(px / innerWidth * 2 - 1, 1 - py / innerHeight * 2, 0.5).unproject(camera).sub(camera.position).normalize();
+    return out.copy(camera.position).addScaledVector(ray, -camera.position.z / ray.z);
+  }
+
+  function resize() {
+    const w = innerWidth, h = innerHeight;
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    moteMat.uniforms.uPR.value = renderer.getPixelRatio();
+    measureSlot();
+  }
+  resize();
+  addEventListener("resize", resize);
+  document.fonts.ready.then(measureSlot);   // the hero headline's width depends on the webfont
+
+  const pointer = { x: 0, y: 0, sx: 0, sy: 0 };
+  if (!reduce) addEventListener("pointermove", e => { pointer.x = e.clientX / innerWidth * 2 - 1; pointer.y = e.clientY / innerHeight * 2 - 1; }, { passive: true });
+
+  const clamp = v => Math.min(1, Math.max(0, v));
+  const ease = t => 0.5 - 0.5 * Math.cos(Math.PI * t);   // sine in-out
+  const bump = t => Math.sin(Math.PI * t);                // 0 at rest, 1 mid-transition
+  const glide = t => 0.55 * t + 0.45 * ease(t);           // eased, but never stops (speed >= 0.55)
+  // The camera's path: one Catmull-Rom spline through a corner per step, parameterised by
+  // scroll, so it keeps moving through every key instead of stopping at each. Neighbouring
+  // keys must differ (a corner repeated two keys apart makes the spline stall between them).
+  //   hero   from bottom-right, so the reel's face turns up and to the left
+  //   step 1 top-right, looking down-left along the timeline
+  //   step 2 bottom-left, looking up-right as the beats are cast
+  //   step 3 bottom-right, looking up at the cut
+  //   exit   rising away over the top
+  const CAM_U = [-1, 0.05, 1.05, 2.05, 2.65];
+  const CAM = [[-0.5, -0.55], [0.36, -0.5], [-0.28, 0.38], [-0.2, -0.45], [0.85, -0.9]];   // [elevation, azimuth]
+  function camPath(u, amp, out) {
+    const n = CAM_U.length;
+    if (u <= CAM_U[0]) u = CAM_U[0];
+    if (u >= CAM_U[n - 1]) u = CAM_U[n - 1];
+    let i = 0;
+    while (i < n - 2 && u > CAM_U[i + 1]) i++;
+    const u0 = CAM_U[i], u1 = CAM_U[i + 1], h = u1 - u0, t = (u - u0) / h;
+    const t2 = t * t, t3 = t2 * t, h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
+    for (let c = 0; c < 2; c++) {
+      const P = k => CAM[k][c] * amp;
+      const tan = k => k === 0 ? (P(1) - P(0)) / (CAM_U[1] - CAM_U[0])
+        : k === n - 1 ? (P(n - 1) - P(n - 2)) / (CAM_U[n - 1] - CAM_U[n - 2])
+        : (P(k + 1) - P(k - 1)) / (CAM_U[k + 1] - CAM_U[k - 1]);
+      out[c] = h00 * P(i) + h10 * h * tan(i) + h01 * P(i + 1) + h11 * h * tan(i + 1);
+    }
+    return out;
+  }
+  const cam = [0, 0];
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const wrap = a => Math.atan2(Math.sin(a), Math.cos(a));
+
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), e3 = new THREE.Euler(), pos = new THREE.Vector3(), scl = new THREE.Vector3();
+  const col = new THREE.Color(), v = new THREE.Vector3();
+  let u = -1, spin = 0, last = 0, clock = 0;
+
+  function draw(t) {
+    const dt = Math.min(0.05, Math.max(0, (t - last) / 1000)); last = t;
+    if (!reduce) clock += dt;
+
+    // reads first: u = -1 with the hero on screen, 0/1/2 when each story step is centred
+    const vh = innerHeight, top = story.getBoundingClientRect().top, p = progress(), sy = scrollY;
+    const target = -top / vh;
+    u = reduce ? target : lerp(u, target, 1 - Math.pow(0.01, dt));
+    atmos(p, clock);
+
+    // The stages are contiguous (each starts where the last ends, no dead scroll between
+    // them) and use glide(), which softens without ever reaching zero speed, so any scroll
+    // inside the story moves something. u = 0.05 / 1.05 / 2.05 is each step fully arrived.
+    const p1 = clamp((u + 1) / 1.05), m1 = glide(p1);      // unwind
+    const p2 = clamp((u - 0.05) / 1), m2 = glide(p2);      // cast beats
+    const p3 = clamp((u - 1.05) / 1), m3 = glide(p3);      // assemble the cut
+    const gone = glide(clamp((u - 2.05) / 0.6));           // the reel leaves; the dust stays
+    // beats are cast and packed one after another, hook to button, each easing once
+    const k2 = b => ease(clamp((p2 - 0.5 * b / 6) / 0.5)), k3 = b => ease(clamp((p3 - 0.5 * b / 6) / 0.5));
+    if (!reduce) spin += dt * 0.07 * (1 - m1);
+
+    // camera parallax
+    pointer.sx = lerp(pointer.sx, pointer.x, 1 - Math.pow(0.02, dt));
+    pointer.sy = lerp(pointer.sy, pointer.y, 1 - Math.pow(0.02, dt));
+    // parallax by translation only: a camera with no pitch or yaw keeps verticals vertical
+    camera.position.set(pointer.sx * 0.3, 0.3 - pointer.sy * 0.2, 11);
+    camera.lookAt(camera.position.x, camera.position.y, 0);
+    camera.updateMatrixWorld();
+
+    // dust follows the CSS beam, mapped from screen space onto the z = 0 plane
+    const halfH = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 11, halfW = halfH * camera.aspect;
+    const B = reduce ? beamAt(0, 0) : beamAt(p, clock), ar = B.a * Math.PI / 180;
+    moteMat.uniforms.uBeam.value.set(B.tx / 50 * halfW, -B.ty / 50 * halfH, Math.cos(ar), -Math.sin(ar));
+    moteMat.uniforms.uBeamW.value = 0.11 * Math.max(innerWidth, vh) * (2 * halfH / vh);
+    moteMat.uniforms.uTime.value = clock;
+    moteMat.uniforms.uScroll.value = reduce ? 0 : sy * 0.0016;
+
+    // tall screens: the 3D is a fixed band the copy scrolls up through between steps, so it
+    // dims while text is passing and returns at each rest pose (u = -1, 0, 1, 2)
+    const pass = innerWidth / vh < 0.9 ? 1 - 0.7 * bump(u - Math.floor(u)) : 1;
+    group.visible = gone < 1;
+    labelBox.style.opacity = ((1 - gone) * pass).toFixed(3);
+    if (group.visible) {
+      // fit each state to the slot. The group stays at unit scale: every slab carries its own
+      // reel-space and timeline-space scale, so the unwind never squashes the whole reel at once
+      const cx = (slot.l + slot.r) / 2, cy = (slot.t + slot.b) / 2;
+      toWorld(cx, cy, wc); toWorld(slot.l, cy, wl); toWorld(slot.r, cy, wr); toWorld(cx, slot.t, wt); toWorld(cx, slot.b, wb);
+      const SW = wr.x - wl.x, SH = wt.y - wb.y;
+      let sA = Math.min(SW, SH) * 0.94 / reelD, sxT = SW * 0.96 / L, syT = SH * 0.4 / 2.4, sxD = SW * 0.9 / cutSpan;
+
+      // A camera that orbits the scene along camPath. Rotating the group by (elevation,
+      // azimuth) in three.js's default XYZ order applies yaw first, then pitch: the same maths
+      // as orbiting the camera around the slot's centre. Positive elevation looks down;
+      // positive azimuth views from the left.
+      const tall = innerWidth / vh < 0.9, amp = tall ? 0.6 : 1;   // narrower screens: gentler corners
+      camPath(u, amp, cam);
+      const b1 = bump(m1), sw = reduce ? 0 : 1;
+      const drift = reduce ? 0 : 1 - Math.max(b1, bump(m2), bump(m3));   // idle sway only at rest
+      const el = cam[0] + 0.03 * Math.sin(clock * 0.17) * drift;
+      const az = cam[1] + 0.05 * Math.sin(clock * 0.23) * drift;
+      group.position.set(wc.x, wc.y - gone * SH * 0.2, (-0.8 * b1 - 1.6 * gone) * sw);
+      group.rotation.set(el, az, 0);
+      // a yawed timeline reaches toward the camera at one end; shrink it by the yaw so that
+      // end stays on screen
+      const fitK = 1 - 0.32 * Math.abs(Math.sin(az));
+      sxT *= fitK; sxD *= fitK; sA *= 1 - 0.12 * Math.abs(Math.sin(az));
+      slabMat.opacity = (1 - gone) * pass;
+
+      const cs = Math.cos(spin), sn = Math.sin(spin);
+      for (let i = 0; i < N; i++) {
+        const lo = loud[i], b = beat[i], sel = b >= 0;
+        // per-slab stagger: the outer end of the reel peels off first, each slab easing once
+        const k1 = ease(clamp((p1 - 0.45 * (i / N)) / 0.55));
+        // A: on the reel
+        const ax = (reelX[i] * cs - reelY[i] * sn) * sA, ay = (reelX[i] * sn + reelY[i] * cs) * sA;
+        const aa = wrap(reelA[i] + spin - Math.PI / 2);
+        const ah = (0.05 + lo * 0.3) * sA;
+        // B/C: on the timeline; a cast beat rises and comes forward, the rest settles back
+        const c2 = sel ? k2(b) : m2, c3 = sel ? k3(b) : m3;
+        let bh = 0.05 + Math.pow(lo, 1.5) * 1.9;
+        bh *= sel ? 1 + 0.12 * c2 : 1 - 0.45 * c2;
+        const lift = sel ? 0.18 * c2 * (1 - c3) : -0.1 * c2;
+        // D: packed into the cut; everything else sinks away
+        const tx = lerp(lineX[i] * sxT, sel ? cutX[i] * sxD : lineX[i] * sxT, sel ? c3 : 0);
+        const ty = (lift - (sel ? 0 : 0.6 * c3)) * syT;
+        const x = lerp(ax, tx, k1), y = lerp(ay, ty, k1);
+        const h = lerp(ah, bh * syT, k1) * (sel ? 1 : 1 - c3);
+        const tw = sel ? lerp(0.0147 * sxT, 0.036 * sxD, c3) : 0.0147 * sxT;   // 0.0147 = L / N: slabs sit edge to edge
+        const w = lerp(0.024 * sA, tw, k1);
+        e3.set(0, 0, lerp(aa, 0, k1));
+        q.setFromEuler(e3);
+        pos.set(x, y, (sel ? 0.25 * c2 * (1 - c3) : -0.2 * c2) * k1);
+        const gone3 = sel ? 1 : 1 - c3;   // discarded slabs shrink away entirely, not to hairlines
+        const d = lerp(0.2 * sA, (sel ? lerp(0.1, 0.16, c3) : 0.1) * 0.8, k1);
+        scl.set(Math.max(w * gone3, 1e-4), Math.max(h, 1e-4), Math.max(d * gone3, 1e-4));
+        m4.compose(pos, q, scl);
+        mesh.setMatrixAt(i, m4);
+
+        col.copy(C.dim).lerp(C.lit, lo * lo);
+        if (lo > 0.7) col.lerp(C.hot, 0.6 * m1 * (1 - m2));
+        if (sel) col.lerp(C.sky, c2); else col.lerp(C.dark, 0.75 * c2);
+        mesh.setColorAt(i, col);
+      }
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.instanceColor.needsUpdate = true;
+
+      // role labels ride each beat once it is cast, on two fixed rows (above and below the
+      // tallest slab) so they line up instead of bobbing with each beat's height
+      labels.forEach((el, b) => {
+        const i = beatMid[b], up = b % 2 === 0;
+        const x = lerp(lineX[i] * sxT, cutX[i] * sxD, k3(b));
+        v.set(x, (up ? 1.4 : -1.4) * syT, 0);
+        group.localToWorld(v).project(camera);
+        el.style.opacity = k2(b).toFixed(3);
+        el.style.transform = `translate(${((v.x + 1) / 2 * innerWidth).toFixed(1)}px, ${((1 - v.y) / 2 * vh).toFixed(1)}px) translate(-50%, ${up ? -100 : 0}%)`;
+      });
+    }
+
+    renderer.render(scene, camera);
+  }
+
+  sceneTheme(root.dataset.theme);
+  (function frame(t) { lenis && lenis.raf(t); draw(t); requestAnimationFrame(frame); })(performance.now());
+}
+</script>
+</body>
+</html>
