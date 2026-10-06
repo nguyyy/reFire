@@ -19,8 +19,7 @@ def _noop(*_a, **_k):
     pass
 
 
-# docker-style adjective-noun tag so parallel/repeat runs on the same VOD get their own
-# output folder instead of clobbering each other's manifest/outline/rough cut.
+# docker-style adjective-noun tag so repeat runs on the same vod get their own folder
 _ADJ = ["blazing", "cozy", "feral", "lucky", "rowdy", "salty", "cosmic", "rusty",
         "velvet", "sneaky", "gilded", "hollow", "jagged", "mellow", "plucky",
         "scrappy", "vivid", "wistful", "zesty", "brisk"]
@@ -33,7 +32,7 @@ def _run_name(vod_id) -> str:
     return f"{vod_id}-{random.choice(_ADJ)}-{random.choice(_NOUN)}"
 
 
-# past this the story pass gets a chapter digest instead of the raw map (rough 4 chars/tok)
+# past this the story pass gets a chapter digest instead of the raw map (~4 chars/tok)
 FULL_MAP_TOK_LIMIT = 150_000
 
 
@@ -48,14 +47,14 @@ def _resolve_ollama_model(requested: str) -> str:
     import ollama
     try:
         models = ollama.list().models
-    except Exception as e:                       # loud: silence here means a 404 an hour later
+    except Exception as e:                       # be loud, silence here = a 404 an hour later
         print(f"[model] can't list Ollama models ({e}); using '{requested}' as-is.")
         return requested
     names = [m.model for m in models]
     base = requested.split(":")[0]
     if requested in names:
         return requested
-    for n in names:                          # same family -> use the installed tag
+    for n in names:                          # same family, use the installed tag
         if n.split(":")[0] == base:
             return n
     chat = [m for m in models if "embed" not in m.model.lower()]
@@ -88,8 +87,8 @@ def _detect_core(video, chat, run_dir, model=DEFAULT_MODEL, game="", tx_progress
                        hotwords=hotwords, progress=tx_progress, backend=transcriber,
                        model_size=whisper_model, batch_size=batch_size,
                        compute_type=compute_type)
-    # Nothing past here transcribes again, and every stage after it loads an ollama model
-    # onto the same card -- Whisper left cached there starved the scout to ~5 tok/s.
+    # nothing after this transcribes, and every later stage loads an ollama model on the same
+    # card. whisper left cached there slowed the scout to ~5 tok/s
     release_whisper()
     if not words:
         return [], [], []
@@ -118,48 +117,48 @@ def make(
     vod_id,
     brief: str | None,
     duration_s: float,
-    style: str | None = None,   # free text: HOW to cut it (structure, pacing, priorities)
-    pace: float = 1.0,          # cut speed: scales every role's clip-length budget
-    # The machinery half of a style, all identity-defaulted so an unstyled run is
-    # byte-identical. `cli` fills these from --style's frontmatter (see refire/styles.py).
+    style: str | None = None,   # free text, how to cut it (structure, pacing, priorities)
+    pace: float = 1.0,          # cut speed, scales every role's clip budget
+    # style machinery, all identity defaults so an unstyled run is unchanged. cli fills these
+    # from --style frontmatter (see styles.py)
     order: str = "chrono",      # play order: chrono | director | whiplash
     snap: str = "sentence",     # cut points: sentence | phrase | transient
-    stack: int = 0,             # montage-stack cold open: N moments (0 = single teaser)
+    stack: int = 0,             # montage stack cold open: N moments (0 = single teaser)
     truncate: float = 0.3,      # transient snap: seconds cut before the peak resolves
-    loudnorm: bool = False,     # ffmpeg loudness normalization in the rough cut
-    keep_build: bool = True,    # enforce the skipped-build / slow-payoff pacing flags
-    captions: str = "all",      # all | emph (only lines carrying an emphasized word)
+    loudnorm: bool = False,     # ffmpeg loudness norm in the rough cut
+    keep_build: bool = True,    # enforce the skipped-build / slow-payoff flags
+    captions: str = "all",      # all | emph (only lines with an emphasized word)
     run_dir: str | Path | None = None,
     model: str = DEFAULT_MODEL,
     game: str = "",
     terms: str = "",
     zoom_sens: float = 1.0,
     words_per_line: int = 3,
-    tol: float = 0.35,   # duration is a suggestion -- wide slack both ways over a hard cap
+    tol: float = 0.35,   # duration is a suggestion, wide slack both ways
     silence_pad: float = 0.3,
     cache_dir: str | Path = "vods",
-    start: float | None = None,   # only edit this window of the stream (seconds in)
+    start: float | None = None,   # only edit this window of the stream (s)
     end: float | None = None,
     assets_dir: str | Path = "assets",
     bgm: str | Path | None = None,
     title: str = "",
     claude_model: str = "claude-opus-5",
-    effort: str = "xhigh",    # low|medium|high|xhigh|max; mirrors director.DEFAULT_EFFORT
-                              # (literal, not the constant -- director is imported lazily)
-    director_backend: str = "cli",   # "cli" = claude -p on the subscription; "api" = SDK key
+    effort: str = "xhigh",    # low|medium|high|xhigh|max, matches director.DEFAULT_EFFORT
+                              # (literal since director is imported lazily)
+    director_backend: str = "cli",   # "cli" = claude -p on the subscription, "api" = sdk key
     flat: bool = False,
     local_director: bool = False,
     review_rounds: int = 2,
-    scout: str = "local",   # chapterize backend: "local" (free Ollama) or "off"
+    scout: str = "local",   # chapterize backend: "local" (ollama) or "off"
     render: bool = False,
     encoder: str = "libx264",
     motion_zoom: bool = True,
     emotes: bool = True,      # emote/gif punch-ins
     sfx: bool = True,         # impact hits under those punch-ins
     deadspace: bool = True,   # cut the silence out of each clip
-    cards: bool = True,       # section title cards in the AE Master
+    cards: bool = True,       # section title cards in the AE master
     proxy: bool = True,       # all-intra proxies for AE instead of the long-GOP VOD
-    caption_fix: bool = True,  # one Claude pass over the captions' proper nouns
+    caption_fix: bool = True,  # one claude pass over proper nouns in captions
 
     transcriber: str = "local",
     whisper_model: str = DEFAULT_WHISPER_MODEL,
@@ -186,29 +185,23 @@ def make(
     from .retrieve import retrieve
     from .select import budget_select, snap_to_sentences
 
-    # ponytail: a bare "12" parses as 12 SECONDS, which silently collapses the cut to a
-    # single beat (_n_beats -> 2, then _trim_to_budget sheds to 1). Almost always a
-    # missing unit. Raise the floor if you ever genuinely want a sub-30s cut.
+    # a bare "12" means 12 seconds which collapses the cut to one beat, it's almost always a
+    # missing unit. lower this if you actually want a sub-30s cut
     if duration_s < 30:
         raise SystemExit(f"--duration is {duration_s:g}s -- did you mean "
                          f"'{duration_s:g}m'? A bare number is seconds.")
 
     report = progress or _noop
-    # Namespace artifacts by VOD so two streams don't collide on a shared run/ (the
-    # extract/transcribe steps skip-if-exists and would reuse the wrong stream's cache).
-    # An explicit run_dir still wins (the AE Make button isolates per output folder) and
-    # skips the auto-naming below.
+    # namespace by vod so two streams don't share a cache (extract/transcribe skip if the file
+    # exists). an explicit run_dir still wins (AE make button sets one) and skips auto naming
     if end is not None and start is not None and end <= start:
         raise SystemExit(f"--end ({end:g}s) must be after --start ({start:g}s)")
     auto_named = run_dir is None
-    # A window gets its own cache key: audio/transcript/chunks are all skip-if-exists and
-    # a windowed run must not inherit (or poison) the full stream's cache.
+    # a window gets its own cache key so it doesn't reuse or poison the full stream's cache
     tag = window_tag(start, end)
     run_dir = Path("run") / f"{vod_id}{tag}" if auto_named else Path(run_dir)
-    # This run's own output folder: unique per invocation (vod# + a generated phrase) so
-    # re-running the same VOD (different brief/duration/etc) doesn't overwrite the last
-    # outline/manifest/rough cut. The expensive per-VOD cache (audio/transcript/embeddings,
-    # written straight to run_dir below) stays shared and reused across runs.
+    # this run's output folder, unique per run (vod# + random phrase) so reruns don't overwrite
+    # the last outline/manifest/cut. the per-vod cache (audio/transcript/embeddings) is shared
     run_name = _run_name(vod_id) if auto_named else run_dir.name
     out_dir = (run_dir / run_name) if auto_named else run_dir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -216,16 +209,14 @@ def make(
     model = _resolve_ollama_model(model)       # don't 404 deep into the run
     report(0.0, "downloading VOD")
     if tag:
-        # Everything downstream (map, outline, manifest, captions) is zero-based off this
-        # cropped file, so add `start` back if you need real stream time.
+        # everything downstream is zero-based off this cropped file, add start back for stream time
         print(f"[window] {(start or 0) / 3600:.2f}h .. "
               f"{'end' if end is None else f'{end / 3600:.2f}h'} of the stream only")
-    # the downloader's own phases fill 0..0.10 -- without them a 40m download is a
-    # single motionless line (see `ingest._run`)
+    # the downloader's phases fill 0..0.10, otherwise a 40 min download is one frozen line
     video, chat = ensure_vod(
         vod_id, cache_dir, start=start, end=end,
         progress=lambda f, m: report(0.10 * f, f"downloading VOD -- {m}"))
-    # transcription is the long pole -> map its segment progress into 0.10..0.55
+    # transcription is the slow part, maps to 0.10..0.55
     report(0.10, "transcribing")
     words, chunks, _chat_z = _detect_core(   # chat_z rides on chunks for the flat fallback
         video, chat, run_dir, model=model, game=game, terms=terms,
@@ -237,31 +228,27 @@ def make(
     print(f"[transcribe] {len(words)} words, ~{words[-1]['end'] / 60:.0f} min of speech, "
           f"{len(chunks)} chunks")
 
-    # Perception: fuse loudness into the enriched moment map the director reads;
-    # signals.json doubles as an inspectable artifact. (Chat-rate signal is no longer fed
-    # to the director; it stays on chunks only for the legacy flat/detect path.)
+    # fuse loudness into the moment map the director reads. signals.json is also there to
+    # inspect. chat rate only stays on chunks for the flat/detect path
     report(0.56, "fusing perception signals")
     from . import perception
     audio_z = perception.loudness_signal(run_dir / "audio.wav")
     perception.save_signals(run_dir / "signals.json", audio_z)
-    # Emphasis (and the per-word RMS it measures) has to exist BEFORE casting, not after:
-    # `--snap transient` cuts on that RMS. One wav pass either way, so it simply moved up.
+    # emphasis (and per-word rms) has to exist before casting, --snap transient cuts on it
     annotate_emphasis(words, run_dir / "audio.wav")
-    # Speech whisper returned no words for, which `compress_silence` must not cut as dead
-    # air. Cached per VOD beside the transcript; cast and both renderers share this list.
+    # speech whisper got no words for, compress_silence must not cut it as dead air. cached per
+    # vod, cast and both renderers share it
     voiced = (speech_regions(run_dir / "audio.wav", cache_path=run_dir / "speech.json")
               if deadspace else None)
 
-    # ponytail: embeddings are NOT computed here. Nothing reads `chunk["embedding"]`
-    # except retrieve.retrieve_with_vec, which only the flat fallback and narrative's
-    # invalid-bounds branch reach -- so on a normal director run this was a full Ollama
-    # pass over every chunk of a 6h VOD for nothing. Both call sites now embed on demand
-    # (still cached to run_dir/chunks.json, so a real fallback pays once per VOD).
+    # embeddings aren't computed here, only the flat fallback and narrative's invalid-bounds
+    # branch use them. both embed on demand (cached in chunks.json) so a normal run skips a
+    # full ollama pass over a 6h vod
     def embed_chunks():
         return _ensure_embeddings(chunks, run_dir)
 
-    # Narrative path: a Claude director pass writes the story outline, then we cast the
-    # best local clip into each beat -> titled sections (= AE section cards).
+    # narrative path: claude director writes the outline, then we cast the best local clip into
+    # each beat -> titled sections (= AE section cards)
     sections = None
     warning = None
     director_error = None
@@ -271,12 +258,12 @@ def make(
             report(0.60, "writing story outline")
             smap = perception.moment_map(words, audio_z=audio_z)
             (out_dir / "map_v2.txt").write_text(smap, encoding="utf-8")
-            map_tok = len(smap) // 4   # ~4 chars/token; rough but enough to size the call
+            map_tok = len(smap) // 4   # ~4 chars/token, rough but fine for sizing
             print(f"[director] stream map ~{map_tok // 1000}k tokens, "
                   f"~{director._n_beats(duration_s)} beats")
 
-            # Scout pass (free, local): chapterize the stream so the story pass reads a
-            # guided map -- and, past the context ceiling, a digest instead of the raw map.
+            # scout pass (free, local): chapterize so the story pass gets a guided map, or a digest past
+            # the context limit
             chapters = []
             if scout != "off":
                 report(0.61, "scouting chapters")
@@ -284,7 +271,7 @@ def make(
                     smap, model=model, cache_path=out_dir / "chapters.json",
                     progress=lambda f, m: report(0.61 + 0.03 * f, m))
                 print(f"[scout] {len(chapters)} chapters")
-                # full-res per-chapter map files, for the director's Read drill-down
+                # full-res per-chapter map files for the director's drill-down
                 map_dir = out_dir / "map"
                 map_dir.mkdir(exist_ok=True)
                 for i, c in enumerate(chapters, 1):
@@ -304,9 +291,9 @@ def make(
                       f"fit context (--scout off); will fall back to flat selection if "
                       f"the call overflows.")
 
-            trace = out_dir / "trace"   # full prompt/response dumps per Claude call
-            # One CLI session per run: the director opens it, every review round resumes
-            # it. That is what stops the ~240KB stream map being re-sent three times.
+            trace = out_dir / "trace"   # full prompt/response dumps per claude call
+            # one cli session per run, director opens it and review rounds resume it so the ~240KB map
+            # isn't resent every round
             session_id = str(uuid.uuid4())
             ol = (director.outline_local(director_input, brief, title, duration_s,
                                          model=model, style=style, pace=pace,
@@ -318,10 +305,9 @@ def make(
                                         style=style, pace=pace, stack=stack,
                                         keep_build=keep_build, effort=effort,
                                         session_id=session_id))
-            # Editor-review loop: cast the outline, let a Claude critic read the REALIZED
-            # cut and either approve or return a revised outline, re-cast, repeat. This is
-            # what turns a relevant-but-reel cut into a story (see okay-refer-to-memories).
-            # local_director stays single-pass (the critic is a Claude call -> would spend).
+            # review loop: cast, let a claude critic read the actual cut and approve or return a revised
+            # outline, recast, repeat. this is what turns a reel into a story. local_director stays
+            # single pass since the critic costs money
             report(0.66, "casting beats")
             review_log: list[dict] = []
             rounds = 0 if local_director else max(0, review_rounds)
@@ -329,8 +315,7 @@ def make(
                 sections, outline_log, warning = narrative.cast(
                     ol, embed_chunks, words, duration_s, model=model, tol=tol,
                     progress=lambda f, m: report(0.66 + 0.24 * f, m),
-                    # so the beat durations the critic and the budget trimmer read are
-                    # the ones this run will actually render
+                    # so the durations the critic and trimmer see are what actually renders
                     deadspace=deadspace, silence_pad=silence_pad, voiced=voiced,
                     order=order, snap=snap, stack=stack, truncate=truncate)
                 if outline_log.get("dropped"):
@@ -338,9 +323,8 @@ def make(
                           + ", ".join(d["title"] for d in outline_log["dropped"]))
                 if rnd == rounds or not sections:
                     break
-                # The critic re-picks spans, so hand it the shrink THIS stream realized
-                # instead of the constant prior the director opened with. Clamped: a
-                # freak measurement would otherwise blow the span budget wide open.
+                # give the critic the shrink this stream actually had instead of the prior. clamped so one
+                # weird measurement doesn't blow up the budget
                 measured = outline_log.get("shrink")
                 shrink = (min(1.0, max(0.4, measured)) if measured
                           else director.CUT_SHRINK)
@@ -351,7 +335,7 @@ def make(
                                          shrink=shrink, style=style, pace=pace,
                                          stack=stack, keep_build=keep_build,
                                          effort=effort, session_id=session_id)
-                except Exception as re:   # a review failure must NOT discard a good cast
+                except Exception as re:   # a failed review must not throw away a good cast
                     print(f"[review] round {rnd + 1} unavailable ({re}); keeping current cut")
                     break
                 note = (rv.notes or "").splitlines()[0][:140] if rv.notes else ""
@@ -366,7 +350,7 @@ def make(
                 outline_log["review"] = review_log
                 (out_dir / "outline.json").write_text(
                     json.dumps(outline_log, indent=2), encoding="utf-8")
-                # editor-readable companion: if the cut plan reads boring, so will the video
+                # readable companion, if the plan reads boring so will the video
                 (out_dir / "cut_plan.md").write_text(
                     narrative.cut_plan_md(outline_log, pace, keep_build, duration_s),
                     encoding="utf-8")
@@ -374,12 +358,9 @@ def make(
             director_error = e
             sections = None
 
-    # A director failure used to drop through to flat selection with one printed line.
-    # That is not a degraded cut, it is a DIFFERENT cut: flat ignores every structural
-    # style knob (stack/order/snap/truncate/pace live only on the narrative path), so a
-    # `--style` document silently became a chronological 30s-chunk reel. Refuse instead.
-    # The expensive caches (audio/transcript/chapters) are keyed to run_dir and survive,
-    # so re-running after a fix costs one director call, not the whole pipeline.
+    # don't fall back to flat if the director fails. flat ignores every style knob
+    # (stack/order/snap/truncate/pace) so a --style run would quietly become a 30s chunk reel.
+    # caches survive in run_dir so a rerun only costs one director call
     if not flat and not sections:
         raise SystemExit(
             f"director pass failed: {director_error or 'no castable sections'}\n"
@@ -390,13 +371,11 @@ def make(
             f"flat path deliberately.")
 
     if not sections:
-        # Flat fallback: candidate pool ~3x the budget worth of ~60s chunks, floored so
-        # short briefs still get headroom for the LLM scorer; one untitled section.
-        # No brief -> nothing to embed against, so rank by raw excitement instead.
+        # flat fallback: pool of ~3x the budget in ~60s chunks (floored so short briefs have room),
+        # one untitled section. no brief -> rank by raw excitement
         report(0.62, "retrieving candidates")
         k = max(40, int(duration_s / 60.0 * 3))
-        # only the brief-driven branch needs vectors; select_by_signal ranks on raw
-        # chat/loudness z and never touches an embedding.
+        # only the brief branch needs vectors, select_by_signal uses raw chat/loudness z
         candidates = (retrieve(brief, embed_chunks(), k) if brief
                       else select_by_signal(chunks, k, audio_z=audio_z))
         scored = []
@@ -433,16 +412,15 @@ def make(
                         silence_pad=silence_pad, cards=cards, proxy=proxy,
                         captions=captions, voiced=voiced)
     if caption_fix:
-        # The transcriber never knew the game or the streamer's friends; this is the first
-        # point where the captions exist as readable lines, and it's before the human opens
-        # Premiere. Timestamps and line count are untouched, so nothing downstream shifts.
+        # the transcriber never knew the game or the streamer's friends. first point captions exist
+        # as lines, before premiere opens. timestamps/line count unchanged
         report(0.96, "fixing captions")
         from .caption_fix import fix_manifest
         fix_manifest(mp, game=game, title=title, terms=terms, chat_json=chat,
                      model=claude_model, backend=director_backend,
                      corrections_dir=run_dir.parent, trace=out_dir / "trace")
     if render:
-        # no-AE rough cut for eyeballing: ffmpeg trim+reframe+subs+concat+music bed.
+        # rough cut without AE: ffmpeg trim+reframe+subs+concat+music
         report(0.97, "rendering rough cut (ffmpeg)")
         from .assemble import render_clips
         rough = render_clips(video, out_dir, flat_clips, words,

@@ -20,7 +20,7 @@ def log(beats):
 # --- timeline -----------------------------------------------------------
 
 def test_positions_accumulate_over_kept_footage_not_source_envelopes():
-    # source spans are far apart and out of scale with the cut; only `dur` may drive `at`
+    # source spans are far apart and out of scale, only dur should drive at
     tl = cut_timeline(log([beat(1, dur=20.0, start=1000.0),
                            beat(2, dur=40.0, start=5000.0),
                            beat(3, dur=15.0, start=9000.0)]))
@@ -42,7 +42,7 @@ def test_density_and_setup_lead_are_derived():
 
 
 def test_payoff_before_the_realized_start_is_not_a_negative_lead():
-    # casting can snap a beat's start PAST the director's payoff anchor
+    # casting can snap a beat's start past the payoff anchor
     tl = cut_timeline(log([beat(1, start=100.0, payoff=90.0)]))
     assert tl[0]["setup_lead"] is None
 
@@ -117,7 +117,7 @@ def test_back_to_back_same_role_and_texture():
 # --- the prompt block ---------------------------------------------------
 
 def test_a_clean_audit_says_so_rather_than_going_silent():
-    # silence would read to the critic as "not measured" and invite invented problems
+    # silence would read as "not measured" and invite made-up problems
     note = pacing_note([], total_s=600.0)
     assert "no flat runs" in note
     assert "10:00" in note
@@ -131,12 +131,10 @@ def test_the_note_lists_flags_worst_first():
 
 
 def test_the_long_beat_ceiling_is_per_role_not_flat():
-    # 70s: comfortably inside an escalation's 90s budget, way past a setup's 40s.
-    # The old flat 75s ceiling flagged neither, which is how beats that were never
-    # long got "tightened" while a sprawling setup went unmentioned.
+    # 70s: inside an escalation's 90s budget, way past a setup's 40s
     assert "long_beat" not in kinds([beat(1, dur=70.0, role="escalation")])
     assert "long_beat" in kinds([beat(1, dur=70.0, role="setup")])
-    # and the flag says which ceiling was broken, so the critic can re-role instead
+    # and the flag says which ceiling broke so the critic can re-role
     flags = audit(cut_timeline(log([beat(1, dur=70.0, role="setup")])))
     assert "40s ceiling for a setup beat" in flags[0]["text"]
 
@@ -165,7 +163,7 @@ def test_pace_moves_the_long_beat_ceiling():
     tl = cut_timeline(log([beat(1, dur=100.0, role="escalation")]))   # 90s ceiling
     assert any(f["kind"] == "long_beat" for f in audit(tl))
     assert not any(f["kind"] == "long_beat" for f in audit(tl, pace=1.5))
-    # and the other way: a snappy cut flags a beat that was fine at 1.0
+    # other way: a snappy cut flags a beat that was fine at 1.0
     tl2 = cut_timeline(log([beat(2, dur=80.0, role="escalation")]))
     assert not any(f["kind"] == "long_beat" for f in audit(tl2))
     assert any(f["kind"] == "long_beat" for f in audit(tl2, pace=0.6))
@@ -216,7 +214,7 @@ def test_skipped_build_outranks_tightening_flags():
     assert kinds.index("skipped_build") < kinds.index("long_beat")
 
 
-# --- the audit must not fight a deliberate style -------------------------
+# --- the audit must not fight a deliberate style ---
 
 def _build_gap_timeline():
     """One beat whose segments skip 100s of its own build-up before the payoff, plus a
@@ -245,8 +243,7 @@ def test_average_shot_is_measured_only_when_build_up_is_skipped():
     tl = cut_timeline(log)
     assert not [f for f in audit(tl) if f["kind"] == "avg_shot"]
     flags = [f for f in audit(tl, keep_build=False) if f["kind"] == "avg_shot"]
-    # a SHOT is one kept segment, not the beat: 80s over two segments is a 40s mean.
-    # Measured as beats this read 80.0s, and the only way to clear it was to ship less.
+    # a shot is one kept segment, not the beat: 80s over two segments = 40s mean
     assert flags and "average shot runs 40.0s across 2 segments" in flags[0]["text"]
 
 

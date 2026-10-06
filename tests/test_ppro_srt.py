@@ -45,7 +45,7 @@ def test_caption_overrunning_the_cut_is_clamped():
                                  {"text": "past", "start": 60.0, "end": 61.0},
                                  {"text": "  ", "start": 1.0, "end": 2.0}]}]}
     out = build_srt(m)
-    # clamped to the clip end; the fully-past and blank cues are dropped entirely
+    # clamped to the clip end, fully-past and blank cues get dropped
     assert out == "1\n00:00:04,000 --> 00:00:05,000\nlong\n\n"
 
 

@@ -10,9 +10,9 @@ from refire.ae_export import build_manifest
 from refire.loud import VOD_BASE, spike_signal
 
 SR = 16000
-# 300 one-second buckets: a long stretch that is merely loud THROUGHOUT (80s of game
-# audio) and one short scream sitting in quiet. The sustained stretch is deliberately
-# built to win on raw level -- that is the failure this module exists to avoid.
+# 300 one-second buckets: a long stretch that's loud the whole time (80s of game audio) and
+# one short scream in quiet. the sustained part wins on raw level on purpose, that's the
+# failure this module avoids
 QUIET, SUSTAINED, SCREAM = 300, 9000, 22000
 SUS_A, SUS_B = 100, 180
 SCR_A, SCR_B = 280, 283
@@ -37,15 +37,14 @@ def _top(sig):
 
 
 def test_raw_level_picks_the_merely_loud_stretch(tmp_path):
-    # The baseline behaviour we are correcting: a window sum wins on duration, so 80s of
-    # steady game audio outranks a 3s scream that is more than twice as loud.
+    # the baseline we're fixing: a window sum wins on duration, so 80s of steady game audio
+    # beats a 3s scream that's twice as loud
     a, b = _top(perception.loudness_signal(_wav(tmp_path / "a.wav"), window=1.0))
     assert SUS_A <= a and b <= SUS_B, (a, b)
 
 
 def test_spike_picks_the_scream(tmp_path):
-    # Against a rolling median, the sustained stretch is its own baseline and scores ~0,
-    # while the scream is a real departure from the level around it.
+    # against a rolling median the sustained stretch is its own baseline (~0), the scream stands out
     a, b = _top(spike_signal(_wav(tmp_path / "a.wav")))
     assert a <= SCR_A and b >= SCR_B, (a, b)
 
@@ -55,15 +54,14 @@ def test_spike_missing_wav_is_empty():
 
 
 def test_spike_on_a_clip_shorter_than_the_baseline(tmp_path):
-    # Too short to have a local baseline -> degrade to the raw signal, don't crash.
+    # too short for a local baseline -> raw signal, don't crash
     sig = spike_signal(_wav(tmp_path / "a.wav"), baseline_s=600.0)
     assert len(sig) == len(perception.loudness_signal(tmp_path / "a.wav", window=1.0))
 
 
 def test_multi_vod_sources_survive_the_manifest(tmp_path):
-    # Two moments from two different VODs, laid on the virtual timeline. The panel only
-    # ever computes `clip.start - sources[src].offset`, so that has to land inside each
-    # clip's own downloaded window file.
+    # two moments from two vods on the virtual timeline. the panel only computes
+    # clip.start - sources[src].offset, so that has to land inside each clip's own window file
     words = [{"text": "what", "start": t, "end": t + 0.4, "emph": True}
              for t in (10.5, VOD_BASE + 10.5)]
     clips = [{"start": 10.0, "end": 14.0, "src": 0},
@@ -81,8 +79,8 @@ def test_multi_vod_sources_survive_the_manifest(tmp_path):
 
 
 def test_single_source_map_is_still_written(tmp_path):
-    # A one-clip cut has one source, and its offset is load-bearing -- without a `sources`
-    # array the panel falls back to `M.source` at offset 0 and misplaces the clip.
+    # one-clip cut still needs its offset, without sources the panel uses M.source at offset 0
+    # and misplaces the clip
     clips = [{"start": 10.0, "end": 14.0, "src": 0}]
     mp = build_manifest("unused.mp4", tmp_path, [], [{"title": "", "clips": clips}],
                         motion_zoom=False, proxy=False, deadspace=False, cards=False,

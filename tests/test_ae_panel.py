@@ -17,10 +17,9 @@ PANEL = ROOT / "refire" / "ae" / "index.html"
 JSX = ROOT / "refire" / "ae" / "reFire.jsx"
 CLI = ROOT / "refire" / "cli.py"
 
-# the panel's argv builder emits flags as bare "--flag" string literals; CSS custom
-# properties (--bg: ...) are never double-quoted, so they don't match.
+# the panel emits flags as bare "--flag" strings, css vars (--bg: ...) aren't quoted so they don't match
 PANEL_FLAGS = set(re.findall(r'"(--[a-z][a-z-]+)"', PANEL.read_text(encoding="utf-8")))
-# `mk` is the `make` subparser in cli.main()
+# mk is the make subparser in cli.main()
 CLI_FLAGS = set(re.findall(r'mk\.add_argument\(\s*"(--[a-z][a-z-]+)"',
                            CLI.read_text(encoding="utf-8")))
 
@@ -35,11 +34,10 @@ def test_panel_flags_still_accepted():
     assert not missing, f"panel emits flags `refire make` no longer accepts: {missing}"
 
 
-# --- reFire.jsx must never let an exception escape ------------------------
-# CEP turns any uncaught ExtendScript throw into the opaque "EvalScript error."
-# with no message, so every public entry point is wrapped in a catch that returns
-# the real text. Run the real file with NO After Effects globals defined -- every
-# AE call throws -- and assert we still get a string back.
+# --- reFire.jsx must never let an exception escape ---
+# CEP turns any uncaught extendscript throw into a blank "EvalScript error." so every entry
+# point catches and returns the real text. run the file with no AE globals (every call
+# throws) and check we still get a string back
 PROBE = """
 const vm = require('vm'), fs = require('fs');
 const ctx = {}; vm.createContext(ctx);

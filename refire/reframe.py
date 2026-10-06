@@ -183,7 +183,7 @@ def reframe_clip(src, dst, out_w=1280, out_h=720, speech=None,
     hysteresis thresholds -- the style pass lowers them on punchy roles (hook/climax)
     so those clips zoom more readily.
     """
-    import cv2  # heavy/optional dep, import lazily
+    import cv2  # heavy optional dep, import lazily
 
     cap = cv2.VideoCapture(str(src))
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0

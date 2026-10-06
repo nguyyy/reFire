@@ -75,7 +75,7 @@ def test_build_manifest_cuts_dead_space(tmp_path):
     assert clip["dur"] < 6.0, clip["dur"]              # ~2 phrases + breath, not 20s
     assert abs(clip["dur"] - sum(b - a for a, b in clip["keep"])) < 1e-3
     assert clip["start"] == 0.0 and clip["end"] == 20.0   # source times stay absolute
-    # captions + the overlay ride the tightened timeline, not the source one
+    # captions + overlay use the tightened timeline, not the source one
     assert clip["captions"][-1]["end"] <= clip["dur"] + 1e-6
     assert clip["overlays"][0]["start"] < clip["dur"]
 
@@ -90,7 +90,7 @@ def test_build_manifest_keeps_speech_the_transcript_missed(tmp_path):
     assert any(a <= 6.0 and b >= 10.0 for a, b in kept["keep"])     # the 4s line survived
     assert kept["dur"] == __import__("pytest").approx(cut["dur"] + 4.6)   # 4s + 2 pads
     assert kept["captions"][-1]["end"] <= kept["dur"] + 1e-6          # captions still retime
-    # only ever keeps MORE: a clip with no words is still kept whole, voiced or not
+    # only ever keeps more, a clip with no words stays whole
     assert compress_silence([], 0.0, 5.0, voiced=[[1.0, 2.0]])[2] == 5.0
 
 
@@ -135,11 +135,11 @@ def test_build_manifest_points_at_intra_proxies(monkeypatch, tmp_path):
     assert len(cuts) == 2                                   # only the used spans transcoded
     assert [c["src"] for c in data["clips"]] == [0, 1]
     assert data["sources"][1]["offset"] == 98.0             # padded head
-    # AE subtracts the offset, so the 2nd clip starts 2s into its own proxy
+    # AE subtracts the offset so clip 2 starts 2s into its proxy
     assert data["clips"][1]["start"] - data["sources"][1]["offset"] == 2.0
 
 
-# --- long-VOD splitting: AE cannot address past 3h of one file ---------------
+# --- long vod splitting: AE can't reach past 3h of one file ---
 
 
 def test_split_points_never_tear_a_clip():
@@ -165,7 +165,7 @@ def test_assign_parts_tags_the_right_part():
              {"start": 19000.0, "end": 19060.0}]
     _assign_parts(clips, parts)
     assert [c["src"] for c in clips] == [0, 1, 2]
-    # single part -> no `src` key at all (manifest stays byte-identical)
+    # single part -> no src key (manifest unchanged)
     solo = [{"start": 10.0, "end": 40.0}]
     _assign_parts(solo, [("a.mp4", 0.0)])
     assert "src" not in solo[0]
@@ -190,7 +190,7 @@ def test_captions_emph_keeps_only_the_lines_that_need_text(tmp_path):
     assert len(every["clips"][0]["captions"]) == 2          # both pairs captioned
     kept = sparse["clips"][0]["captions"]
     assert len(kept) == 1 and "WHAT" in kept[0]["text"]     # only the yelled line
-    # the surviving line keeps its original timing -- filtering must not re-time anything
+    # surviving line keeps its timing, filtering doesn't retime
     assert kept[0] == every["clips"][0]["captions"][1]
 
 

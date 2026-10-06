@@ -4,8 +4,8 @@ from refire.caption_fix import (Fix, Fixes, apply_corrections, fix_manifest,
                                 learned_pairs, vet)
 from refire.chat import chat_lines, chat_names, chat_terms
 
-# The real shipped failure this pass exists for: "zajef" is the streamer's friend, so no
-# game glossary can ever hold him -- only chat and the learned-corrections file can.
+# the real failure this is for: "zajef" is the streamer's friend so no game glossary has
+# him, only chat and learned corrections can
 _MANIFEST = {
     "clips": [
         {"start": 100.0, "end": 110.0, "captions": [
@@ -32,8 +32,7 @@ def _reply(*fixes):
 
 
 def test_stale_index_is_dropped_not_applied():
-    # the model's `was` echo doesn't match the line it points at -> the fix would land on
-    # an unrelated, perfectly good caption. Drop it.
+    # was doesn't match the line it points at -> fix would land on a good caption, drop it
     assert vet("is here", Fix(i=1, was="dude, zhegef", text="dude, zajef")) is None
 
 
@@ -47,14 +46,14 @@ def test_respelling_is_accepted():
 
 
 def test_model_cannot_override_styler_casing():
-    # emphasis.style_text owns casing: lowercase by default, UPPERCASE on excitement.
+    # style_text owns casing: lowercase by default, caps on excitement
     assert vet("who tao pull", Fix(i=0, text="Hu Tao pull")) == "hu tao pull"
     assert vet("dude, zhegef", Fix(i=0, text="Dude, Zajef")) == "dude, zajef"
     assert vet("WHO TAO PULL", Fix(i=0, text="hu tao pull")) == "HU TAO PULL"
 
 
 def test_per_word_shouting_survives_a_fix():
-    # style_text shouts word by word, so flattening the whole line would destroy emphasis
+    # style_text shouts per word, flattening the line would kill emphasis
     assert vet("DPS and mawika", Fix(i=0, text="dps and mavuika")) == "DPS and mavuika"
     assert vet("UH, pyroin does", Fix(i=0, text="uh, prydwen does")) == "UH, prydwen does"
     assert vet("keneech IS", Fix(i=0, text="kinich is")) == "kinich IS"
@@ -104,7 +103,7 @@ def test_llm_failure_leaves_captions_untouched(tmp_path):
 
 
 def test_learned_pairs_stores_the_word_not_the_line():
-    # storing the whole line would never match again; the substitution inside it will
+    # whole line would never match again, the substitution inside it will
     assert learned_pairs("dude, zhegef", "dude, zajef") == {"zhegef": "zajef"}
     # an even span splits into per-word rules that generalize
     assert learned_pairs("mwalani, sandroni yes", "mualani, sandrone yes") == {
@@ -112,11 +111,11 @@ def test_learned_pairs_stores_the_word_not_the_line():
 
 
 def test_line_split_fragments_are_not_learned_as_rules():
-    # "prydwen" straddling a line break gets fixed in halves; as blind rules those halves
-    # are junk, and "doin" is a word people actually say
+    # "prydwen" across a line break gets fixed in halves, as rules those are junk, and "doin"
+    # is a real word
     assert learned_pairs("they use pre", "they use pry") == {}
     assert learned_pairs("-doin as like", "-dwen as like") == {}
-    # the fix itself still applies -- only the memorization is refused
+    # the fix still applies, it just isn't memorized
     assert vet("they use pre", Fix(i=0, text="they use pry")) == "they use pry"
 
 
@@ -127,10 +126,10 @@ def test_correction_is_learned_then_applied_with_no_llm(tmp_path):
     assert json.loads(
         (tmp_path / "corrections_genshin-impact.json").read_text()) == {"zhegef": "zajef"}
 
-    # second run on a fresh manifest: the deterministic pass catches it before any call
+    # second run on a fresh manifest: deterministic pass catches it before any call
     mp.write_text(json.dumps(_MANIFEST), encoding="utf-8")
     diff = fix_manifest(mp, game="genshin impact", corrections_dir=tmp_path,
-                        ask=_reply())          # LLM returns nothing
+                        ask=_reply())          # llm returns nothing
     assert diff["0"]["after"] == "dude, zajef"
 
 
@@ -141,7 +140,7 @@ def test_apply_corrections_respects_word_boundaries():
 
 
 def test_learned_pass_also_keeps_shouting(tmp_path):
-    # corrections are stored lowercase; a shouted caption must stay shouted
+    # corrections are stored lowercase, shouted captions stay shouted
     (tmp_path / "corrections_genshin-impact.json").write_text(
         json.dumps({"mawika": "mavuika"}), encoding="utf-8")
     mp = tmp_path / "manifest.json"
@@ -175,7 +174,7 @@ def test_chat_terms_finds_names_and_skips_slang(tmp_path):
     terms = chat_terms(p, min_count=3)
     assert "Kinich" in terms
     assert "That" not in terms and "that" not in terms   # ordinary word, low cap ratio
-    assert "KEKW" not in terms                           # ALL-CAPS chat slang
+    assert "KEKW" not in terms                           # all caps chat slang
     assert "PogChamp" not in terms                       # tagged emote fragment
 
 

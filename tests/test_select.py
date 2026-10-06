@@ -42,7 +42,7 @@ def test_budget_order_score():
     assert [c["score"] for c in picked] == [9.0, 5.0]
 
 
-# --- the local scorer must never take a run down with it ---------------------
+# --- the local scorer must never take down a run ---
 
 def test_a_wedged_local_scorer_scores_zero_instead_of_killing_the_run(monkeypatch):
     """`narrative.cast` is not wrapped in try/except, and by the time it runs the
@@ -86,9 +86,9 @@ def test_the_scorer_call_is_given_a_timeout(monkeypatch):
     assert got["llm_score"] == 7.0
 
 
-# --- cut points: where a shot is allowed to start and stop ---------------
-# The sentence snap is the real floor on shot length (a sentence runs seconds), so a
-# dense clip reel needs boundaries that are still real breaths but finer than a sentence.
+# --- cut points: where a shot can start and stop ---
+# sentence snap is the real floor on shot length, so dense reels need boundaries that are
+# still breaths but finer than a sentence
 
 import pytest
 
@@ -132,7 +132,7 @@ def test_phrase_snap_is_tighter_than_a_sentence_snap():
 
 
 def test_phrase_snap_respects_its_pad():
-    # the run head is 5s away; a 0.5s pad must not drag the cut back to it
+    # run head is 5s away, a 0.5s pad must not drag the cut back to it
     assert snap_to_phrase(_TWO_RUNS, 6.5, 6.8, max_pad=0.5)[0] == 6.5
 
 

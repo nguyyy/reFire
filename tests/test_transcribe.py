@@ -33,7 +33,7 @@ def test_local_dispatch_writes_source_and_caches(monkeypatch, tmp_path):
     src = json.loads((tmp_path / "transcript.source.json").read_text())
     assert src["backend"] == "local"
 
-    # second call serves the cache -> the (now exploding) backend must NOT run
+    # second call uses the cache, the exploding backend must not run
     def _boom(*a, **k):
         raise AssertionError("re-transcribed despite a valid cache")
     monkeypatch.setitem(T._BACKENDS, "local", _boom)
@@ -64,11 +64,11 @@ def test_speech_regions_offsets_slices_rejoins_edges_and_caches(monkeypatch, tmp
     cache = tmp_path / "speech.json"
 
     assert T.speech_regions(wav, cache_path=cache) == [[0.5, 1.25], [2.5, 2.75]]
-    # served from cache: the exhausted iterator raises if Silero runs again
+    # from cache: the used-up iterator raises if silero runs again
     assert T.speech_regions(wav, cache_path=cache) == [[0.5, 1.25], [2.5, 2.75]]
     assert T.speech_regions(tmp_path / "missing.wav") == []
 
-    # switching backend invalidates the cache (different engine) -> re-dispatch
+    # switching backend invalidates the cache -> redispatch
     monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
     with pytest.raises(SystemExit):                     # deepgram dispatched, no key
         T.transcribe(tmp_path / "a.wav", cache_path=cache, backend="deepgram")
@@ -92,7 +92,7 @@ def test_model_is_part_of_the_cache_key(monkeypatch, tmp_path):
     monkeypatch.setitem(T._BACKENDS, "local", _boom)
     assert T.transcribe(tmp_path / "a.wav", cache_path=cache, model_size="large-v3") == fake
 
-    # different model -> cache MISS, backend re-runs
+    # different model -> cache miss, backend reruns
     other = [{"text": "yo", "start": 0.0, "end": 0.3}]
     monkeypatch.setitem(T._BACKENDS, "local", lambda *a, **k: other)
     assert T.transcribe(tmp_path / "a.wav", cache_path=cache,
@@ -128,7 +128,7 @@ def test_release_whisper_actually_frees_the_model(monkeypatch):
     monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=FakeModel))
     T._whisper.cache_clear()
     ref = weakref.ref(T._whisper("large-v3-turbo", "cuda", "float16"))
-    assert ref() is not None            # cached: this is what outlived transcription
+    assert ref() is not None            # cached, this is what outlived transcription
     T.release_whisper()
     assert ref() is None
 

@@ -20,7 +20,7 @@ def test_sentences_split_and_span():
 
 
 def test_moment_map_degrades_to_stream_map():
-    # no signals, no captions -> byte-identical to the v1 transcript map
+    # no signals or captions -> same as the v1 transcript map
     assert perception.moment_map(WORDS) == director.stream_map(WORDS)
 
 
@@ -101,6 +101,6 @@ def test_select_by_signal_ranks_by_hype():
     chunks = [{"start": 0, "end": 30, "chat_z": 0.1},
               {"start": 30, "end": 60, "chat_z": 2.0},
               {"start": 60, "end": 90, "chat_z": -1.0}]
-    audio = [(75.0, 4.0)]        # third chunk is quiet in chat but LOUD
+    audio = [(75.0, 4.0)]        # third chunk is quiet in chat but loud
     got = select_by_signal(chunks, 2, audio_z=audio)
     assert [c["start"] for c in got] == [60, 30]

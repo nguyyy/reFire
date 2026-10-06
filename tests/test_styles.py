@@ -19,8 +19,8 @@ def test_literal_text_passes_through():
 
 
 def test_prose_that_looks_like_a_path_is_still_prose():
-    # a nonexistent path, and a paragraph long enough to make Path.is_file() raise on
-    # Windows -- both must come back as direction text, never as an error
+    # a missing path, and a paragraph long enough to make Path.is_file() raise on windows, both
+    # come back as direction text, never an error
     assert styles.resolve("notes/nope.md")[0] == "notes/nope.md"
     long = "cut fast " * 400
     assert styles.resolve(long) == (long.strip(), {})
@@ -41,7 +41,7 @@ def test_document_without_frontmatter_is_all_prose(tmp_path):
     assert styles.resolve(str(doc)) == ("# Style\njust prose", {})
 
 
-# --- frontmatter parsing is forgiving, never fatal -----------------------
+# --- frontmatter parsing is forgiving, never fatal ---
 @pytest.mark.parametrize("block, want", [
     ("---\nnope: 1\nstack: 4\n---\nx", {"stack": 4}),          # unknown key dropped
     ("---\npace: fast\nstack: 4\n---\nx", {"stack": 4}),        # bad value dropped
@@ -88,8 +88,8 @@ def test_the_real_style_document_parses():
     body, knobs = styles.resolve(str(doc))
     assert set(knobs) <= set(styles.KEYS)
     assert knobs["stack"] >= 5 and knobs["pace"] < 1.0
-    # chrono, not whiplash: reordering the body for tonal jolt also moved the
-    # stream's own sign-off into the middle of the cut (the video ended twice).
+    # chrono not whiplash: whiplash moved the stream's own sign-off into the middle (the video
+    # ended twice)
     assert knobs["order"] == "chrono" and knobs["snap"] == "transient"
     assert knobs["keep_build"] is False
     assert body and body.lstrip().startswith("#") and "---" not in body.splitlines()[0]
@@ -100,7 +100,7 @@ def test_unclosed_fence_falls_back_to_prose():
     assert styles.parse_frontmatter(text) == (text, {})
 
 
-# --- precedence: an explicit flag beats the document ---------------------
+# --- precedence: explicit flag beats the doc ---
 def _make_kwargs(monkeypatch, argv):
     """Run `cli.main` far enough to capture what it would pass to `pipeline.make`."""
     seen = {}

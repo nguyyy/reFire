@@ -19,7 +19,7 @@ EMPHASIS_WORDS = {
     "lets", "let's", "huge", "what", "sheesh", "nani", "actually",
 }
 
-LOUD_K = 1.8          # word RMS must exceed median*K (or the 85th pct) to be "loud"
+LOUD_K = 1.8          # loud = word rms over median*K (or the 85th pct)
 _CLEAN = str.maketrans("", "", ".,!?\"'")
 
 

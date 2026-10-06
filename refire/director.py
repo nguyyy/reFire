@@ -18,17 +18,15 @@ import time
 
 from pydantic import BaseModel, field_validator, model_validator
 
-from .pacing import (AVG_SHOT_S, BEAT_INFLATION_CAP,  # thresholds live in pacing;
-                     fill_pace, scaled_budget)        # nothing imports back
+from .pacing import (AVG_SHOT_S, BEAT_INFLATION_CAP,  # thresholds live in pacing, nothing imports back
+                     fill_pace, scaled_budget)
 
-# Story shape, continuity and "is this plot-critical or quest filler" are judgment calls,
-# which is the axis Opus is actually better on -- and the caching fix below cut the token
-# volume enough to pay for it. Was sonnet-5.
+# story shape / continuity / filler-or-not calls are where opus is better, and the
+# caching below cut tokens enough to afford it
 CLAUDE_MODEL = "claude-opus-5"
-MAX_TOKENS = 32000   # adaptive thinking + the largest outline JSON both fit comfortably
+MAX_TOKENS = 32000   # fits adaptive thinking + the biggest outline json
 
-# Nothing set an effort level before this, on either backend -- both ran at their own
-# default. xhigh is the sweet spot for long-horizon reasoning; sweep it with --effort.
+# xhigh works well for long reasoning, sweep it with --effort
 DEFAULT_EFFORT = "xhigh"
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
@@ -41,8 +39,7 @@ class _JsonModel(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _drop_nulls(cls, data):
-        # ponytail: models sometimes Title-Case the keys ("T_s"/"Why"); lowercase is enough
-        # since every field name here is already lowercase.
+        # models sometimes titlecase keys ("T_s"/"Why"), all our fields are lowercase so just lower them
         if isinstance(data, dict):
             return {k.lower(): v for k, v in data.items() if v is not None}
         return data
@@ -63,33 +60,31 @@ class Beat(_JsonModel):
     stubs still parse, and so the local director can omit fields it can't fill. `role` casts
     the beat into the arc; setup/payoff/reaction give casting the tight-cut anchors.
     """
-    title: str                      # short on-screen section-card title
+    title: str                      # short title for the section card
     role: str = ""                  # hook|setup|escalation|reversal|climax|payoff|button
-    intent: str = ""                # this beat's job in the story (also the scorer's mini-brief)
+    intent: str = ""                # this beat's job in the story (also the scorer's brief)
     viewer_question: str = ""       # what the viewer is wondering after this beat
     turn: str = ""                  # what changes in this beat
     transition_in: str = ""         # why this beat follows the previous one
     texture: str = ""               # funny|tense|awkward|triumphant|chaotic|sincere
-    energy: int = 3                 # 1-5 pacing value (lets the critic flag monotony)
+    energy: int = 3                 # 1-5, lets the critic flag monotony
     setup_start_s: float | None = None   # where needed context begins, if before start_s
-    payoff_start_s: float | None = None  # where the joke/reveal/win/fail lands (never cut before)
-    reaction_end_s: float | None = None  # tail after the payoff, so the cut doesn't feel abrupt
-    start_s: float                  # clip in-point (seconds) -- where this beat's moment begins
-    end_s: float                    # clip out-point (seconds) -- right after its payoff lands
-    segments: list[Segment] = []    # the EDIT: exact kept lines within the beat (jump cuts)
-    query: str = ""                 # fallback retrieval text if start_s/end_s come out unusable
+    payoff_start_s: float | None = None  # where the joke/reveal/win/fail lands, never cut before it
+    reaction_end_s: float | None = None  # tail after the payoff so it doesn't end abruptly
+    start_s: float                  # clip in-point (s), where the moment starts
+    end_s: float                    # clip out-point (s), right after the payoff
+    segments: list[Segment] = []    # the actual edit: kept lines inside the beat (jump cuts)
+    query: str = ""                 # fallback retrieval text if start_s/end_s are unusable
 
 
 class Outline(_JsonModel):
     central_idea: str
-    story_shape: str = ""           # the ONE shape this VOD supports (e.g. "confidence -> chaos")
+    story_shape: str = ""           # the one shape this vod supports (e.g. "confidence -> chaos")
     viewer_promise: str = ""        # what the viewer is promised they're watching
     ending_needed: str = ""         # what kind of ending the story has to land
-    # What plays before beat 1, lifted from footage the cut delivers later -- the one
-    # deliberate break in chronological order. One segment is the flash-forward teaser
-    # (the default); several is a montage STACK, the signature open of a dense clip reel.
-    # A bare object still parses: older outlines and a model that ignores the list shape
-    # both land here rather than failing the whole call.
+    # what plays before beat 1, pulled from later footage (the one break in order). one segment
+    # = flash-forward teaser, several = montage stack. a bare object still parses so old outlines
+    # and models ignoring the list shape don't fail the call
     cold_open: list[Segment] = []
     beats: list[Beat]
 
@@ -126,15 +121,14 @@ class _ChapterOut(_JsonModel):
 
 
 class Review(_JsonModel):
-    approved: bool   # true = the rough cut already tells a cohesive story, ship it
-    notes: str       # what's wrong (or why it's approved) -- logged to outline.json
-    outline: Outline # the revised plan (full re-plan: reorder/drop/merge/add/rebound)
+    approved: bool   # true = rough cut already works, ship it
+    notes: str       # what's wrong (or why it's fine), logged to outline.json
+    outline: Outline # revised plan (full replan: reorder/drop/merge/add/rebound)
 
 
-# The editorial Outline/Review schema is too deep for Claude's strict `output_format`
-# structured-output endpoint (it 400s "Schema is too complex"), so we prompt for JSON and
-# validate it ourselves -- same approach the local Ollama director already uses. One shared
-# shape string keeps the Claude + local directors in lockstep.
+# outline/review schema is too deep for claude's strict output_format (400 "Schema is too
+# complex") so we prompt for json and validate it ourselves, same as the ollama director.
+# one shared shape string keeps both in sync
 _OUTLINE_JSON = (
     '{"central_idea": "<str>", "story_shape": "<str>", "viewer_promise": "<str>", '
     '"ending_needed": "<str>", '
@@ -156,19 +150,13 @@ _REVIEW_INSTR = (
     '{"approved": <true|false>, "notes": "<str>", "outline": ' + _OUTLINE_JSON + "}")
 
 
-# Fraction of the footage the director SELECTS that survives silence compression, i.e.
-# finished_seconds / span_seconds. The director picks spans off the stream map and cannot
-# see that `compress_silence` will strip the dead air inside them, so every number it is
-# given -- the runtime target and the per-role budgets both -- is scaled up by this before
-# it goes in the prompt, and the results are read back in finished seconds.
+# fraction of selected footage left after compress_silence (finished_s / span_s). the director
+# can't see the dead air that gets stripped, so every number it gets (runtime target, role
+# budgets) is scaled up by this and results are read back in finished seconds.
 #
-# 0.84 is the median over the 7 real cuts in run/, re-measured once `compress_silence`
-# stopped cutting speech whisper returned no words for (`voiced`, 2026-09-13): 0.73-0.92
-# per cut, where the same cuts measured ~0.81 before that fix (the older 0.77 predates
-# both). It is only the PRIOR: after the first cast, `pipeline` feeds the shrink this
-# stream actually realized into the review rounds. It matters on its own only when
-# --review-rounds is 0. Calibrate here if cuts start landing consistently long (raise) or
-# short (lower).
+# 0.84 = median of the 7 real cuts in run/ (range 0.73-0.92). it's only a prior, pipeline
+# feeds the measured value into the review rounds, so it only matters alone with
+# --review-rounds 0. raise if cuts land long, lower if short
 CUT_SHRINK = 0.84
 
 
@@ -320,18 +308,14 @@ _SYSTEM_STREAM_INTRO = (
 )
 
 
-# The structure paragraph is the one part of _SYSTEM a `--style` may overrule. The
-# default mandates an arc and explicitly forbids the alternative ("that is a highlight
-# reel, not a story"), so an editor asking for a highlight reel would be arguing with the
-# prompt. _STYLE_RULE defers to the DIRECTION instead. It is sliced out of _SYSTEM by its
-# own text rather than duplicated, so the default cannot drift out of the swap.
+# the structure paragraph is the one part of _SYSTEM a --style can override. the default
+# requires an arc and bans highlight reels, so _STYLE_RULE defers to the direction instead.
+# sliced out of _SYSTEM by its text so the default can't drift
 _ARC_HEAD = "Shape the beats into an ARC"
 _ARC_TAIL = "Only include beats the footage can actually support."
 
-# The cold-open paragraph is the second swappable region, on the same principle: the
-# default describes ONE flash-forward teaser, and a montage stack is a different move
-# entirely (many moments, none explained, escalating). Sliced out by its own text so the
-# default cannot drift out of the swap -- same guarantee as the arc region above.
+# cold open paragraph is the second swappable part. default is one teaser, a montage stack is
+# a different thing (lots of moments, unexplained, escalating). sliced by text like the arc
 _STACK_HEAD = "- cold_open: OPTIONAL flash-forward teaser"
 _STACK_TAIL = "Then break it into BEATS"
 
@@ -364,15 +348,11 @@ _STYLE_RULE = (
 )
 
 
-# The third swappable region, and the one that decides whether a styled cut survives its
-# own review. `_SYSTEM` and `_REVIEW_SYSTEM` both instruct at length on PROTECTING a
-# moment: keep the whole run of attempts, pull the start earlier for context, extend the
-# end until the payoff lands. Those are right for a story and are the exact opposite of a
-# cut built on skipped setup and premature cuts -- and two of them are literal orders to
-# ADD footage back, so leaving them in place means round 2 stuffs the cut back into shape
-# and the direction quietly loses. `keep_build=False` (from a style document) swaps them
-# for their mirror images. Same switch the pacing audit reads, so the prompt, the
-# measurement and the style cannot disagree about what counts as a defect.
+# third swap, and the one that decides if a styled cut survives review. _SYSTEM and
+# _REVIEW_SYSTEM both push protecting moments (keep attempts, start earlier, extend to payoff),
+# which is the opposite of a skipped-setup cut, and two of them literally say add footage
+# back. so keep_build=False (from a style doc) swaps in the mirror versions. same switch the
+# pacing audit reads so prompt, audit and style agree on what's a defect
 _SEG_HEAD = "Each segment should be at least"
 _SEG_TAIL = "BUDGET A BEAT'S SPANS BY ITS ROLE"
 
@@ -389,16 +369,15 @@ _DENSE_BUILD = (
     "breaks it. Skip whole exchanges freely; never take half of one. "
 )
 
-# Rubric bullets in _REVIEW_SYSTEM, each located by its own opening and the next bullet.
+# rubric bullets in _REVIEW_SYSTEM, each found by its opening and the next bullet
 _RUBRIC_SWAPS = [
     ("- SETUP CLARITY:", "- EXPECTATION:",
      "- NO SETUP NEEDED: this cut opens moments mid-sequence on purpose, and a viewer "
      "who is half a beat behind is the intent rather than a defect. Do NOT add "
      "setup_start_s to give a moment context. Flag a beat only if it is literally "
      "unreadable -- not merely unexplained.\n"),
-    # Ends at SEVERED EXCHANGE, not PAYOFF COMPLETION: that bullet now sits between the
-    # two, and a swap reaching past it would delete the one continuity check a style is
-    # not allowed to switch off. A dense cut skips MOMENTS; it still may not sever one.
+    # ends at SEVERED EXCHANGE, not PAYOFF COMPLETION, so the swap doesn't delete that
+    # continuity check. dense cuts skip moments, they still can't sever one
     ("- MISSING BUILD-UP:", "- SEVERED EXCHANGE:",
      "- DENSITY: the failure mode for THIS cut is slackness, not missing build-up. A "
      "LONG gap inside a beat's span is the edit working -- but a few seconds of deleted "
@@ -460,16 +439,13 @@ def _styled_system(style: str | None = None, stack: int = 0,
         out = _swap(out, _STACK_HEAD, _STACK_TAIL, _stack_rule(stack))
     if not keep_build:
         out = _swap(out, _BUILD_HEAD, _BUILD_TAIL, _DENSE_BUILD)
-    # always: a 3s floor stated next to a paced budget contradicts it (identity at 1.0)
+    # always, a 3s floor next to a paced budget contradicts it (no-op at 1.0)
     seg = f"Each segment should be at least ~{_seg_floor(pace)} seconds. "
     if not keep_build:
-        # A floor with no ceiling is how a dense style ships slow shots. `pacing.audit`
-        # grades mean shot length against AVG_SHOT_S * pace -- but ONLY on the skipped-
-        # build styles, and the director was never told the number it is measured by.
-        # Unstated, it picked 14.0s-mean segments against a 4.2s ceiling and every ryuk
-        # rule downstream was applied to shots 3x too long. Same constant and the same
-        # scaling as the audit, stated exactly when the audit checks it, so what the
-        # director is TOLD and what the audit ENFORCES still cannot drift.
+        # a floor with no ceiling lets dense styles ship slow shots. pacing.audit grades mean shot
+        # length against AVG_SHOT_S * pace on skipped-build styles, so tell the director that same
+        # number (it was picking 14s segments against a 4.2s ceiling). same constant and scaling as
+        # the audit so they can't drift
         avg = AVG_SHOT_S * pace
         seg += (f"Across a beat those segments must AVERAGE about "
                 f"{avg:.1f} seconds -- that average IS what this cut is "
@@ -493,7 +469,7 @@ def pick_system(brief: str | None, style: str | None = None, stack: int = 0,
     body = _styled_system(style, stack, keep_build, pace)
     if brief:
         return body + _MAP_LEGEND
-    # same beat schema + structure rules; only the opening framing changes
+    # same beat schema + structure rules, only the opening changes
     intro_end = body.index("Do NOT list interesting")
     return _SYSTEM_STREAM_INTRO + body[intro_end:] + _MAP_LEGEND
 
@@ -660,12 +636,9 @@ def _windows(map_text: str, window_s: float = 1200.0) -> list[tuple[float, float
     return out
 
 
-# `ollama.chat` has no timeout and blocks forever (same hazard `score.SCORE_TIMEOUT_S`
-# guards). Without it the `except -> stub chapter` fallback below is dead code against a
-# real wedge: a blocked socket raises nothing, so the run hangs here with no Claude money
-# spent and nothing written. Generous because this is a legitimately slow call -- a 20-min
-# window on a local 20B measured 1.5-5 min -- and a timeout that trips on a healthy run is
-# worse than none. A reasoning model that never stops thinking is what this catches.
+# ollama.chat has no timeout and can block forever, which would make the stub fallback below
+# dead code. generous on purpose: a 20 min window on a local 20B takes 1.5-5 min and a
+# timeout that trips on a healthy run is worse than none. mostly catches runaway thinking
 SCOUT_TIMEOUT_S = 600.0
 
 
@@ -683,7 +656,7 @@ def chapterize(map_text: str, window_s: float = 1200.0, model: str = "llama3.1:8
             data = json.loads(Path(cache_path).read_text(encoding="utf-8"))
             return [Chapter.model_validate(c) for c in data]
         except (ValueError, TypeError):
-            pass   # corrupt cache -> re-scout
+            pass   # corrupt cache -> rescout
     import ollama
     client = ollama.Client(timeout=SCOUT_TIMEOUT_S)
     wins = _windows(map_text, window_s)
@@ -692,9 +665,7 @@ def chapterize(map_text: str, window_s: float = 1200.0, model: str = "llama3.1:8
     t_start = time.monotonic()
     for i, (a, b, text) in enumerate(wins):
         k = i + 1
-        # Report BEFORE the call as well as after: the call is the multi-minute part, so
-        # a bar that only moves on completion sits still for exactly as long as the thing
-        # the user wants to watch.
+        # report before the call too, it's the multi-minute part
         if progress:
             progress(i / n, f"scouting chapter {k}/{n} "
                             f"({a / 3600:.2f}h-{b / 3600:.2f}h, {len(text) // 1000}k chars)")
@@ -706,7 +677,7 @@ def chapterize(map_text: str, window_s: float = 1200.0, model: str = "llama3.1:8
                           {"role": "user", "content": text}],
                 options={"num_ctx": 16384})
             got = _ChapterOut.model_validate(json.loads(resp["message"]["content"]))
-        except Exception as e:   # any window failure (incl. timeout) -> stub, keep scouting
+        except Exception as e:   # any window failure (incl timeout) -> stub, keep going
             print(f"[scout] window {k} failed ({e}); using stub chapter", flush=True)
             got = _ChapterOut()
         dt = time.monotonic() - t_win
@@ -714,7 +685,7 @@ def chapterize(map_text: str, window_s: float = 1200.0, model: str = "llama3.1:8
         title = got.title or first[:60] or f"chapter {k}"
         chapters.append(Chapter(
             title=title, start_s=a, end_s=b, summary=got.summary,
-            # clamp hallucinated stamps into the window
+            # clamp made-up timestamps into the window
             notable_moments=[n_ for n_ in got.notable_moments if a <= n_.t_s <= b][:5]))
         if progress:
             eta = (time.monotonic() - t_start) / k * (n - k)
@@ -782,8 +753,8 @@ def _realized_script(outline_log: dict, pace: float = 1.0,
     lines.append("")
     dropped = outline_log.get("dropped") or []
     if dropped:
-        # tell the critic WHY beats vanished, or it re-adds them at full length every
-        # round and the budget trimmer deletes them again (an invisible tug-of-war).
+        # tell the critic why beats got dropped, otherwise it re-adds them every round and the
+        # budget trimmer drops them again
         lines.append("NOTE: these beats were dropped to fit the runtime budget: "
                      + ", ".join(str(d.get("title", "?")) for d in dropped)
                      + ". Tighten other beats with segments instead of re-adding these "
@@ -791,7 +762,7 @@ def _realized_script(outline_log: dict, pace: float = 1.0,
     return "\n".join(lines).strip()
 
 
-DROPPED_PREVIEW = 140   # chars of a hole's transcript shown; enough to see what it was
+DROPPED_PREVIEW = 140   # chars of a hole's transcript to show
 
 
 def _script_body(b: dict) -> list[str]:
@@ -808,7 +779,7 @@ def _script_body(b: dict) -> list[str]:
     parts = b.get("parts") or []
     seams = b.get("seams") or []
     if not parts or len(parts) != len(seams) + 1:
-        return [f'   "{str(b.get("text", "")).strip()}"']    # older log, or a single span
+        return [f'   "{str(b.get("text", "")).strip()}"']    # older log or single span
     out = []
     for i, part in enumerate(parts):
         if part.strip():
@@ -821,29 +792,16 @@ def _script_body(b: dict) -> list[str]:
     return out
 
 
-# Average finished footage per beat -- sets the beat COUNT only (`_n_beats`); what any
-# single beat may actually spend is `pacing.ROLE_BUDGET`, weighted by role.
-#
-# This sat at 35.0 as "the blunt instrument against a middle that drags", and that was the
-# wrong diagnosis: the drag was weak-score screen time, not too-few story turns, and 35s
-# of allowance meant an escalation built on repetition (a wordle spiral, a word-ladder
-# grind) could not hold its own attempts -- the director kept an opener plus the payoff
-# and skipped the minutes between. 48 is the role-weighted average of ROLE_BUDGET, so the
-# count and the per-beat budgets agree instead of fighting. Lower = more turns per minute;
-# walk it back if cuts start feeling choppy, but raise ROLE_BUDGET, not this, if beats
-# feel starved.
+# avg finished footage per beat. only sets the beat count (_n_beats), the per-beat budget is
+# pacing.ROLE_BUDGET by role. 48 = role-weighted avg of ROLE_BUDGET so they agree.
+# lower = more turns per minute. if beats feel starved raise ROLE_BUDGET, not this
 SEC_PER_BEAT = 48.0
 
 
-# `BEAT_INFLATION_CAP` -- how far above the pace-1.0 count `pace` may push the beat ask --
-# moved to `pacing`, where it sits next to the ROLE_BUDGET table it has to stay reconciled
-# with (`pacing.fill_pace`). It is a ratio and not a flat ceiling because a genuinely long
-# target legitimately wants more beats (60 min at pace 1.0 = 75) and must not be clamped
-# to a short cut's count. The reason it exists: the director returns 15-24 beats whatever
-# we ask for, so an inflated number buys no extra story turns -- only a bigger thinking
-# bill. `--pace 0.35` once asked for 57 beats on a 16-min target; the model spent 57,408
-# of its 64,000 output tokens deciding, overran the answer by 773, and returned 20 beats
-# anyway -- and the truncated outline took the whole run down with it.
+# BEAT_INFLATION_CAP (how far pace can push the beat count) lives in pacing next to
+# ROLE_BUDGET. it's a ratio since long targets really do want more beats. it exists because
+# the director returns 15-24 beats no matter what, so asking for more just burns thinking
+# tokens and can truncate the outline
 
 
 def _n_beats(target_s: float, pace: float = 1.0) -> int:
@@ -905,10 +863,8 @@ def _complete(client, model, system, user_content, model_cls, tag="claude", trac
         print(f"[{tag}] full prompt -> {trace}\\{stamp}-{tag}-request.txt")
 
     def _call(level):
-        # System as a BLOCK, not a bare string, so it can carry a breakpoint: it renders
-        # ahead of the messages, so without one the map block's own marker can never be
-        # reached on a second call. 1h TTL, not the 5-minute default -- review rounds were
-        # measured 6m22s apart start-to-start, so a 5-minute entry expires between them.
+        # system as a block so it can carry a cache breakpoint, otherwise the map's marker is never
+        # reached on later calls. 1h ttl since review rounds are ~6.5 min apart
         kw = dict(model=model, max_tokens=MAX_TOKENS,
                   system=[{"type": "text", "text": system,
                            "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
@@ -942,23 +898,17 @@ def _complete(client, model, system, user_content, model_cls, tag="claude", trac
         return text, resp.stop_reason, "".join(thought), getattr(resp, "usage", None)
 
     text, stop, thought, usage = _call(effort)
-    # `max_tokens` with text present = thinking ate most of the budget and the answer got
-    # cut off mid-JSON. Unlike the CLI path there is no auto-continuation to stitch back
-    # together here, so take the same escape hatch as the empty case: starve the thinking
-    # and hand the budget to the answer (a 20-beat outline is ~7.4k tokens).
-    #
-    # Effort "low", NOT thinking {"type": "disabled"}, which is what this used to do:
-    # Opus 5 rejects disabled thinking with a 400 at effort xhigh or max, so the old guard
-    # would turn a recoverable truncation into a hard failure on the model we now default
-    # to. Low effort reaches the same place -- barely any thinking -- and is always legal.
+    # max_tokens with text = thinking ate the budget and the json got cut off. no
+    # auto-continuation here so do what the empty case does: low effort, budget goes to the
+    # answer (20-beat outline is ~7.4k tokens). use low effort, not thinking disabled, since
+    # opus 5 400s on disabled thinking at xhigh/max
     if not text.strip() or stop == "max_tokens":
         print(f"[{tag}] {'empty' if not text.strip() else 'truncated'} answer "
               f"(stop_reason={stop}); retrying at effort=low")
         text, stop, thought, usage = _call("low")
     cache = ""
     if usage is not None:
-        # Nothing read these before, which is why a breakpoint that never fired went
-        # unnoticed for so long. A warm round shows a big `read` and a near-zero `in`.
+        # warm round = big read, near zero in
         cache = (f"CACHE: read={getattr(usage, 'cache_read_input_tokens', 0):,} "
                  f"write={getattr(usage, 'cache_creation_input_tokens', 0):,} "
                  f"in={getattr(usage, 'input_tokens', 0):,} "
@@ -1029,8 +979,8 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
     user_text = "\n\n".join(b.get("text", "") for b in user_content)
     warm = bool(resume and session_id)
     if warm:
-        # The session already holds the map and the director's own answer; --system-prompt-file
-        # is ignored on a resume, so the rubric has to travel as user text.
+        # the session already has the map. --system-prompt-file is ignored on resume so the rubric
+        # goes in as user text
         user_text = f"{system}\n\n{user_text}"
     stamp = time.strftime("%H%M%S")
     how = f"resume {session_id[:8]}" if warm else "new session"
@@ -1045,36 +995,31 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
         print(f"[{tag}] full prompt -> {trace}\\{stamp}-{tag}-request.txt")
 
     env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
-    # The system prompt goes through a temp FILE (--system-prompt-file), never --system-prompt:
-    # a multi-line value in argv gets split on the newline by Windows command-line parsing,
-    # which silently corrupts every flag after it -- stream-json is dropped and the CLI
-    # answers in plain text, so our JSON parser sees nothing (0 chars, stop_reason=None).
-    # ponytail: temp file leaks only if the call crashes before the unlink below; the OS
-    # temp dir mops that up.
+    # system prompt goes through a temp file, not --system-prompt. windows splits multi-line argv
+    # on newlines which breaks every flag after it (cli answers plain text, parser sees nothing).
+    # the file only leaks if we crash before the unlink, os temp cleans that up
     sp = tempfile.NamedTemporaryFile("w", suffix=".txt", encoding="utf-8", delete=False)
     sp.write(system)
     sp.close()
-    # tools="" = pure completion (default). tools="Read" = drill-down mode: the model may
-    # Read per-chapter map files, relative to cwd (the run dir); --allowedTools pre-permits
-    # them so headless mode never hangs on a prompt
-    # (verified live: -p --tools Read --allowedTools Read reads relative paths fine).
+    # tools="" = plain completion. tools="Read" = drill-down, the model can read per-chapter map
+    # files relative to the run dir. --allowedTools so headless mode never stops on a prompt
     cmd = [exe, "-p", "--model", model, "--tools", tools, "--setting-sources", "",
            "--effort", effort, "--output-format", "stream-json",
            "--include-partial-messages", "--verbose"]
     if warm:
-        cmd += ["--resume", session_id]      # system prompt is the session's already
+        cmd += ["--resume", session_id]      # session already has the system prompt
     else:
         cmd += ["--system-prompt-file", sp.name]
         if session_id:
-            cmd += ["--session-id", session_id]   # so the review rounds can resume it
+            cmd += ["--session-id", session_id]   # so review rounds can resume it
     if tools:
         cmd += ["--allowedTools", tools]
     proc = subprocess.Popen(
         cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,   # non-JSON stderr lines are skipped by the parser
+        stderr=subprocess.STDOUT,   # parser skips non-json lines
         text=True, encoding="utf-8", errors="replace",
         env=env, cwd=str(cwd) if cwd else tempfile.gettempdir())
-    # belt-and-braces: a wedged CLI (auth prompt, network stall) must not hang the run
+    # a wedged cli (auth prompt, network stall) can't hang the run
     import threading
     killer = threading.Timer(timeout_s, lambda: proc.kill())
     killer.start()
@@ -1085,13 +1030,10 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
     thought: list[str] = []
     t_call, beats, t_line = time.monotonic(), 0, float("-inf")
     tty = sys.stdout.isatty()
-    # Every assistant TURN's text, not just the last. When thinking eats the output budget
-    # the message stops on `max_tokens` and Claude Code silently continues in a second
-    # message -- but the `result` event below carries only that FINAL turn, so a JSON
-    # answer split across turns arrives as a mid-object fragment. (Cost us a whole video:
-    # 57,408 of 64,000 output tokens went to thinking, the outline overran by 773, and the
-    # 16,487-char head was dropped on the floor.) Whole content blocks, not `text_delta`
-    # reassembly -- they don't depend on --include-partial-messages delta ordering.
+    # collect every assistant turn, not just the last. when thinking eats the budget claude code
+    # continues in a second message but the result event only has the final turn, so split json
+    # shows up as a fragment. whole content blocks, not text_delta reassembly, so we don't depend
+    # on --include-partial-messages ordering
     turns: list[str] = []
     stops: list[str] = []
     text, stop, is_err = "", None, False
@@ -1111,11 +1053,8 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
             d = (ev.get("event") or {}).get("delta") or {}
             kind = d.get("type", "")
             if kind == "thinking_delta":
-                # The subscription CLI sends these BLANK. Keep them anyway: an empty
-                # chunk is still a heartbeat (~1.6s), and dropping it -- the
-                # `and d.get("thinking")` guard this replaces -- is what left the
-                # terminal dead for the whole think, ~6 of the 7 minutes on a
-                # director call.
+                # the subscription cli sends these blank. keep them anyway, an empty chunk still works as a
+                # heartbeat (~1.6s), dropping them left the terminal dead for most of the call
                 chunk = d.get("thinking") or ""
                 if chunk:
                     thought.append(chunk)
@@ -1134,8 +1073,7 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
                 print(_think_tick(tag, time.monotonic() - t_call, beats),
                       end="", flush=True)
             elif time.monotonic() - t_line >= 30:
-                # Piped (the panels read line by line): a bare-\r tick never ends a line, so
-                # a 12-minute think piled up unseen and dumped all at once on Cancel.
+                # piped output: a bare \r tick never ends a line, so the whole think shows up at once on cancel
                 t_line = time.monotonic()
                 print(_think_tick(tag, t_line - t_call, beats).strip(), flush=True)
         elif ev.get("type") == "result":
@@ -1151,8 +1089,7 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
     print(f"[{tag}] <- stop_reason={stop}, {len(text):,} chars "
           f"({len(turns)} turn{'s' * (len(turns) != 1)}, {len(joined):,} chars joined)")
     if trace:
-        # turn count + per-turn stop_reasons, because a fragment that LOOKS like a whole
-        # answer is exactly what made this failure take hours to spot in the last dump.
+        # turn count + per-turn stop reasons, a fragment that looks like a whole answer is hard to spot
         _trace_write(trace, f"{stamp}-{tag}-response.txt",
                      f"STOP_REASON: {stop}\nTURNS: {len(turns)} "
                      f"({', '.join(stops) or 'n/a'})\n\n=== THINKING (summarized) ===\n"
@@ -1161,8 +1098,8 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
     if proc.returncode != 0 or is_err:
         raise RuntimeError(f"claude CLI failed (exit {proc.returncode}, "
                            f"stop_reason={stop}): {text[:200]}")
-    # `result` first: on a healthy single-turn call it IS the answer, and it keeps any
-    # drill-down narration (tools="Read") out of the parse. The join is the recovery path.
+    # result first: on a normal single-turn call it's the answer, and it keeps drill-down
+    # narration out of the parse. the join is the recovery path
     for i, candidate in enumerate((text, joined)):
         if not candidate.strip():
             continue
@@ -1180,7 +1117,7 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
         f"result {len(text):,} chars, joined {len(joined):,} chars")
 
 
-MAX_READS = 3   # each Read turn reprocesses the whole context -- the hidden cost cap
+MAX_READS = 3   # each read turn reprocesses the whole context, caps the hidden cost
 
 
 def _read_note() -> str:
@@ -1204,8 +1141,7 @@ def _header(brief: str | None, title: str, target_s: float,
     missed. Measured on a real 3-call run: 1,695 bytes of shared prefix out of 250,000.
     """
     what = brief or "(none -- find the stream's own best story)"
-    # The brief says WHAT to cut; the direction says HOW. Every director call routes
-    # through this helper, so this one line reaches outline, review and the local path.
+    # brief = what to cut, direction = how. every director call goes through here
     how = f"DIRECTION (how to cut it): {style}\n" if style else ""
     runtime = (f"TARGET RUNTIME: ~{int(target_s)}s of FINISHED video "
                f"(rough guide, not a hard limit)\n")
@@ -1232,8 +1168,7 @@ def _budget_note(target_s: float, shrink: float = CUT_SHRINK, pace: float = 1.0)
            f"inside every span you choose is removed automatically -- on this stream "
            f"that is about {round((1 - shrink) * 100)}% of it -- so spans adding up to "
            f"the target itself would ship well SHORT of it.")
-    # Only when the measurement actually disagrees with the prior the system prompt used;
-    # restating an identical table would just be noise the model has to reconcile.
+    # only when the measurement differs from the prior, otherwise it's just noise
     if abs(shrink - CUT_SHRINK) > 0.01:
         out += ("\nMEASURED ROLE BUDGETS (these supersede the per-role seconds in the "
                 f"instructions above, which used an estimate): {_role_note(shrink, pace)}.")
@@ -1256,8 +1191,8 @@ def outline(stream_map_text: str, brief: str, title: str, target_s: float,
     caller falls back to the flat pipeline. The map block is cache-marked so the API
     path's effort=low retry guard (same prefix) reads it warm.
     """
-    # CUT_SHRINK, not the caller's measured `shrink`: the system prompt has to render the
-    # same bytes on every call of a run or it moves the prefix ahead of the whole map.
+    # CUT_SHRINK not the measured shrink: the system prompt has to be byte-identical every call
+    # or it breaks the cache prefix
     system = (pick_system(brief, style, stack, keep_build, pace)
               .format(n=_n_beats(target_s, pace), roles=_role_note(CUT_SHRINK, pace))
               + _OUTLINE_INSTR)
@@ -1268,7 +1203,7 @@ def outline(stream_map_text: str, brief: str, title: str, target_s: float,
                      + f"STREAM MAP (timestamp -> what was said):\n{stream_map_text}"),
             "cache_control": {"type": "ephemeral", "ttl": "1h"},
         },
-        # After the breakpoint: the only part that moves between calls.
+        # after the breakpoint, the only part that changes between calls
         {"type": "text", "text": _budget_note(target_s, shrink, pace)},
     ]
     if backend == "cli":
@@ -1283,7 +1218,7 @@ def outline(stream_map_text: str, brief: str, title: str, target_s: float,
                                  session_id=session_id)
         except (RuntimeError, OSError) as e:
             print(f"[director] claude CLI unavailable ({e}); using API key")
-    import anthropic  # optional heavy dep; missing key raises -> caller falls back
+    import anthropic  # optional heavy dep, missing key raises -> caller falls back
 
     client = anthropic.Anthropic()             # reads ANTHROPIC_API_KEY
     return _complete(client, model, system, user_content, Outline,
@@ -1314,12 +1249,9 @@ def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
         system += ("\nNo editorial brief was given: judge the cut against its own "
                    "central idea and the stream's strongest through-line.")
     if style:
-        # Load-bearing. The ARC bullet in the rubric above is a default, not a law:
-        # without this the critic 'fixes' a deliberately styled cut back into a story
-        # arc, and round 2 silently undoes the direction the editor set.
-        # Load-bearing, and it must outrank the WHOLE rubric rather than one item of it:
-        # naming only ARC leaves a model dutifully applying the other twelve, several of
-        # which ask it to widen beats and restore skipped footage.
+        # needed. the ARC bullet is a default: without this the critic "fixes" a styled cut back
+        # into an arc and round 2 undoes the direction. it has to outrank the whole rubric, naming
+        # just ARC leaves the other twelve, some of which say to widen beats and restore footage
         system += ("\nThe editor gave a DIRECTION for HOW to cut this, not just what "
                    "to cut. The rubric above is the DEFAULT house style, not a law: "
                    "wherever it and the direction disagree, the direction wins -- "
@@ -1329,9 +1261,8 @@ def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
                    "the direction has overruled. If the cut obeys the direction and the "
                    "rubric still complains, the rubric is what is wrong.")
     if stack > 0:
-        # The COLD OPEN rubric item above judges a single teaser; a stack is a different
-        # object with its own failure modes, and without this the critic collapses it
-        # back to one clip on the first round.
+        # the COLD OPEN item judges a single teaser, without this the critic collapses a stack back
+        # to one clip in round 1
         system += ("\nThe cold open is a MONTAGE STACK, not a single teaser: about "
                    f"{stack} moments of 1-2.5s each, played back to back with no setup "
                    "and no explanation. Judge it as a stack -- every moment must be "
@@ -1340,8 +1271,7 @@ def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
                    "itself. Do not collapse it to one clip, and do not ask for context "
                    "inside it; the viewer being half a beat behind is the intent.")
     system += _REVIEW_INSTR
-    # The only part that changes between rounds. Kept separate because a resumed CLI
-    # session sends THIS ALONE -- the map is already in the conversation.
+    # the only part that changes between rounds. a resumed cli session sends just this
     tail = {
         "type": "text",
         "text": (_budget_note(target_s, shrink, pace)
@@ -1364,16 +1294,13 @@ def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
         tools = "Read" if run_dir else ""
         if session_id:
             try:
-                # Warm path: the director opened this session and the ~240KB map is already
-                # in it. Send the new cut ONLY -- three copies of the map per run was most
-                # of the ~15 minutes.
+                # warm path: the session already has the ~240KB map, send only the new cut
                 return _complete_cli(model, system, [tail] + read, Review,
                                      tag="review", trace=trace, tools=tools,
                                      cwd=run_dir, effort=effort,
                                      session_id=session_id, resume=True)
             except (RuntimeError, OSError) as e:
-                # Stale session, older CLI, whatever: never let a cache optimisation cost
-                # a run that has already spent a director call. Re-send the map and go on.
+                # stale session, old cli, whatever: don't lose a run over a cache optimization, resend the map
                 print(f"[review] session resume failed ({e}); re-sending the full map")
         try:
             return _complete_cli(model, system, user_content + read, Review,
@@ -1381,7 +1308,7 @@ def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
                                  cwd=run_dir, effort=effort)
         except (RuntimeError, OSError) as e:
             print(f"[review] claude CLI unavailable ({e}); using API key")
-    import anthropic  # optional heavy dep; missing key raises -> caller keeps current cut
+    import anthropic  # optional heavy dep, missing key raises -> caller keeps the current cut
 
     client = anthropic.Anthropic()
     return _complete(client, model, system, user_content, Review,
@@ -1397,8 +1324,7 @@ def outline_local(stream_map_text: str, brief: str, title: str, target_s: float,
     shorter streams since the whole map must fit the model's context. Same `Outline`.
     """
     import ollama  # already a project dep
-    # CUT_SHRINK for the same reason as outline(): a measured shrink is restated by
-    # `_budget_note`, whose "supersede the estimate above" wording assumes this prior.
+    # CUT_SHRINK for the same reason as outline(), _budget_note's wording assumes this prior
     system = (pick_system(brief, style, stack, keep_build, pace)
               .format(n=_n_beats(target_s, pace), roles=_role_note(CUT_SHRINK, pace))
               + _OUTLINE_INSTR)
@@ -1409,6 +1335,6 @@ def outline_local(stream_map_text: str, brief: str, title: str, target_s: float,
         model=model, format="json",
         messages=[{"role": "system", "content": system},
                   {"role": "user", "content": user}],
-        options={"num_ctx": 8192},   # ponytail: bump for long streams if it truncates
+        options={"num_ctx": 8192},   # bump for long streams if it truncates
     )
     return Outline.model_validate(json.loads(resp["message"]["content"]))

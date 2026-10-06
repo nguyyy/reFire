@@ -12,8 +12,8 @@ from .reframe import ENTER, EXIT, reframe_clip
 
 W, H, FPS = 1280, 720, 30
 
-# EBU R128 target for --style loudnorm. -16 LUFS is the streaming/web norm and leaves
-# headroom for the clipped screams this kind of cut deliberately keeps.
+# EBU R128 target for --style loudnorm. -16 LUFS is the usual web level and leaves
+# headroom for the screams we keep on purpose
 LOUDNORM = "loudnorm=I=-16:TP=-1.5:LRA=11"
 
 
@@ -31,7 +31,7 @@ def _ass_filter_path(ass_path: Path) -> str:
 
 def render_clip(
     video: str | Path,
-    seg: dict,          # needs start/end; callers also pass role/energy for styling
+    seg: dict,          # needs start/end, role/energy optional for styling
     ass_path: str | Path,
     out_path: str | Path,
     encoder: str = "libx264",
@@ -63,17 +63,15 @@ def render_clip(
     work = out_path.with_name(out_path.stem + "_work.mp4")
     reframed = out_path.with_name(out_path.stem + "_reframed.mp4")
 
-    # A: trim + normalize fps, keep source resolution (reframe crops from it), keep audio.
-    # When `keep` carves out dead air, a select+setpts pass drops the gaps in one encode;
-    # a single full-length span is a no-op so we skip the filter (byte-identical trim).
+    # A: trim + normalize fps, keep source res (reframe crops from it) and audio.
+    # if keep cuts dead air, select+setpts drops the gaps in one encode. one full span skips it
     cut, afilters = [], []
     if keep and not (len(keep) == 1 and keep[0][0] <= 1e-3 and keep[0][1] >= dur - 1e-3):
         sel = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in keep)
         cut = ["-vf", f"select='{sel}',setpts=N/FRAME_RATE/TB"]
         afilters += [f"aselect='{sel}'", "asetpts=N/SR/TB"]
     if loudnorm:
-        # single-pass EBU R128; the two-pass form needs a measurement run per clip and
-        # buys nothing at these lengths.
+        # single pass, two-pass needs a measuring run per clip and doesn't help at these lengths
         afilters.append(LOUDNORM)
     if afilters:
         cut += ["-af", ",".join(afilters)]
@@ -81,8 +79,7 @@ def render_clip(
           *cut, "-r", str(FPS), "-c:v", encoder, "-pix_fmt", "yuv420p",
           "-c:a", "aac", "-ar", "48000", "-ac", "2", "-dn", "-y", str(work)])
 
-    # B: reframe to the output canvas. Motion zoom is optional because it is a style
-    # pass and can dominate render time on long cuts.
+    # B: reframe to the output canvas. motion zoom is optional, it can eat render time on long cuts
     if motion_zoom:
         reframe_clip(work, reframed, out_w=W, out_h=H, speech=speech, enter=enter, exit=exit)
     else:
@@ -91,7 +88,7 @@ def render_clip(
               "-an", "-r", str(FPS), "-c:v", encoder, "-pix_fmt", "yuv420p",
               "-dn", "-y", str(reframed)])
 
-    # C: burn subtitles on the reframed video, take audio from the work clip
+    # C: burn subs on the reframed video, audio from the work clip
     _run(["ffmpeg", "-i", str(reframed), "-i", str(work),
           "-filter_complex", f"[0:v]subtitles='{_ass_filter_path(Path(ass_path))}'[v]",
           "-map", "[v]", "-map", "1:a", "-r", str(FPS),

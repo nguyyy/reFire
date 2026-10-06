@@ -60,7 +60,7 @@ def snap_to_sentences(words, start: float, end: float, max_pad: float = 5.0,
     on the nearest natural pause instead -- the end of the speech run at/after `end`
     (a `speech_intervals` boundary), still capped by `max_pad`. Off => byte-identical.
     """
-    # start of the sentence that `start` falls in (word after the previous terminator)
+    # start of the sentence start falls in (word after the previous terminator)
     sent_start = None
     prev_terminated = True               # first word always begins a sentence
     for w in words:
@@ -71,7 +71,7 @@ def snap_to_sentences(words, start: float, end: float, max_pad: float = 5.0,
         prev_terminated = w["text"][-1:] in ".?!"
     new_start = sent_start if (sent_start is not None and start - sent_start <= max_pad) else start
 
-    # end of the sentence that `end` falls in (first terminator at/after end)
+    # end of the sentence end falls in (first terminator at/after end)
     new_end = None
     for w in words:
         if w["end"] >= end and w["text"][-1:] in ".?!":
@@ -79,7 +79,7 @@ def snap_to_sentences(words, start: float, end: float, max_pad: float = 5.0,
                 new_end = w["end"]
             break
     if new_end is None and phrase_fallback:
-        # no punctuation in reach -> land on a clean breath (next speech-run boundary)
+        # no punctuation in reach, land on a breath (next speech run boundary)
         for _s, e in speech_intervals(words):
             if e >= end and e - end <= max_pad:
                 new_end = e
@@ -106,8 +106,8 @@ def snap_to_phrase(words, start: float, end: float, max_pad: float = 2.0):
     runs = speech_intervals(words)
     if not runs:
         return max(0.0, start), max(end, start)
-    # pull the head back to the start of the run it lands in (or forward to the next
-    # run's head if it sits in a silence -- either way it opens on speech, not dead air)
+    # pull the head back to the start of its run (or forward to the next run if it's in a
+    # silence), so it always opens on speech
     new_start = start
     for s, e in runs:
         if s <= start <= e:
@@ -116,7 +116,7 @@ def snap_to_phrase(words, start: float, end: float, max_pad: float = 2.0):
         if s > start:
             new_start = s if s - start <= max_pad else start
             break
-    # push the tail out to the end of the run it lands in: the next real breath
+    # push the tail out to the end of its run, the next real breath
     new_end = end
     for s, e in runs:
         if e >= end:
@@ -126,9 +126,9 @@ def snap_to_phrase(words, start: float, end: float, max_pad: float = 2.0):
     return new_start, max(new_end, new_start)
 
 
-TRUNCATE_S = 0.3     # how far before the peak resolves the cut lands (0.2-0.4 is the band)
-TRANSIENT_FLOOR_S = 0.8   # below this a shot reads as a glitch, not a cut
-PEAK_TAIL_S = 4.0    # only the span's last few seconds are searched for the out-point
+TRUNCATE_S = 0.3     # how far before the peak resolves the cut lands (0.2-0.4)
+TRANSIENT_FLOOR_S = 0.8   # shorter reads as a glitch
+PEAK_TAIL_S = 4.0    # only the last few seconds get searched for the out point
 
 
 def snap_to_transient(words, start: float, end: float, truncate: float = TRUNCATE_S,
@@ -169,7 +169,7 @@ def speech_intervals(words, max_gap: float = 0.4) -> list[tuple[float, float]]:
     return [(s, e) for s, e in runs]
 
 
-SILENCE_PAD = 0.3   # the "short reasonable breath" left around each phrase
+SILENCE_PAD = 0.3   # the short breath left around each phrase
 
 
 def compress_silence(words, start: float, end: float, pad: float = SILENCE_PAD,

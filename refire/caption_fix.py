@@ -28,13 +28,11 @@ from pathlib import Path
 from .director import CLAUDE_MODEL, _complete, _complete_cli, _JsonModel
 from .glossary import _slug, parse_terms
 
-# Caption lines per call. Measured: a 20-min cut is ~880 lines (captions are ~3 words), so
-# this is 2-3 calls. Batching at all is only a guard against a long reply drifting off the
-# line numbering -- the `was` echo in `vet` catches that anyway, so raise it if you'd rather
-# pay for one call and give the model the whole cut as context.
+# caption lines per call. a 20 min cut is ~880 lines so this is 2-3 calls. batching just
+# stops a long reply drifting off the line numbers, the was echo in vet catches that anyway
 BATCH = 400
-MIN_RATIO = 0.5      # similarity floor: a fix is a re-spelling, not a rewrite
-MAX_WORD_DELTA = 2   # a name may merge ("a bad oh" -> "albedo") but a line may not vanish
+MIN_RATIO = 0.5      # similarity floor, a fix is a respelling not a rewrite
+MAX_WORD_DELTA = 2   # names can merge ("a bad oh" -> "albedo") but lines can't vanish
 
 _SYSTEM = """\
 You correct speech-to-text errors in short video captions from a live game stream.
@@ -100,7 +98,7 @@ def save_corrections(corrections_dir, game: str, new: dict[str, str]) -> None:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(dict(sorted(merged.items())), indent=2), encoding="utf-8")
     except OSError:
-        pass          # ponytail: learning is a bonus, never a reason to fail a run
+        pass          # learning is a bonus, never fail a run over it
 
 
 def apply_corrections(text: str, corrections: dict[str, str]) -> str:
@@ -112,8 +110,8 @@ def apply_corrections(text: str, corrections: dict[str, str]) -> str:
     return text
 
 
-MIN_LEARN_SRC = 4    # "pre" -> "pry" is a name split across two caption lines, not a rule
-MIN_LEARN_DST = 5    # ...and neither is "doin" -> "dwen". Same >=5 bar snap_to_glossary uses
+MIN_LEARN_SRC = 4    # "pre" -> "pry" is a name split across two lines, not a rule
+MIN_LEARN_DST = 5    # same for "doin" -> "dwen". same >=5 bar as snap_to_glossary
 
 
 def learned_pairs(before: str, after: str) -> dict[str, str]:
@@ -134,8 +132,7 @@ def learned_pairs(before: str, after: str) -> dict[str, str]:
     for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b).get_opcodes():
         if op != "replace":
             continue
-        # equal-length spans split into per-word rules, which generalize; an uneven span
-        # (a name merged or split) has to stay one phrase
+        # equal-length spans split into per-word rules, uneven spans (merged/split name) stay one phrase
         pairs = (zip(a[i1:i2], b[j1:j2]) if i2 - i1 == j2 - j1
                  else [(" ".join(a[i1:i2]), " ".join(b[j1:j2]))])
         for src, dst in pairs:
@@ -184,8 +181,8 @@ def _recase(original: str, fixed: str) -> str:
             for j in range(j1, j2):
                 up[j] = _shout(src[i1 + (j - j1)])
         elif op == "replace":
-            # a name may be respelled across a different number of words; if any source
-            # word in the span was shouted, the whole replacement is shouted
+            # names can be respelled across a different word count. if any source word was shouted,
+            # shout the whole replacement
             shout = any(_shout(w) for w in src[i1:i2])
             for j in range(j1, j2):
                 up[j] = shout
@@ -250,7 +247,7 @@ def _ask(system: str, user: str, model: str, backend: str, trace=None) -> Fixes:
             return _complete_cli(model, system, content, Fixes, tag="captions", trace=trace)
         except (RuntimeError, OSError) as e:
             print(f"[captions] claude CLI unavailable ({e}); using API key")
-    import anthropic          # optional heavy dep; no key -> raises, caller degrades
+    import anthropic          # optional heavy dep, no key -> raises and caller degrades
 
     return _complete(anthropic.Anthropic(), model, system, content, Fixes,
                      tag="captions", trace=trace)
@@ -274,18 +271,18 @@ def fix_lines(lines: list[str], llm: bool = True, game: str = "", title: str = "
     corrected on the run that built them, so a call per press is waste.
     """
     corrections = load_corrections(corrections_dir, game)
-    # 1. deterministic pass: everything this stream has already taught us, for free
+    # 1. deterministic pass with everything this stream already taught us
     out = []
     for t in lines:
         fixed = apply_corrections(t, corrections)
-        # corrections are stored lowercase; put the styler's shouting back on top
+        # corrections are stored lowercase, put the shouting back
         out.append(_recase(t, fixed) if fixed != t else t)
 
     learned: dict[str, str] = {}
     if not llm or not out:
         return out, learned
 
-    # 2. one LLM pass over what's left
+    # 2. one llm pass over the rest
     ctx = _context(game, title, parse_terms(terms),
                    _chat_terms(chat_json), _chat_names(chat_json), corrections)
     for lo in range(0, len(out), BATCH):
@@ -295,8 +292,7 @@ def fix_lines(lines: list[str], llm: bool = True, game: str = "", title: str = "
         try:
             reply = ask(_SYSTEM, user, model, backend, trace)
         except Exception as e:
-            # ponytail: same degradation as the director block -- a failed pass leaves the
-            # captions exactly as built, it never fails the run.
+            # same as the director: a failed pass leaves captions as built, never fails the run
             print(f"[captions] fix pass failed ({type(e).__name__}: {e}); captions unchanged")
             break
         for fix in reply.fixes:
@@ -366,17 +362,17 @@ def _demo() -> None:
     import tempfile
 
     assert vet("dude, zhegef", Fix(i=0, was="dude, zhegef", text="dude, zajef"))
-    # `was` doesn't match this line -> a stale index, drop it rather than corrupt a good line
+    # was doesn't match -> stale index, drop it instead of breaking a good line
     assert vet("dude, zhegef", Fix(i=0, was="something else", text="dude, zajef")) is None
-    # a paraphrase is not a correction
+    # paraphrase isn't a correction
     assert vet("dude, zhegef", Fix(i=0, was="", text="my friend arrived")) is None
-    # the model cannot override the styler's casing decision
+    # model can't override the styler's casing
     assert vet("dude, zhegef", Fix(i=0, was="", text="Dude, Zajef")) == "dude, zajef"
     assert vet("DUDE, ZHEGEF", Fix(i=0, was="", text="dude, zajef")) == "DUDE, ZAJEF"
     assert vet("dude, zhegef", Fix(i=0, was="", text="dude, zhegef")) is None   # no-op
     assert learned_pairs("dude, zhegef", "dude, zajef") == {"zhegef": "zajef"}
     assert apply_corrections("Dude, ZHEGEF!", {"zhegef": "zajef"}) == "Dude, zajef!"
-    assert apply_corrections("zhegefs", {"zhegef": "zajef"}) == "zhegefs"   # word-boundary
+    assert apply_corrections("zhegefs", {"zhegef": "zajef"}) == "zhegefs"   # word boundary
 
     m = {"clips": [{"start": 1.0, "end": 2.0, "captions": [
         {"text": "dude, zhegef", "start": 0.0, "end": 0.96},
@@ -399,14 +395,14 @@ def _demo() -> None:
             "zhegef": "zajef"}
         assert (d / "caption_fixes.json").exists()
 
-        # second run: the learned file fixes it with no LLM call at all
+        # second run: learned file fixes it without an llm call
         mp.write_text(json.dumps(m), encoding="utf-8")
         boom = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("called"))  # noqa: E731
         fix_manifest(mp, game="genshin impact", corrections_dir=d,
                      ask=lambda s, u, *a, **k: Fixes(fixes=[]))
         assert json.loads(mp.read_text())["clips"][0]["captions"][0]["text"] == "dude, zajef"
 
-        # a failing LLM leaves the captions exactly as built
+        # failing llm leaves captions as built
         mp.write_text(json.dumps(m), encoding="utf-8")
         assert fix_manifest(mp, corrections_dir=d, ask=boom) == {}
         assert json.loads(mp.read_text())["clips"][0]["captions"][0]["text"] == "dude, zhegef"

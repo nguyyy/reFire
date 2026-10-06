@@ -82,8 +82,7 @@ def render_clips(
     for i, seg in enumerate(clips):
         ass = clips_dir / f"clip{i:03d}.ass"
         out = clips_dir / f"clip{i:03d}.mp4"
-        # Style pass: a beat's role tilts caption pacing + zoom punchiness here too, so the
-        # rough cut previews the same story-driven style as the AE build. No role -> defaults.
+        # beat role tweaks caption pacing + zoom here too so the rough cut matches the AE build
         role = seg.get("role", "")
         if role:
             st = style_for(role, seg.get("energy", 3))

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 NEUTRAL = {"zoom_sens": 1.0, "overlay_density": 1.0, "words_per_line": 3, "card": True}
 
-# Baselines per the doc's Style Pass. energy nudges zoom/overlay around these.
+# baselines from the style pass doc, energy nudges zoom/overlay around these
 _ROLE_STYLE = {
     "hook":       {"zoom_sens": 1.3, "overlay_density": 1.0, "words_per_line": 2, "card": False},
     "setup":      {"zoom_sens": 0.8, "overlay_density": 0.4, "words_per_line": 3, "card": True},

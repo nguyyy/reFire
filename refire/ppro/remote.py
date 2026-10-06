@@ -149,9 +149,9 @@ def smoke(manifest: str, port: int = PORT) -> int:
 
 
 def main(argv: list[str]) -> int:
-    if "--selftest" in argv:  # the only fragile bit is backslash escaping into ExtendScript
+    if "--selftest" in argv:  # the fragile part is backslash escaping into extendscript
         assert _snippet("x()").count("\\\\") == str(JSX).count("\\")
-        assert json.loads(json.dumps(_snippet("x()")))  # survives the CDP round trip
+        assert json.loads(json.dumps(_snippet("x()")))  # survives the cdp round trip
         print("ok")
         return 0
 
@@ -165,7 +165,7 @@ def main(argv: list[str]) -> int:
             log = True
         elif a == "--wait":
             wait = float(next(it, 180))
-        elif a == "--port":          # another panel: postRe is 8099 with its own jsx
+        elif a == "--port":          # another panel, postRe is 8099 with its own jsx
             port = int(next(it))
         elif a == "--jsx":
             jsx = next(it)

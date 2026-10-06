@@ -48,7 +48,7 @@ def test_chapterize_uses_ollama_and_caches(tmp_path, monkeypatch):
     assert len(chs) == 3 and len(calls) == 3
     assert chs[0].title == "Boss attempts"
     assert chs[0].start_s == 0.0 and chs[0].end_s == 1200.0
-    # hallucinated out-of-window stamp is clamped away
+    # out-of-window timestamp gets clamped away
     assert [n.t_s for n in chs[0].notable_moments] == [100.0]
     # cache hit -> no new ollama calls
     again = director.chapterize(MAP, window_s=1200.0, cache_path=cache)
@@ -97,7 +97,7 @@ def test_chapterize_reports_progress_before_and_after_each_window(monkeypatch):
     assert "Boss attempts" in seen[1][1] and "left" in seen[1][1]
     assert [f for f, _ in seen] == sorted(f for f, _ in seen)     # never goes backwards
     assert seen[-1][0] == 1.0
-    # cp1252 console: a non-ASCII glyph here raises UnicodeEncodeError mid-run
+    # cp1252 console, a non-ascii glyph raises mid-run
     assert all(m.isascii() for _, m in seen)
 
 

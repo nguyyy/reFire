@@ -48,15 +48,14 @@ def build_srt(manifest, offset: float = 0.0) -> str:
     cues = []
     playhead = 0.0
     for clip in _ordered_clips(manifest):
-        # `dur` is the tightened length when dead air was cut, else the raw span --
-        # the same choice reFire.jsx:buildClip makes for its comp duration.
+        # dur is the tightened length if dead air was cut, else the raw span (same as
+        # reFire.jsx buildClip)
         dur = clip.get("dur") or (clip["end"] - clip["start"])
         for cap in clip.get("captions") or []:
             text = (cap.get("text") or "").strip()
             if not text:
                 continue
-            # clamp into the clip: a caption whose word ran past the cut would
-            # otherwise sit over the NEXT clip on the timeline.
+            # clamp into the clip or a caption past the cut sits over the next clip
             a = min(max(cap["start"], 0.0), dur)
             b = min(max(cap["end"], a), dur)
             if b <= a:
@@ -85,7 +84,7 @@ def _demo() -> None:
             {"start": 100.0, "end": 110.0,
              "captions": [{"text": "first", "start": 0.5, "end": 1.5},
                           {"text": "second", "start": 2.0, "end": 3.0}]},
-            # dead air cut: 20s span plays as 6s, so cue times must use `dur`
+            # dead air cut: 20s span plays as 6s, so cues use dur
             {"start": 200.0, "end": 220.0, "dur": 6.0, "keep": [[0, 3], [10, 13]],
              "captions": [{"text": "third", "start": 4.0, "end": 5.5},
                           {"text": "ran past the cut", "start": 5.0, "end": 99.0}]},
@@ -93,7 +92,7 @@ def _demo() -> None:
         "sections": [{"title": "b", "clip_indices": [1]},
                      {"title": "a", "clip_indices": [0]}],
     }
-    # section order wins over clip order: clip 1 (dur 6) lays down first
+    # section order beats clip order, clip 1 (dur 6) goes first
     out = build_srt(m)
     assert out.startswith("1\n00:00:04,000 --> 00:00:05,500\nthird\n"), out
     # a caption overrunning the cut is clamped to the clip's tightened length
@@ -199,14 +198,14 @@ def recaption(manifest_path, timeline_path=None, offset: float = 0.0,
 
     run = _run_dir(manifest_path)
     words = json.loads((run / "transcript.json").read_text(encoding="utf-8"))
-    # no audio.wav (a pruned run) degrades to keyword/ALL-CAPS emphasis, never an error
+    # no audio.wav (pruned run) falls back to keyword/caps emphasis, never errors
     annotate_emphasis(words, run / "audio.wav")
 
     cues = []
     for path, src_in, src_out, at, end in rows:
         src_off = offsets.get(_norm(path))
         if src_off is None:
-            continue                       # b-roll the user brought in: not ours to caption
+            continue                       # b-roll the user added, not ours to caption
         span, src_span = end - at, src_out - src_in
         if span <= 1e-3 or src_span <= 1e-3:
             continue

@@ -18,8 +18,7 @@ def _outline(*titles):
 
 
 def _chunks():
-    # sim decreases with index (query is [1,0]); score also decreases with index, so
-    # casting is deterministic: earliest unused chunk wins each beat.
+    # sim and score both drop with index, so earliest unused chunk wins each beat
     return [{"start": i * 100.0, "end": i * 100.0 + 60.0, "text": f"c{i}",
              "embedding": [1.0 - i * 0.1, i * 0.1], "chat_z": 0.0, "s": 10 - i}
             for i in range(6)]
@@ -55,8 +54,8 @@ def test_under_budget_warns_never_pads(stubbed):
 
 
 def test_over_budget_trims_lowest_score(stubbed):
-    # 180s of material, target 100s (ceiling 125 at tol .25) -> shed the lowest-scored beat
-    # down to the tolerance ceiling, not the bare target (the goal, not a hard cap)
+    # 180s of material, target 100s (ceiling 125 at tol .25) -> drop the lowest beat down to
+    # the ceiling, not the bare target
     sections, log, warning = narrative.cast(_outline("A", "B", "C"), _chunks(), [],
                                             target_s=100.0, model="m", tol=0.25)
     total = sum(s["clips"][0]["end"] - s["clips"][0]["start"] for s in sections)
@@ -169,8 +168,7 @@ def test_stream_map_is_sentence_level():
     from refire import director
     words = [{"text": t, "start": s, "end": s + 0.4} for t, s in
              [("Hello", 0.0), ("world.", 0.5), ("Next", 65.0), ("one.", 65.5)]]
-    # Timestamps are labelled in SECONDS (with an 's'), never mm:ss -- the director must
-    # copy them straight into start_s/end_s, and [09:06] would be misread as 9.06s.
+    # timestamps are in seconds with an 's', never mm:ss, since [09:06] would get read as 9.06s
     assert director.stream_map(words) == "[0s] Hello world.\n[65s] Next one."
 
 
@@ -251,7 +249,7 @@ def test_director_outline_plumbing(monkeypatch):
     got = director.outline("[00:00] hi", "brief", "title", 1800.0)   # 30-min target
     assert got.central_idea == want.central_idea and got.beats[0].title == "A"
     assert calls[0]["max_tokens"] == director.MAX_TOKENS
-    # Opus 4.8: adaptive only; summarized display streams thinking to the console
+    # opus 4.8: adaptive only, summarized display streams thinking to the console
     assert calls[0]["thinking"] == {"type": "adaptive", "display": "summarized"}
     blocks = calls[0]["messages"][0]["content"]
     assert "[00:00] hi" in blocks[0]["text"]              # map in the first block
@@ -268,8 +266,7 @@ def test_director_retries_without_thinking_on_none(monkeypatch):
     assert got.beats[0].title == "A"
     assert len(calls) == 2
     assert calls[0]["thinking"] == {"type": "adaptive", "display": "summarized"}
-    # Opus 5 400s on disabled thinking at effort xhigh/max, so the retry starves the
-    # thinking with effort=low instead of switching it off.
+    # opus 5 400s on disabled thinking at xhigh/max, so the retry uses effort=low instead
     assert calls[1]["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert calls[1]["output_config"] == {"effort": "low"}
     assert calls[0]["output_config"] == {"effort": director.DEFAULT_EFFORT}
@@ -341,8 +338,8 @@ def test_complete_cli_parses_stream_json(monkeypatch):
     monkeypatch.setattr("subprocess.Popen", fake_popen)
     got = director.outline("[0s] hi", "brief", "title", 600.0, backend="cli")
     assert got.beats[0].title == "A"
-    # system prompt goes via --system-prompt-file (a bare --system-prompt with newlines
-    # gets split by Windows argv parsing and silently corrupts the later flags)
+    # system prompt goes through --system-prompt-file, windows argv splits multi-line values and
+    # breaks later flags
     assert "-p" in seen["cmd"] and "--system-prompt-file" in seen["cmd"]
     assert "--system-prompt" not in seen["cmd"]
     sp_path = seen["cmd"][seen["cmd"].index("--system-prompt-file") + 1]
@@ -405,12 +402,10 @@ def test_realized_script_renders_beats_in_order():
     s = director._realized_script(log)
     assert s.index("Open") < s.index("Close")          # story order preserved
     assert "first line" in s and "last line" in s      # realized transcript, not the plan
-    # source stamps say where each moment sat in the STREAM -- what the critic needs to
-    # re-cut a beat
+    # source stamps say where each moment was in the stream, which the critic needs to recut
     assert "source 00:00-00:05" in s and "source 01:05-01:10" in s
-    # ...and the cut position says where the VIEWER is when they reach it. Beat 2 plays at
-    # 00:05 in the finished video even though it came from 01:05 of the stream; without
-    # this the critic cannot see a sag, only a list of moments.
+    # and the cut position says where the viewer is. beat 2 plays at 00:05 even though it's
+    # from 01:05 of the stream, without this the critic can't see a sag
     assert "cut 00:00-00:05" in s and "cut 00:05-00:10" in s
     assert "PACING AUDIT" in s
     assert "the idea" in s
@@ -646,7 +641,7 @@ def test_cold_open_plays_first_out_of_stream_order(monkeypatch):
     sections, log, _ = narrative.cast(ol, [], words, target_s=1000.0, model="m")
     assert [s["title"] for s in sections] == ["Cold Open", "Open", "Peak"]
     co = sections[0]["clips"][0]
-    # it is a FLASH-FORWARD: source-wise it comes from after the beat that follows it
+    # flash-forward: it comes from after the beat that follows it
     assert co["start"] == pytest.approx(63.0) and co["start"] > sections[1]["clips"][0]["start"]
     assert log["cold_open"][0]["dur"] == pytest.approx(co["end"] - co["start"])
 
@@ -757,8 +752,8 @@ def test_both_system_prompts_survive_format_with_the_role_budget_spliced_in():
     for system in (director.pick_system("a brief"), director.pick_system(""),
                    director._REVIEW_SYSTEM):
         rendered = system.format(n=20, roles=roles)   # must not raise
-        # ...and the budget actually arrived. Not pinned to literal seconds: those move
-        # with every CUT_SHRINK calibration; the scaling itself is tested just below.
+        # and the budget actually arrived. not pinned to exact seconds since those move with
+        # CUT_SHRINK, scaling is tested below
         assert roles in rendered and "escalation" in roles and "climax" in roles
 
 
@@ -790,8 +785,8 @@ def test_the_budget_note_asks_for_more_span_than_the_finished_target():
     assert "23%" in n               # ...and why it is bigger
     # shrink=1.0 means "no compression downstream", so no second number to explain
     assert director._budget_note(840.0, 1.0) == ""
-    # A measured shrink that disagrees with the prior restates the role table HERE, where
-    # rewriting it costs a few hundred bytes of cache instead of the whole map.
+    # a measured shrink that differs from the prior restates the role table here, costs a few
+    # hundred bytes of cache instead of the whole map
     assert "MEASURED ROLE BUDGETS" in director._budget_note(840.0, 0.60)
     assert "MEASURED ROLE BUDGETS" not in director._budget_note(840.0, director.CUT_SHRINK)
 
@@ -880,8 +875,8 @@ def test_dense_styles_are_told_the_shot_length_they_are_graded_on():
     assert "at least ~1.05 seconds" in dense            # floor still scales too
     dense.format(n=20, roles="x")                       # brace-free, or the run dies
 
-    # keep_build=True is where the audit measures the OPPOSITE flag, so stating a
-    # ceiling there would constrain a cut nothing checks.
+    # keep_build=True is where the audit checks the opposite flag, so a ceiling there would
+    # constrain something nothing checks
     assert "AVERAGE about" not in director.pick_system("b", "fast", keep_build=True)
     assert "AVERAGE about" not in director.pick_system("b")
 
@@ -1008,8 +1003,7 @@ def test_stack_plays_every_moment_in_one_section(monkeypatch):
     ol = _stack_outline((62.0, 64.0), (66.0, 68.0), (70.0, 71.5))
     sections, log, _ = narrative.cast(ol, [], words, target_s=1000.0, model="m", stack=8)
     assert sections[0]["title"] == "Cold Open"
-    # one section, several clips -- build_manifest renders that as jump cuts, which is
-    # exactly what a stack is
+    # one section, several clips, build_manifest renders that as jump cuts (= a stack)
     assert len(sections[0]["clips"]) == 3
     assert len(log["cold_open"]) == 3
 
@@ -1230,7 +1224,7 @@ def test_whiplash_opens_on_the_peak_and_alternates_texture(monkeypatch):
     assert titles[0] == "wild1"                       # highest energy opens
     assert titles != ["calm1", "calm2", "wild1", "wild2"]
     textures = ["chaotic" if t.startswith("wild") else "sincere" for t in titles]
-    # no two same-texture beats back to back -- an alternative always existed here
+    # no two same-texture beats in a row, an alternative always existed here
     assert all(a != b for a, b in zip(textures, textures[1:])), titles
 
 
@@ -1243,9 +1237,8 @@ def test_whiplash_scores_the_bigger_jolt_higher():
 
 
 # --- the critic must not stuff a styled cut back into shape --------------
-# Silencing the pacing FLAG is not enough: the rubric asks for the same thing in prose,
-# and prose is what the critic re-plans from. Two of these items are literal orders to
-# add footage back ("RESTORE a representative run", "Extend its end").
+# silencing the pacing flag isn't enough, the rubric asks for the same thing in prose and
+# two items literally say add footage back
 
 _PROTECT = ["does any clip start without enough context",   # SETUP CLARITY
             "RESTORE a representative run",                 # MISSING BUILD-UP
@@ -1348,8 +1341,8 @@ def test_one_moment_drops_spans_stapled_on_from_minutes_away():
     # a normally-cut beat is returned untouched
     tight = [(100.0, 120.0), (125.0, 140.0)]
     assert narrative._one_moment(tight) is tight
-    # ...and so is a legitimate build-up run: pacing asks for a repetition sampled across
-    # minutes (BUILD_GAP_S is 60s), so the cap has to sit above that machinery, not inside it
+    # and so is a real build-up run: pacing wants a repetition sampled across minutes
+    # (BUILD_GAP_S is 60s) so the cap has to sit above that
     spiral = [(100.0, 130.0), (280.0, 300.0), (430.0, 460.0)]
     assert narrative._one_moment(spiral) is spiral
 

@@ -90,10 +90,8 @@ def chat_signal(
 
 
 _TOKEN = re.compile(r"[A-Za-z][A-Za-z'\-]{3,}")
-# Titlecase words that are ordinary English, not names. An ordinary word in the hotword
-# list drags near-miss real words onto it (see genshin.txt's header), so these must go.
-# The capitalization-ratio guard below catches the long tail; this covers the words chat
-# capitalizes so consistently that the ratio can't tell them from a name.
+# titlecase words that are just english, not names. leaving them in the hotword list pulls
+# near-miss words onto them (see genshin.txt). the cap-ratio check below handles the rest
 _STOP = frozenset("""
 that this what when where they them then than there their your yours just like about
 have hard here holy hell fuck shit damn bruh chat guys good nice wait real true yeah
@@ -149,8 +147,7 @@ def chat_terms(chat_json: str | Path, min_count: int = 3, limit: int = 60,
     hits = [(n, k) for k, n in total.items()
             if n >= min_count and capped[k] / n >= cap_ratio]
     hits.sort(key=lambda kn: (-kn[0], kn[1]))
-    # canonical spelling = Titlecase; the decoder and snap_to_glossary both want a form,
-    # and `emphasis.style_text` lowercases captions anyway.
+    # canonical spelling is titlecase, style_text lowercases captions anyway
     return [k.capitalize() if k.islower() else k for _, k in hits[:limit]]
 
 
@@ -208,7 +205,7 @@ def _demo() -> None:
         p = Path(d) / "c.json"
         p.write_text(json.dumps({"comments": chat}), encoding="utf-8")
         terms = chat_terms(p, min_count=3)
-        assert terms == ["Kinich"], terms          # 'that' stopped, KEKW all-caps, emote skipped
+        assert terms == ["Kinich"], terms          # 'that' stopped, KEKW all caps, emote skipped
         assert chat_names(p) == ["Zajef"]
         assert chat_lines(p, 0, 2) == ["Kinich pull", "Kinich!"]
         assert chat_lines(p, 0, 2, offset=1.0) == ["Kinich!", "that Kinich"]

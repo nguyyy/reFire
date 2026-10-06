@@ -13,9 +13,8 @@ from . import loud as loud_mod
 from .select import SILENCE_PAD, parse_duration
 from .transcribe import DEFAULT_BATCH_SIZE, DEFAULT_WHISPER_MODEL
 
-# Anchor to the repo's assets/, not the CWD: the AE "Make" button launches the CLI
-# via a detached `cmd /c start`, whose working dir isn't the repo, so a relative
-# "assets" wouldn't resolve and overlays/bgm would come up empty.
+# use the repo's assets/, not cwd. the AE make button launches via cmd /c start from some
+# other dir so a relative path finds nothing and overlays/bgm come up empty
 _DEFAULT_ASSETS = str(Path(__file__).resolve().parent.parent / "assets")
 
 
@@ -79,8 +78,8 @@ def main(argv: list[str] | None = None) -> None:
                          "the default story-arc framing in both the director and the "
                          "critic. May also be a PATH to a style document (.md): its "
                          "frontmatter sets the flags below, its body is the direction")
-    # The five knobs a style document can also set. All default to None so `cli` can tell
-    # "the user asked for this" from "nobody said" -- an explicit flag beats frontmatter.
+    # the five knobs a style doc can also set. default None so we can tell "user asked" from
+    # "nobody said", explicit flags beat frontmatter
     mk.add_argument("--pace", type=float, default=None,
                     help="cut speed: scales every role's clip-length budget at once "
                          "(0.6 = snappier and more beats, 1.5 = room to breathe; "
@@ -276,7 +275,7 @@ def main(argv: list[str] | None = None) -> None:
         fix_manifest(args.manifest, game=args.game, title=args.title, terms=args.terms,
                      chat_json=args.chat, model=args.claude_model,
                      backend=args.director_backend, corrections_dir=args.corrections_dir)
-        # captions.srt is derived, so it must be rebuilt or Premiere keeps the old text
+        # captions.srt is derived, rebuild it or premiere keeps the old text
         print(f"Captions: {write_srt(args.manifest).resolve()}")
         return
 
@@ -293,16 +292,14 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.cmd == "srt":
-        # Pure JSON -> text, so the Premiere panel re-runs this on every caption
-        # nudge instead of re-running the whole `make`.
+        # pure json -> text so the premiere panel can rerun it on every caption nudge
         from .srt import write_srt
         print(f"Captions: {write_srt(args.manifest, args.offset).resolve()}")
         return
 
     if args.cmd == "recap":
-        # Walks the TIMELINE the panel dumped instead of the manifest, so the captions
-        # follow footage a human moved, trimmed, split or widened after `make` was done
-        # with it. Pure JSON -> text unless --fix is on, so the panel can re-run it freely.
+        # walks the timeline the panel dumped, not the manifest, so captions follow footage someone
+        # moved/trimmed/split after make. pure json -> text unless --fix so the panel can rerun it
         from .caption_fix import fix_lines, save_corrections
         from .srt import recaption
 
@@ -329,29 +326,22 @@ def main(argv: list[str] | None = None) -> None:
 
         def prog(frac, msg, done=False):
             if not done:
-                frac = max(frac, last["frac"])     # monotonic: never show a backwards %
+                frac = max(frac, last["frac"])     # never show the % going backwards
             last["frac"] = frac
             pct = max(0, min(100, int(frac * 100)))
-            # Throttle on the integer pct, but never swallow a NEW message: a stage
-            # that emits many distinct lines inside one pct point had almost all of
-            # them dropped -- the scout spans 0.61..0.64, so 13 chapter lines shared
-            # 3 pct points and 10 of them never printed. The run looked wedged on
-            # "scouting chapters" for 15 minutes while it was working fine.
+            # throttle on the int pct but always print a new message. the scout fits 13 chapter lines
+            # into 3 pct points and most of them were getting dropped, looked stuck for 15 min
             if pct != last["pct"] or msg != last["msg"] or done:
                 last["pct"], last["msg"] = pct, msg
-                # Elapsed minutes on every line: a run self-profiles, so we optimize the
-                # stage that is actually slow instead of the one we assume is. Trails the
-                # message because the AE panel's /^\[ n%\]\s*(.*)$/ shows group 2 as its
-                # status text -- leading with the clock would bury the stage name.
+                # elapsed minutes on every line so we can see which stage is actually slow. goes after the
+                # message since the AE panel shows group 2 of /^\[ n%\]\s*(.*)$/ as its status
                 print("[%3d%%] %s  (+%.1fm)" % (pct, msg, (time.monotonic() - t0) / 60),
                       flush=True)
             if file_w:
                 file_w(frac, msg, done)
 
-        # A style may be a document: its body is the direction, its frontmatter supplies
-        # defaults for the knobs below. An explicit flag always wins -- `pick` for the
-        # value flags (None = nobody said), and a plain AND for the --no-* switches,
-        # which can only ever turn something OFF and so can't be ambiguous.
+        # a style can be a doc: body is the direction, frontmatter gives defaults for the knobs.
+        # explicit flags always win (pick for value flags, AND for --no-* since those only turn off)
         from .styles import resolve as _resolve_style
         direction, knobs = _resolve_style(args.style)
 
@@ -398,9 +388,8 @@ def main(argv: list[str] | None = None) -> None:
             prog(1.0, "error: " + str(e), done=True)
             raise
         prog(1.0, "done", done=True)
-        # The AE panel greps this exact line out of stdout to auto-load the manifest.
-        # Absolute: ExtendScript's File() resolves a relative path against AE's own
-        # working directory, not ours, so a relative path here silently finds nothing.
+        # the AE panel greps this line to load the manifest. absolute because extendscript resolves
+        # relative paths against AE's own cwd
         print(f"Manifest: {Path(out).resolve()}")
         print("In After Effects or Premiere Pro: Window > Extensions > reFire -> Build.")
 

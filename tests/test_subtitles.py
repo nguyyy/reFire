@@ -59,8 +59,8 @@ def test_caption_lowercase_by_default_caps_on_emphasis():
 
 
 def test_karaoke_hold_clamped_over_gap():
-    # 0.3s gap (< PAUSE_GAP) keeps both on one line; the first word's highlight
-    # must not stretch the whole 0.5s across the silence -> clamped to end+carry.
+    # 0.3s gap (< PAUSE_GAP) keeps both on one line, the first word's highlight can't stretch
+    # across the silence, clamped to end+carry
     words = [{"text": "a", "start": 0.0, "end": 0.2},
              {"text": "b", "start": 0.5, "end": 0.7}]
     ass = build_ass(words, 0.0, 10.0)
@@ -75,7 +75,7 @@ def test_snap_extends_to_sentence_boundaries():
     assert s == 0.0 and e == 3.8             # pulled to sentence start + end
 
 
-# --- pauses hidden inside the previous word (the ASR-padding regression) ---
+# --- pauses hidden inside the previous word (asr padding regression) ---
 
 def _padded(pairs):
     """Words whose `end` is stretched to meet the next word's `start`, the way
@@ -97,12 +97,12 @@ def test_a_pause_billed_to_the_previous_word_still_breaks_the_line():
     words = _padded([("today", 0.0), ("we", 0.4), ("are", 0.8), ("gonna", 1.2),
                      ("play", 1.6), ("genshin", 2.6), ("impact", 3.0)])
     assert words[4]["end"] - words[4]["start"] == 1.0     # the pause hides in "play"
-    assert words[5]["start"] - words[4]["end"] == 0.0     # ...so the raw gap sees nothing
+    assert words[5]["start"] - words[4]["end"] == 0.0     # so the raw gap sees nothing
 
     groups = group_words(words, 0.0, 10.0, words_per_line=5)
     texts = [[w["text"] for w in g] for g in groups]
     assert texts == [["today", "we", "are", "gonna", "play"], ["genshin", "impact"]]
-    # and the second line now appears when it is spoken, not a second early
+    # second line shows up when it's spoken, not a second early
     assert groups[1][0]["start"] == 2.6
 
 
@@ -114,6 +114,6 @@ def test_ordinary_padded_speech_does_not_break_every_word():
 
 
 def test_a_drawn_out_word_is_allowed_to_be_long():
-    # "whaaaat" genuinely runs 0.65s with no pause after it -- under MAX_WORD_S
+    # "whaaaat" really runs 0.65s with no pause after, under MAX_WORD_S
     words = _padded([("whaaaat", 0.0), ("no", 0.65), ("way", 1.0)])
     assert len(group_words(words, 0.0, 10.0, words_per_line=8)) == 1

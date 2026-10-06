@@ -43,7 +43,7 @@ def parse_terms(spec: str) -> list[str]:
 def _llm_terms(game: str, model: str) -> list[str]:
     """One local-LLM pass: game name -> proper nouns. [] on any failure."""
     try:
-        import ollama  # local import: optional heavy dep
+        import ollama  # optional heavy dep
         resp = ollama.chat(
             model=model, format="json",
             messages=[{"role": "system", "content": _SYSTEM},
@@ -52,7 +52,7 @@ def _llm_terms(game: str, model: str) -> list[str]:
         data = json.loads(resp["message"]["content"])
         return [str(t).strip() for t in data.get("terms", []) if str(t).strip()]
     except Exception:
-        # ponytail: any failure -> no glossary, transcription proceeds as before
+        # any failure -> no glossary, transcription carries on
         return []
 
 
@@ -86,7 +86,7 @@ def game_glossary(game: str, model: str = DEFAULT_MODEL,
                 cache.write_text(json.dumps(terms, indent=2), encoding="utf-8")
             except OSError:
                 pass
-    return list(dict.fromkeys(user + terms))  # user terms win ties, dedupe, keep order
+    return list(dict.fromkeys(user + terms))  # user terms first, dedupe, keep order
 
 
 def _demo() -> None:

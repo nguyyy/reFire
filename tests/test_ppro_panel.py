@@ -18,10 +18,9 @@ PANEL = ROOT / "refire" / "ppro" / "index.html"
 JSX = ROOT / "refire" / "ppro" / "reFirePpro.jsx"
 CLI = ROOT / "refire" / "cli.py"
 
-# the panel's argv builders emit flags as bare "--flag" string literals; CSS custom
-# properties (--bg: ...) are never double-quoted, so they don't match.
+# the panel emits flags as bare "--flag" strings, css vars (--bg: ...) aren't quoted so they don't match
 PANEL_FLAGS = set(re.findall(r'"(--[a-z][a-z-]+)"', PANEL.read_text(encoding="utf-8")))
-# `mk` is the `make` subparser in cli.main(), `sr` is `srt`, `rc` is `recap`
+# mk = make subparser in cli.main(), sr = srt, rc = recap
 CLI_FLAGS = set(re.findall(r'(?:mk|sr|rc)\.add_argument\(\s*"(--[a-z][a-z-]+)"',
                            CLI.read_text(encoding="utf-8")))
 
@@ -37,17 +36,15 @@ def test_panel_flags_still_accepted():
 
 
 def test_ae_only_features_are_forced_off():
-    # zoom/emotes/sfx/cards never reach Premiere; leaving them on would burn minutes
-    # of OpenCV scan and asset work for output this panel throws away.
+    # zoom/emotes/sfx/cards never reach premiere, leaving them on wastes minutes of opencv + asset work
     for flag in ("--no-motion-zoom", "--no-emotes", "--no-sfx", "--no-cards"):
         assert flag in PANEL_FLAGS, f"{flag} no longer forced by the Premiere panel"
 
 
-# --- reFirePpro.jsx must never let an exception escape --------------------
-# CEP turns any uncaught ExtendScript throw into the opaque "EvalScript error."
-# with no message, so every public entry point is wrapped in a catch that returns
-# the real text. Run the real file with NO Premiere globals defined -- every host
-# call throws -- and assert we still get a string back.
+# --- reFirePpro.jsx must never let an exception escape ---
+# CEP turns any uncaught extendscript throw into a blank "EvalScript error." so every entry
+# point catches and returns the real text. run the file with no premiere globals (every call
+# throws) and check we still get a string back
 PROBE = """
 const vm = require('vm'), fs = require('fs');
 const ctx = {}; vm.createContext(ctx);
@@ -101,7 +98,7 @@ def test_every_pipeline_stage_is_on_the_bar():
     the run, with nothing on the Python side to notice."""
     table = re.search(r"var STAGES = \[(.*?)\];", PANEL.read_text(encoding="utf-8"), re.S)
     assert table, "STAGES table moved -- re-point this test"
-    # entries close with `]}` -- a bare `]` would stop inside the "[review]" prefix
+    # entries close with ]} since a bare ] would stop inside the "[review]" prefix
     prefixes = [p for m in re.findall(r"match: \[(.*?)\]\}", table.group(1), re.S)
                 for p in re.findall(r'"([^"]+)"', m)]
     msgs = re.findall(r'report\([^,]+,\s*f?"([^"{]+)',

@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-# z-score thresholds for the (loud)/(LOUD) line marks
+# z-score thresholds for (loud)/(LOUD)
 LOUD_HI = (1.5, 3.0)
 
 

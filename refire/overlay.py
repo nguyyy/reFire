@@ -52,8 +52,7 @@ def _scan(folder, exts, exclude_hint=(), only_hint=()):
     for p in folder.rglob("*"):
         if not p.is_file() or p.suffix.lower() not in exts:
             continue
-        # match hints on FOLDER names only -- a meme sfx named "clownMusic.mp3" must
-        # not count as a music bed just because its filename contains "music".
+        # match on folder names only, otherwise clownMusic.mp3 counts as a music bed
         parts = " ".join(p.parent.parts).lower()
         if exclude_hint and any(h in parts for h in exclude_hint):
             continue
@@ -127,7 +126,7 @@ def _llm_emotes(moments, pool_names, model):
         names = json.loads(resp["message"]["content"]).get("emotes", [])
         return [str(names[i]).strip().lower() if i < len(names) and names[i] else fallback[i]
                 for i in range(len(moments))]
-    except Exception:           # ponytail: LLM down/bad JSON -> keyword as emote name
+    except Exception:           # llm down / bad json -> use the keyword as the emote name
         return fallback
 
 
@@ -161,7 +160,7 @@ def _download_bttv(name, cache_dir):
         with urllib.request.urlopen(req2, timeout=20) as r, open(dst, "wb") as f:
             f.write(r.read())
         return dst
-    except Exception:           # ponytail: BTTV/offline -> caller falls back to local pool
+    except Exception:           # bttv down / offline -> caller uses the local pool
         return None
 
 
@@ -203,10 +202,8 @@ def pick_overlays(words, clips, assets_dir, model=DEFAULT_MODEL, sfx: bool = Tru
     cand = [_clip_keyword_moment(words, c["start"], c["end"]) for c in clips]
     total_s = sum(c["end"] - c["start"] for c in clips)
     budget = max(1, int(total_s / SECONDS_PER_OVERLAY))
-    # Style pass: a clip's story role tilts overlay/SFX density -- a climax stacks them,
-    # a button stays out of the final laugh (density 0 opts out). Rank by score * density
-    # so the hottest, highest-energy beats win the limited overlay budget. Clips with no
-    # role (legacy/flat) get density 1.0 -> ranked by score alone, as before.
+    # beat role scales overlay/sfx density (climax stacks them, button gets none). rank by
+    # score * density so the best beats get the limited overlays. no role -> density 1
     ranked = sorted((i for i, m in enumerate(cand) if m and _overlay_density(clips[i]) > 0),
                     key=lambda i: clips[i].get("score", 0.0) * _overlay_density(clips[i]),
                     reverse=True)

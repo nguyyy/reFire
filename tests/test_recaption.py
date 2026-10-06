@@ -18,8 +18,7 @@ def _run(tmp_path, rows, **kw):
 
     proxy = ae / "p.mov"
     proxy.write_bytes(b"")
-    # the manifest's own clips cover 100-103 ONLY: anything the timeline pulls in past
-    # that has to come from the transcript, which is the whole point of the transcript path
+    # the manifest's clips only cover 100-103, anything past that has to come from the transcript
     (ae / "manifest.json").write_text(json.dumps({
         "source": str(proxy), "sources": [{"path": str(proxy), "offset": 100.0}],
         "clips": [{"start": 100.0, "end": 103.0, "src": 0,
@@ -46,7 +45,7 @@ def _cues(srt):
     return out
 
 
-# rows are (in, out, at, end) in seconds -- source in/out are PROXY time (offset 100)
+# rows are (in, out, at, end) in seconds, source in/out are proxy time (offset 100)
 
 def test_reordered_timeline_recaptions_in_timeline_order(tmp_path):
     # the back half of the source is cut to the front: cues must follow the timeline
@@ -79,15 +78,15 @@ def test_offset_shifts_every_cue(tmp_path):
 
 
 def test_foreign_media_is_skipped(tmp_path):
-    # b-roll the user dragged in themselves is not in sources[] -- no garbage cues
+    # b-roll the user added isn't in sources[], no garbage cues
     out, cues = _run(tmp_path, [("C:/broll/x.mov", 0, 3, 0, 3), (0, 3, 3, 6)])
     assert [t for _, t in cues] == ["w0", "w1", "w2"]
     assert [round(a, 2) for a, _ in cues] == [3.0, 4.0, 5.0]
 
 
 def test_each_press_writes_a_new_file(tmp_path):
-    # Premiere's importFiles skips a path already in the project, so overwriting
-    # captions.srt would leave the user dragging in a stale caption track
+    # premiere's importFiles skips paths already in the project, so overwriting captions.srt
+    # would leave a stale caption track
     first, _ = _run(tmp_path, [(0, 3, 0, 3)])
     assert first.name == "captions.recut1.srt"
     second = recaption(first.parent / "manifest.json", words_per_line=1)

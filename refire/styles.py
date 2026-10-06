@@ -18,31 +18,28 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# Frontmatter key -> coercion. The set is deliberately closed: a key that reaches nothing
-# is a typo, and a style doc that silently does nothing is worse than one that complains.
-# Every value here is also a plain CLI flag, and the flag wins (see `cli.main`).
+# frontmatter key -> coercion. closed set on purpose, an unknown key is a typo and a style
+# doc that silently does nothing is worse than one that complains. cli flags still win
 KEYS = {
-    "pace": float,          # cut speed: scales ROLE_BUDGET + the beat count together
+    "pace": float,          # cut speed, scales ROLE_BUDGET + beat count together
     "stack": int,           # montage-stack cold open: how many moments (0 = one teaser)
-    "truncate": float,      # transient snap: seconds to cut BEFORE the peak resolves
+    "truncate": float,      # transient snap: seconds to cut before the peak resolves
     "order": str,           # chrono | director | whiplash
     "snap": str,            # sentence | phrase | transient
     "cards": bool,          # section title cards
-    "motion_zoom": bool,    # the OpenCV motion scan + keyframed punch-ins
-    "loudnorm": bool,       # ffmpeg loudness normalization in the rough cut
+    "motion_zoom": bool,    # opencv motion scan + keyframed punch-ins
+    "loudnorm": bool,       # ffmpeg loudness norm in the rough cut
     "deadspace": bool,      # strip each clip's internal silence
     "words_per_line": int,  # caption pacing
     "captions": str,        # all | emph (emph = only lines with an emphasized word)
-    "keep_build": bool,     # enforce the skipped-build / slow-payoff pacing flags
+    "keep_build": bool,     # enforce the skipped-build / slow-payoff flags
 }
 
 _TRUE = {"true", "yes", "on", "1"}
 _FALSE = {"false", "no", "off", "0"}
 
-# Keys whose value is one of a fixed set. Checked, because these are the DANGEROUS ones:
-# a bad float raises and gets reported, but a misspelled `order: whiplashh` would sail
-# through as a string and then quietly take the else-branch -- no reordering, no error,
-# a cut that silently ignored the style document it was given.
+# keys with a fixed set of values. these get checked since a typo like order: whiplashh
+# would pass as a string and quietly hit the else branch, ignoring the style with no error
 _ENUMS = {
     "order": {"chrono", "director", "whiplash"},
     "snap": {"sentence", "phrase", "transient"},
@@ -141,7 +138,7 @@ def resolve(spec: str | None) -> tuple[str | None, dict]:
                   + (f", knobs {knobs}" if knobs else ", no frontmatter"))
             return (body or None), knobs
     except OSError:
-        pass                                   # too long / illegal / unreadable -> prose
+        pass                                   # too long / illegal / unreadable -> treat as prose
     return spec, {}
 
 

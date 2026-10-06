@@ -19,7 +19,7 @@ WHOLE = json.dumps({
                "start_s": 1.0, "end_s": 2.0,
                "segments": [{"start_s": 1.0, "end_s": 1.5}]}],
 })
-SPLIT = len(WHOLE) - 40          # tear the JSON mid-object, like a real max_tokens stop
+SPLIT = len(WHOLE) - 40          # tear the json mid-object like a real max_tokens stop
 
 
 def _assistant(text, stop):
@@ -61,12 +61,12 @@ def test_answer_split_across_turns_is_rejoined(monkeypatch, tmp_path):
     head, tail = WHOLE[:SPLIT], WHOLE[SPLIT:]
     _fake_cli(monkeypatch, [_assistant(head, "max_tokens"),
                             _assistant(tail, "end_turn"),
-                            _result(tail)])            # <- result = final turn ONLY
+                            _result(tail)])            # result = final turn only
     got = director._complete_cli("m", "sys", [{"text": "u"}], director.Outline,
                                  trace=tmp_path)
     assert got.central_idea == "he insists it will be a calm stream"
     assert len(got.cold_open) == 1 and got.beats[0].title == "A"
-    # the trace must show it was two turns, or the next person debugging this is blind
+    # trace has to show two turns or debugging this is blind
     dump = next(tmp_path.glob("*-claude-response.txt")).read_text(encoding="utf-8")
     assert "TURNS: 2" in dump and "max_tokens" in dump
 
@@ -101,11 +101,11 @@ def test_unparseable_everywhere_raises(monkeypatch):
         raise AssertionError("expected RuntimeError")
 
 
-# --- the beat-count cap that triggered the whole thing --------------------
+# --- beat count cap ---
 def test_pace_cannot_inflate_the_beat_ask_without_bound():
     assert director._n_beats(960.0, 1.0) == 20        # the natural count
     assert director._n_beats(960.0, 0.35) == 30       # was 57 -> 57k thinking tokens
-    assert director._n_beats(3600.0, 1.0) == 75       # long-form is NOT clamped
+    assert director._n_beats(3600.0, 1.0) == 75       # long form isn't clamped
     assert director._n_beats(960.0, 2.0) == 10        # slow pace still thins it out
     assert director._n_beats(30.0, 1.0) == 2          # floor holds
 
@@ -118,7 +118,7 @@ def test_think_tick_is_an_inplace_ascii_heartbeat():
     from refire.director import _think_tick
 
     t = _think_tick("director", 143.0, 1)
-    assert t.startswith(chr(13))          # carriage return: overwrite, don't scroll
+    assert t.startswith(chr(13))          # carriage return, overwrite don't scroll
     assert chr(10) not in t               # never a newline
     assert t.isascii()                    # cp1252-safe
     assert "2m23s" in t and "director" in t
@@ -178,8 +178,8 @@ def test_blank_thinking_deltas_drive_a_live_tick(monkeypatch, capsys):
     assert "thinking... 0m00s" in out          # the tick rendered, not swallowed
     assert out.count(chr(13)) >= 5             # one in-place tick per blank delta
 
-    # Piped (the panels): no bare \r -- a line reader holds it until EOF. One
-    # newline-terminated tick, throttled, instead of one per heartbeat.
+    # piped (the panels): no bare \r, a line reader holds it until EOF. one throttled
+    # newline-terminated tick instead of one per heartbeat
     monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
     director._complete_cli("m", "sys", [{"type": "text", "text": "u"}], Ans)
     out = capsys.readouterr().out
@@ -207,7 +207,7 @@ def test_director_opens_a_named_session_at_the_chosen_effort(monkeypatch):
     cmd = seen["cmd"]
     assert cmd[cmd.index("--effort") + 1] == "max"
     assert cmd[cmd.index("--session-id") + 1] == "11111111-2222-3333-4444-555555555555"
-    assert "--resume" not in cmd                 # the director OPENS it
+    assert "--resume" not in cmd                 # the director opens it
     assert "--system-prompt-file" in cmd
 
 
@@ -224,9 +224,9 @@ def test_review_resumes_the_session_and_drops_the_map(monkeypatch):
     assert cmd[cmd.index("--resume") + 1] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     assert "--system-prompt-file" not in cmd
     assert "--session-id" not in cmd
-    assert smap not in seen["stdin"]             # the map is NOT re-sent
-    assert "CURRENT ROUGH CUT" in seen["stdin"]  # ...but the new cut is
-    assert "senior video editor" in seen["stdin"]   # ...and so is the rubric
+    assert smap not in seen["stdin"]             # map isn't resent
+    assert "CURRENT ROUGH CUT" in seen["stdin"]  # but the new cut is
+    assert "senior video editor" in seen["stdin"]   # and the rubric
 
 
 def test_a_failed_resume_falls_back_to_a_full_call(monkeypatch):
@@ -246,5 +246,5 @@ def test_a_failed_resume_falls_back_to_a_full_call(monkeypatch):
     seen = _fake_cli(monkeypatch, [_result(REVIEW_JSON)])
     rv = director.review(smap, "brief", "title", _LOG, 600.0, session_id="dead-session")
     assert rv.approved is True
-    assert calls == [True, False]                # tried warm, then re-sent everything
+    assert calls == [True, False]                # tried warm, then resent everything
     assert smap in seen["stdin"]                 # the fallback carries the full map

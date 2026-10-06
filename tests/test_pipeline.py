@@ -11,7 +11,7 @@ def test_run_name_includes_vod_id_and_varies():
     parts = name.split("-")
     assert len(parts) == 3   # vod_id, adjective, noun
 
-    # not deterministic -- a run of samples should hit more than one phrase
+    # not deterministic, 30 samples should hit more than one phrase
     assert len({_run_name(123) for _ in range(30)}) > 1
 
 
@@ -33,4 +33,4 @@ def test_chat_signal_offsets_to_window(tmp_path):
     sig = chat_signal(p, duration=20.0, window=5.0, offset=14400.0)
     counts = [z for _, z in sig]
     assert counts[0] == max(counts)            # both messages land in the first bucket
-    assert counts[1] == counts[2] == counts[3]  # ...and nothing leaked into the rest
+    assert counts[1] == counts[2] == counts[3]  # and nothing leaked into the rest

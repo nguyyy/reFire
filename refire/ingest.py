@@ -11,11 +11,8 @@ from pathlib import Path
 
 CLI = Path(__file__).resolve().parents[1] / "TwitchDownloaderCLI.exe"
 
-# Parallel download threads. The CLI's own default is 4, which measured 17 Mbps here while
-# a second concurrent download simultaneously pulled 36 -- i.e. 4 threads throttles the
-# DOWNLOAD, not the link. This is a calibration knob, not a constant: the right value is
-# whatever your connection and Twitch's rate limiting agree on, so it is a plain flag
-# (`--threads`). Back it off if downloads start failing partway.
+# download threads. the CLI default of 4 was throttling the download itself (17 Mbps vs 36
+# with a second download running). tune with --threads, lower it if downloads fail partway
 DL_THREADS = 8
 
 
@@ -36,11 +33,8 @@ def _done(p: Path) -> bool:
     return p.exists() and p.stat().st_size > 0
 
 
-# The downloader reports progress as `[STATUS] - Downloading 45% [2/4]`, separated by BARE
-# carriage returns -- it ends a line only when a phase FINISHES. Piped (the panel reads
-# stdout line by line) that turns a 40-minute download into one line that arrives at the
-# end, so the run looks wedged on "downloading VOD" the whole time. Parsed here and fed to
-# the same `progress` callback every other long stage uses, instead of passed through raw.
+# the downloader separates progress with bare \r and only ends a line when a phase finishes,
+# so piped output looks stuck for the whole download. parse it and send it to progress instead
 _STATUS = re.compile(r"\[STATUS\] - (.+?)(?: (\d+)%)? \[(\d+)/(\d+)\]")
 
 
@@ -56,8 +50,7 @@ def _status(line: str) -> tuple[float, str] | None:
     phase, pct, step, steps = m[1], m[2], int(m[3]), int(m[4])
     pct = None if pct is None else int(pct)
     frac = (step - 1 + (pct or 0) / 100.0) / max(steps, 1)
-    # ASCII only -- this reaches a cp1252 console, where one stray glyph from the child
-    # process kills a run that has already spent its download time.
+    # ascii only, the console is cp1252 and one bad glyph kills the run after the download
     phase = phase.encode("ascii", "ignore").decode().lower()
     return min(1.0, max(0.0, frac)), phase if pct is None else f"{phase} {pct - pct % 5}%"
 
@@ -75,7 +68,7 @@ def _run(cmd: list[str], progress=None) -> None:
                             text=True, encoding="utf-8", errors="replace")
     buf, last, tail = "", None, []
     while True:
-        ch = proc.stdout.read(1)    # by character: readline() blocks until the phase ends
+        ch = proc.stdout.read(1)    # read by char, readline() blocks until the phase ends
         if not ch:
             break
         if ch not in "\r\n":
@@ -84,8 +77,7 @@ def _run(cmd: list[str], progress=None) -> None:
         line, buf = buf.strip(), ""
         got = _status(line)
         if got is None:
-            # not a status line: the banner, or the CLI's own error text. Capturing
-            # stdout hides that, so keep enough of it to say WHY a download failed.
+            # not a status line (banner or error text). keep the last few so we can say why it failed
             tail = (tail + [line])[-3:] if line else tail
         elif got[1] != last:
             last = got[1]
@@ -111,7 +103,7 @@ def ensure_audio(vod_id, cache_dir: str | Path = "vods",
         return out
     if not CLI.exists():
         raise SystemExit(f"TwitchDownloaderCLI not found at {CLI}")
-    out.unlink(missing_ok=True)             # an aborted run leaves a 0-byte stub behind
+    out.unlink(missing_ok=True)             # aborted runs leave a 0-byte stub
     _run([str(CLI), "videodownload", "--id", str(vod_id), "-o", str(out),
           "-t", str(threads)])
     if not _done(out):
@@ -141,7 +133,7 @@ def ensure_vod(vod_id, cache_dir: str | Path = "vods",
     tag = window_tag(start, end)
     video = cache / f"{vid}{tag}.mp4"
     chat = cache / f"{vid}{tag}.chat.json"
-    crop = []                                   # "#s" -- a bare number is ambiguous to the CLI
+    crop = []                                   # "#s", the CLI misreads a bare number
     if start:
         crop += ["-b", f"{int(start)}s"]
     if end is not None:
@@ -152,7 +144,7 @@ def ensure_vod(vod_id, cache_dir: str | Path = "vods",
     for i, (kind, out) in enumerate(jobs):
         if _done(out):
             continue
-        out.unlink(missing_ok=True)         # an aborted run leaves a 0-byte stub behind
+        out.unlink(missing_ok=True)         # aborted runs leave a 0-byte stub
         step = None if progress is None else (
             lambda f, m, i=i: progress((i + f) / len(jobs), m))
         _run([str(CLI), kind, "--id", vid, "-o", str(out),

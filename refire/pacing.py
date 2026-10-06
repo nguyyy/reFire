@@ -14,47 +14,35 @@ audit; tune here before touching the prompts).
 """
 from __future__ import annotations
 
-# Thresholds. Deliberately blunt: these exist to point the critic at a stretch of the cut,
-# not to grade it. Tune here, not in the prompt.
+# thresholds. blunt on purpose, they point the critic at a stretch, they don't grade it.
+# tune here, not in the prompt
 FLAT_ENERGY = 2       # energy at or below this reads as a lull
-FLAT_RUN_S = 90.0     # a lull only matters once it runs this long in the finished cut
-SLOW_PAYOFF_S = 12.0  # this much setup before the point lands is where viewers leave
-DENSITY_FRAC = 0.6    # words/sec under this fraction of the cut's median reads as thin
-MIN_DENSITY_S = 20.0  # short beats have noisy words/sec -- don't flag them
+FLAT_RUN_S = 90.0     # a lull only matters past this long in the finished cut
+SLOW_PAYOFF_S = 12.0  # this much setup before the point and viewers leave
+DENSITY_FRAC = 0.6    # words/sec under this fraction of the median = thin
+MIN_DENSITY_S = 20.0  # short beats have noisy words/sec, skip them
 FRONT_LOAD_FRAC = 1 / 3.0  # both peaks inside this fraction of the runtime = front-loaded
-BUILD_GAP_S = 60.0    # an internal jump this long BEFORE the payoff skipped the build-up.
-# Deliberately the same 60 the critic rubric already states in prose ("MISSING BUILD-UP"),
-# so the measurement and the instruction it enforces cannot drift apart.
+BUILD_GAP_S = 60.0    # a jump this long before the payoff skipped the build-up.
+# same 60 the rubric says in MISSING BUILD-UP so they can't drift
 
-# `skipped_build` above catches the BIG hole (a minute of skipped escalation). These catch
-# the small one at the other end, which nothing measured before: a jump-cut that lands
-# inside a conversation and deletes the answer to the line just kept. An NPC asks, the
-# streamer replies 3s later, the edit keeps the question and drops the reply -- the exact
-# failure that made quest/cutscene beats read as non-sequiturs.
-#
-# The band is bounded at BOTH ends on purpose. Under 1s is a breath, not an edit. Over 20s
-# the hole is a deliberate skip between moments, which is the edit doing its job and is
-# `skipped_build`'s territory. Between them, a hole that CONTAINED SPEECH severed an
-# exchange -- that speech condition is what separates this from cutting dead air, and it is
-# why the flag needs `seams` (what was deleted) rather than just segment arithmetic.
+# skipped_build catches the big hole. these catch the small one: a jump cut inside a
+# conversation that drops the answer (npc asks, streamer replies 3s later, edit keeps the
+# question and drops the reply), which made quest beats read as non-sequiturs.
+# under 1s is a breath, over 20s is a deliberate skip. in between, a hole that had speech
+# in it severed an exchange, which is why this needs seams and not just segment math
 SEVERED_MIN_S = 1.0
 SEVERED_MAX_S = 20.0
-AVG_SHOT_S = 12.0     # mean shot ceiling when build-up is deliberately skipped, at pace
-# 1.0. Scales with `pace` like every other budget here, so `--pace 0.35` asks for the
-# ~4s average a dense clip reel actually runs at. Only measured when `keep_build=False`:
-# at the default the opposite flag (`skipped_build`) is the one that matters.
-# NOTE this is a SHOT (one kept segment), not a beat -- see `cut_timeline`'s `shots`.
-SHORT_CUT_FRAC = 0.8  # finished runtime under this fraction of target = a short cut.
-# Deliberately looser than `narrative` tolerance (0.35) because this flag is advice to the
-# critic, not a trim: it should fire when the cut is meaningfully thin, not on every run.
+AVG_SHOT_S = 12.0     # mean shot ceiling when build-up is skipped, at pace
+# 1.0. scales with pace so --pace 0.35 asks for the ~4s a dense reel runs at. only checked
+# when keep_build=False. this is a shot (one kept segment), not a beat, see cut_timeline
+SHORT_CUT_FRAC = 0.8  # finished runtime under this fraction of target = short.
+# looser than narrative's 0.35 tolerance since this is advice, not a trim
 
-# Kept footage a beat may spend, in FINISHED seconds: role -> (typical_min, ceiling).
-# One flat ceiling for every role is what starved build-up: an escalation whose comedy IS
-# the repetition (failed guesses, a spiral getting worse) has to show the repetition, and
-# at 60-90s of allowance the director can only keep an opener and the payoff and skip the
-# minutes between -- a jump to the punchline with no build. A connective setup running
-# that long is padding. `director` reads this table into the outline/review prompts, so
-# the budget the model is told and the budget the audit enforces cannot drift apart.
+# kept footage per beat in finished seconds: role -> (typical_min, ceiling). one flat ceiling
+# starved build-up, an escalation that's funny because of the repetition has to show it, and
+# at 60-90s the director could only keep the opener and the payoff. a setup that long is
+# padding though. director reads this table into its prompts so the told budget and the
+# audited budget match
 ROLE_BUDGET = {
     "hook": (12, 35), "setup": (15, 40), "escalation": (30, 90),
     "reversal": (30, 90), "climax": (45, 130), "payoff": (20, 60),
@@ -62,10 +50,8 @@ ROLE_BUDGET = {
 }
 DEFAULT_BUDGET = (15, 60)   # unknown or blank role
 
-# How far above the pace-1.0 count `pace` may push the beat ask (`director._n_beats`).
-# Lives here, next to the budgets it has to stay reconciled with, because the two numbers
-# multiply into the finished runtime and drifting apart is exactly how a 16-minute ask
-# shipped as 8:53 -- see `fill_pace`.
+# how far pace can push the beat count above the pace-1.0 count (director._n_beats). lives
+# next to the budgets because they multiply into runtime, see fill_pace
 BEAT_INFLATION_CAP = 1.5
 
 
@@ -157,9 +143,8 @@ def cut_timeline(outline_log: dict) -> list[dict]:
     already put in play order.
     """
     out: list[dict] = []
-    # whatever plays before beat 1 -- one flash-forward teaser or a whole montage stack --
-    # pushes every beat that much later in the finished video than its kept footage alone
-    # would put it. `cold_open` is a LIST; a bare dict is an outline from before it was.
+    # whatever plays before beat 1 (teaser or stack) pushes every beat later in the finished
+    # video. cold_open is a list, a bare dict is an old outline
     cold = outline_log.get("cold_open") or []
     at = sum(float(c.get("dur") or 0.0)
              for c in ([cold] if isinstance(cold, dict) else cold))
@@ -169,7 +154,7 @@ def cut_timeline(outline_log: dict) -> list[dict]:
         if dur <= 0 and start is not None and end is not None:
             dur = max(0.0, float(end) - float(start))
         n_words = len(str(b.get("text") or "").split())
-        # how long the viewer waits for the point of the beat to land
+        # how long the viewer waits for the point
         payoff, lead = b.get("payoff_start_s"), None
         if payoff is not None and start is not None and float(payoff) >= float(start):
             lead = float(payoff) - float(start)
@@ -187,7 +172,7 @@ def cut_timeline(outline_log: dict) -> list[dict]:
             "setup_lead": lead,
             "build_gap": _build_gap(b),     # build-up skipped inside the beat
             "shots": _shots(b, dur),        # per-segment finished lengths (avg_shot)
-            "seams": b.get("seams") or [],  # what the edit deleted between those segments
+            "seams": b.get("seams") or [],  # what the edit deleted between segments
         })
         at += dur
     return out
@@ -272,14 +257,13 @@ def audit(timeline: list[dict], pace: float = 1.0, keep_build: bool = True,
                          f"{b['role'] or 'plain'} beat -- tighten it or re-role it."),
             })
 
-    # NOT inside the keep_build branch: a dense style skips more MOMENTS, but severing one
-    # exchange is wrong under every style, so this is the one continuity check a style
-    # cannot switch off.
+    # not inside keep_build: dense styles skip more moments but severing an exchange is wrong in
+    # every style, so styles can't turn this one off
     for b in timeline:
         cuts = [s for s in b["seams"]
                 if SEVERED_MIN_S <= float(s.get("dur") or 0) <= SEVERED_MAX_S
                 and str(s.get("text") or "").strip()]
-        for s in cuts[:2]:      # two examples is enough to make the point actionable
+        for s in cuts[:2]:      # two examples is enough
             said = " ".join(str(s["text"]).split())[:80]
             flags.append({
                 "kind": "severed_exchange", "at": b["at"], "ns": [b["n"]],
@@ -309,14 +293,9 @@ def audit(timeline: list[dict], pace: float = 1.0, keep_build: bool = True,
                              f"payoff -- it opens mid-sequence, with the setup skipped."),
                 })
     else:
-        # The mirror measurement: with build-up deliberately skipped, the failure mode
-        # flips from "the setup was deleted" to "this stopped being dense". Both numbers
-        # come straight from the style doc's own reject criteria.
-        # A SHOT is one kept segment, not a beat. Measuring beats made this flag read
-        # the wrong number twice over: it reported a 30-beat cut's 17.4s mean beat as its
-        # "average shot" (the real shots averaged 12.2s), and it could only ever be
-        # cleared by shortening BEATS -- i.e. by shipping less video -- when the fix is
-        # to split the same footage into more cuts.
+        # the mirror check: with build-up skipped the failure is "stopped being dense". numbers come
+        # from the style doc's reject criteria. measured on shots (kept segments), not beats, since
+        # the fix is splitting footage into more cuts, not shipping less video
         shots = [s for b in timeline for s in (b.get("shots") or []) if s > 0]
         ceiling = AVG_SHOT_S * pace
         mean = sum(shots) / len(shots) if shots else 0.0
@@ -333,11 +312,9 @@ def audit(timeline: list[dict], pace: float = 1.0, keep_build: bool = True,
                          f"moments kept, never one conversation chopped in half."),
             })
 
-    # Runtime. The critic is told (correctly) that the target is a rough guide, so
-    # nothing in the rubric reacts to a cut that came in at 55% of it -- and the shortfall
-    # is invisible in the beat list, where every individual beat looks reasonable. Stated
-    # as a fact with the fix attached, because "add beats" is the wrong one: an
-    # under-filled cut is beats that kept 12s of a 30s allowance.
+    # runtime. the critic is told the target is a rough guide so nothing reacts to a cut at 55%
+    # of it, and every beat looks fine on its own. say it with the fix attached since "add
+    # beats" is wrong, an underfilled cut is beats using 12s of a 30s allowance
     if target_s > 0 and total < target_s * SHORT_CUT_FRAC:
         flags.append({
             "kind": "short_cut", "at": 0.0, "ns": [b["n"] for b in timeline],
@@ -350,8 +327,7 @@ def audit(timeline: list[dict], pace: float = 1.0, keep_build: bool = True,
                      f"footage."),
         })
 
-    # Thin beats: measured against this cut's own median, so a naturally quiet stream
-    # doesn't flag wholesale and a chatty one still surfaces its dead patches.
+    # thin beats vs this cut's own median, so quiet streams don't flag everything
     dense = [b["wps"] for b in timeline if b["dur"] >= MIN_DENSITY_S and b["wps"] > 0]
     med = _median(dense)
     if med > 0:
@@ -364,8 +340,7 @@ def audit(timeline: list[dict], pace: float = 1.0, keep_build: bool = True,
                              f"{med:.1f} -- thin, mostly dead air or silence."),
                 })
 
-    # A cut whose two biggest peaks both land early has nothing left to climb toward;
-    # the sag is then structural, not a tightening problem.
+    # if both big peaks land early there's nothing left to climb to, the sag is structural
     if len(timeline) >= 4 and total > 0:
         peaks = sorted(timeline, key=lambda b: (-b["energy"], b["at"]))[:2]
         if all((p["at"] + p["dur"] / 2) < total * FRONT_LOAD_FRAC for p in peaks):

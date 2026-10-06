@@ -20,11 +20,10 @@ class Word(TypedDict):
     end: float
 
 
-# large-v3-turbo has 4 decoder layers to large-v3's 32 at near-identical WER, and is the
-# single biggest lever on a 6h VOD. Pass model_size="large-v3" to get the old quality back.
+# large-v3-turbo has 4 decoder layers vs 32 at about the same WER, biggest speed win on a
+# 6h vod. model_size="large-v3" for the old quality
 DEFAULT_WHISPER_MODEL = "large-v3-turbo"
-# 8 fits alongside turbo's weights on an 8GB card with room to spare; raise it if you have
-# more VRAM (throughput scales with it), or drop compute_type to int8_float16 to make room.
+# 8 fits next to turbo on an 8GB card. raise it with more vram, or use int8_float16 for room
 DEFAULT_BATCH_SIZE = 8
 
 
@@ -33,8 +32,8 @@ def _register_cuda_dlls() -> None:
     ctranslate2 can resolve cuBLAS/cuDNN/CUDA-runtime. No-op elsewhere."""
     if sys.platform != "win32":
         return
-    # faster-whisper (ctranslate2) + numpy each ship libiomp5md.dll; allow the
-    # duplicate rather than crashing. Must be set before the heavy import.
+    # faster-whisper and numpy both ship libiomp5md.dll, allow the dupe instead of crashing.
+    # has to be set before the import
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     for site in __import__("site").getsitepackages():
         for bin_dir in glob.glob(os.path.join(site, "nvidia", "*", "bin")):
@@ -42,7 +41,7 @@ def _register_cuda_dlls() -> None:
                 os.add_dll_directory(bin_dir)
             except OSError:
                 pass
-            # ctranslate2 resolves cuBLAS via PATH at runtime, so prepend too
+            # ctranslate2 finds cuBLAS via PATH at runtime so prepend it too
             if bin_dir not in os.environ.get("PATH", ""):
                 os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
 
@@ -56,11 +55,11 @@ def _wav_duration(wav_path: str | Path) -> float:
         return 0.0
 
 
-# Whisper's own batched-VAD threshold and silence gap, so "speech" means the same thing
-# here as it did when the words were decoded. No pad: `compress_silence` adds its own.
+# whisper's own batched vad threshold + silence gap so "speech" means the same thing here.
+# no pad, compress_silence adds its own
 VAD_OPTS = {"threshold": 0.5, "min_silence_duration_ms": 160,
             "min_speech_duration_ms": 250, "speech_pad_ms": 0}
-VAD_CHUNK_S = 600.0   # wav read in 10-min slices; a 6h stream is ~1.4GB as float32
+VAD_CHUNK_S = 600.0   # read wav in 10 min slices, a 6h stream is ~1.4GB as float32
 
 
 def speech_regions(wav_path: str | Path, cache_path: str | Path | None = None) -> list[list[float]]:
@@ -128,12 +127,10 @@ def transcribe(
     source = cache_path.with_suffix(".source.json") if cache_path else None
     if cache_path and cache_path.exists():
         prev = sidecar.read_text(encoding="utf-8") if sidecar and sidecar.exists() else '""'
-        # legacy caches predate the source sidecar -> treat them as local/large-v3, the
-        # only thing they could have been.
+        # old caches have no source sidecar, they can only be local/large-v3
         src = (json.loads(source.read_text(encoding="utf-8"))
                if source and source.exists() else {})
-        # The model MUST be part of the key: without it, switching to a faster model
-        # silently serves the old model's transcript and every A/B is a lie.
+        # model has to be in the key or switching models serves the old transcript
         if (json.loads(prev) == hotwords
                 and src.get("backend", "local") == backend
                 and src.get("model", "large-v3") == model_size):
@@ -158,7 +155,7 @@ def transcribe(
 
 
 _STRIP = " \t\"'.,!?:;()[]…-"
-_CUTOFF = 0.72   # "arlequino" vs "Arlecchino" scores 0.74; below this it's a real word
+_CUTOFF = 0.72   # "arlequino" vs "Arlecchino" is 0.74, below this it's a real word
 
 
 def snap_to_glossary(words: list[Word], hotwords: str) -> list[Word]:
@@ -222,27 +219,24 @@ def _stt_local(wav_path, hotwords="", model_size=DEFAULT_WHISPER_MODEL, device="
                **_kw) -> list[Word]:
     """faster-whisper local GPU backend (default; free/private)."""
     _register_cuda_dlls()
-    # local imports: heavy, GPU-only
+    # local imports, heavy + gpu only
     from faster_whisper import BatchedInferencePipeline
 
     model = _whisper(model_size, device, compute_type)
-    # hotwords is the bounded bias path; passing initial_prompt too would (a) make
-    # faster-whisper ignore hotwords and (b) feed an uncapped prompt that can push
-    # the decoder past Whisper's 448-position limit. condition_on_previous_text=False
-    # keeps positions bounded so a hallucinated/runaway segment can't overflow either.
+    # hotwords is the bounded bias path. adding initial_prompt would make faster-whisper ignore
+    # hotwords and could push past whisper's 448 position limit. condition_on_previous_text=False
+    # keeps a runaway segment from overflowing too.
     #
-    # Batched + VAD is the whole speed story on a multi-hour VOD: sequential decoding
-    # leaves the GPU idle between windows, and without VAD we pay full decode price for
-    # the hours of dead air a Twitch stream contains. faster-whisper maps VAD-clipped
-    # timestamps back onto absolute source seconds, so every downstream consumer
-    # (perception, casting, ae_export) is unaffected.
+    # batched + vad is where the speed comes from on a long vod: no idle gpu between windows and
+    # no decoding hours of dead air. timestamps map back to source seconds so nothing downstream
+    # changes
     segments, _ = BatchedInferencePipeline(model=model).transcribe(
         str(wav_path), batch_size=batch_size, word_timestamps=True,
         hotwords=hotwords or None, vad_filter=True, condition_on_previous_text=False)
 
     dur = _wav_duration(wav_path) if progress else 0.0
     words: list[Word] = []
-    for seg in segments:            # faster-whisper yields lazily as it decodes
+    for seg in segments:            # yields lazily as it decodes
         for w in (seg.words or []):
             words.append({"text": w.word.strip(), "start": w.start, "end": w.end})
         if progress and dur:
@@ -270,5 +264,5 @@ def _stt_deepgram(wav_path, hotwords="", progress=None, **_kw) -> list[Word]:
         "Use --transcriber local for now.")
 
 
-# Transcriber plugin registry: name -> backend fn(wav_path, hotwords, ..., progress).
+# transcriber backends: name -> fn(wav_path, hotwords, ..., progress)
 _BACKENDS = {"local": _stt_local, "deepgram": _stt_deepgram}

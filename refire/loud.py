@@ -27,13 +27,12 @@ from .score import DEFAULT_MODEL
 from .select import SILENCE_PAD, budget_select, snap_to_phrase
 from .transcribe import DEFAULT_BATCH_SIZE, DEFAULT_WHISPER_MODEL
 
-# Spacing between VODs on the virtual timeline. Longer than any stream by a wide margin,
-# and round enough that a manifest timestamp still reads as "VOD 3, 41 minutes in".
+# gap between vods on the virtual timeline. way longer than any stream and round enough
+# that a timestamp reads as "vod 3, 41 min in"
 VOD_BASE = 100_000.0
 
-BUCKET_S = 1.0        # loudness resolution. perception's 5s default sizes the director's
-                      # moment map; it is far too coarse to place a cut on.
-BASELINE_S = 60.0     # rolling median span: "how loud has it been AROUND here"
+BUCKET_S = 1.0        # loudness resolution, perception's 5s is too coarse to cut on
+BASELINE_S = 60.0     # rolling median span, how loud it's been around here
 CLIP_S = 14.0         # total shot length
 LEAD_S = 4.0          # of which this much is run-up, before the spike window
 PAD_S = 5.0           # extra seconds downloaded each side, so the snap has room to move
@@ -92,13 +91,13 @@ def scan(vod_id, cache_dir="vods", per_vod: int = PER_VOD, clip_s: float = CLIP_
     run_dir = Path("run") / str(vod_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     wav = run_dir / "audio.wav"
-    if not wav.exists():          # the download is the expensive half -- only if needed
+    if not wav.exists():          # download is the slow part, only do it if needed
         extract_audio(ensure_audio(vod_id, cache_dir, threads), wav)
     sig = spike_signal(wav, baseline_s=baseline_s)
     if not sig:
         print(f"[scan] {vod_id}: no readable audio -- skipped")
         return []
-    perception.save_signals(run_dir / "spikes.json", sig)   # inspectable, not make's cache
+    perception.save_signals(run_dir / "spikes.json", sig)   # for inspection, not a make cache
     span = max(2.0, clip_s - lead_s)
     rows = _score_windows(sig, perception.top_windows(sig, k=per_vod, span_s=span), lead_s)
     print(f"[scan] {vod_id}: {sig[-1][0] / 3600:.1f}h scanned, {len(rows)} candidates")
@@ -162,10 +161,8 @@ def loud(
     hotwords = ", ".join(game_glossary(game, model=model, cache_dir=out_dir, extra=terms))
     clips, sources, words, voiced = [], [], [], []
     for i, c in enumerate(picked):
-        # ponytail: the downloader crops on INTEGER seconds, so a window's offset is the
-        # floor/ceil of what we asked for -- exact, as long as --trim-mode stays Exact
-        # (its default). If captions ever drift by about a second, that is the thing to
-        # check first; the fix is reading the real start back off the downloaded file.
+        # the downloader crops on whole seconds so the offset is floor/ceil of the request. exact
+        # as long as --trim-mode stays Exact. if captions drift ~1s check this first
         dl_a = float(int(max(0.0, c["a"] - pad_s)))
         dl_b = float(int(c["b"] + pad_s) + 1)
         print(f"[fetch] {i + 1}/{len(picked)}  vod {c['vod']} "
@@ -179,20 +176,18 @@ def loud(
         w = transcribe(wav, cache_path=wdir / "transcript.json", hotwords=hotwords,
                        backend=transcriber, model_size=whisper_model,
                        batch_size=batch_size, compute_type=compute_type)
-        # Per-window RMS thresholds: inside an already-loud moment only the genuinely
-        # louder words should shout in caps.
+        # per-window rms thresholds so only the actually louder words go caps
         annotate_emphasis(w, wav)
-        off = c["base"] + dl_a       # the window file starts at t=0; lift it onto the
+        off = c["base"] + dl_a       # window file starts at 0, lift it onto the timeline
         w = [{**x, "start": x["start"] + off, "end": x["end"] + off} for x in w]
-        # Snap the real in/out INSIDE the padded download -- that is what pad_s bought.
-        # Clamped to the window: snapping may move the cut, but it must never point the
-        # manifest at footage this file does not contain.
+        # snap in/out inside the padded download (that's what pad_s is for), clamped so the
+        # manifest never points at footage this file doesn't have
         a, b = snap_to_phrase(w, c["start"], c["end"], max_pad=pad_s)
         a, b = max(a, off), min(b, off + (dl_b - dl_a))
         clips.append({"start": a, "end": max(b, a + 1.0), "src": i})
         sources.append((video, off))
         words.extend(w)
-        if deadspace:   # lifted onto the same laid-out timeline as the words
+        if deadspace:   # same timeline as the words
             voiced += [[s + off, e + off]
                        for s, e in speech_regions(wav, cache_path=wdir / "speech.json")]
 

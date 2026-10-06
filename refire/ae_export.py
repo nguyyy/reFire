@@ -43,7 +43,7 @@ def decimate_zoom(zoom, fps: float = FPS, tol: float = 1.5) -> list[dict]:
     every skipped sample stays within `tol` percent of the straight line. Keeps
     the punch/creep/zoom-out shape as a handful of keyframes the user can re-ease.
     """
-    # ponytail: O(n^2) simplify; fine for clip-length arrays (<~a few hundred).
+    # O(n^2) but clip-length arrays are small
     n = len(zoom)
     if n == 0:
         return []
@@ -65,7 +65,7 @@ def decimate_zoom(zoom, fps: float = FPS, tol: float = 1.5) -> list[dict]:
 
 def clip_intensity(source, start: float, end: float):
     """Inter-frame motion intensity for source seconds [start, end). (cv2; untested.)"""
-    import cv2  # heavy/optional dep, import lazily
+    import cv2  # heavy optional dep, import lazily
 
     cap = cv2.VideoCapture(str(source))
     fps = cap.get(cv2.CAP_PROP_FPS) or FPS
@@ -82,11 +82,9 @@ def clip_intensity(source, start: float, end: float):
     return inten, fps
 
 
-# After Effects clamps EVERY time value -- a layer's startTime, a comp's duration, a Time
-# Remap value -- to +/-10800s (3h), so a layer simply cannot reach past the 3-hour mark of
-# a source. 6h+ VODs are the norm here, so the source gets split into parts AE can address.
-# 2.5h leaves headroom: a keyframe-snapped part slightly over 3h would be unreachable at
-# its own tail. ponytail: raise toward 10800 only if the part count ever becomes a problem.
+# AE clamps every time value (startTime, comp duration, time remap) to +/-3h, and vods are
+# usually 6h+, so split the source into parts AE can reach. 2.5h leaves room for a
+# keyframe-snapped part running a bit over. raise toward 10800 if part count gets annoying
 SEG_S = 9000.0
 
 
@@ -109,7 +107,7 @@ def _split_points(dur: float, clips, seg_s: float, pad: float = 5.0) -> list[flo
     pts, k = [], 1
     while k * seg_s < dur:
         t = k * seg_s
-        for a, b in reversed(spans):        # decreasing, so a chain of clips walks back
+        for a, b in reversed(spans):        # newest first so a chain of clips walks back
             if a <= t <= b:
                 t = a
         pts.append(max(0.0, t))
@@ -128,7 +126,7 @@ def split_source(video, parts_dir, clips, seg_s: float = SEG_S):
     reused across runs. Source shorter than one part -> [(video, 0.0)], unchanged manifest.
     """
     video = Path(video)
-    if not video.exists():          # nothing to probe; AE reports the missing source
+    if not video.exists():          # nothing to probe, AE will report the missing source
         return [(video, 0.0)]
     total = _duration(video)
     if total <= seg_s:
@@ -137,7 +135,7 @@ def split_source(video, parts_dir, clips, seg_s: float = SEG_S):
     parts_dir = Path(parts_dir)
     lst = parts_dir / "parts.csv"
     parts = _read_parts(lst)
-    if not parts or abs(parts[-1][2] - total) > 5.0:      # absent / stale / half-written
+    if not parts or abs(parts[-1][2] - total) > 5.0:      # missing / stale / half written
         parts_dir.mkdir(parents=True, exist_ok=True)
         for stale in parts_dir.glob("part_*.mp4"):
             stale.unlink()
@@ -153,15 +151,12 @@ def split_source(video, parts_dir, clips, seg_s: float = SEG_S):
     return [(p, off) for p, off, _end in parts]
 
 
-# AE has no smart long-GOP decoding: every preview frame of an OBS/NVENC H.264 VOD is
-# rebuilt from its GOP, which is where most of AE's slowness comes from. DNxHR LB is
-# all-intra (one frame = one seek) and usually previews 3-10x faster.
-PROXY_PAD = 2.0      # head headroom so a cut can still be nudged earlier inside AE
-PROXY_TAIL = 10.0    # tail headroom: clip ends land mid-word far more often than starts,
-                     # so there's room to extend to the end of the sentence in AE
-# Profile is a real quality knob, not a constant to inline: LB measured SSIM 0.954 against
-# the source on an 8Mbps Twitch VOD -- it re-quantizes existing blocking into mush. SQ is
-# 0.997 (visually transparent) for ~3.2x the disk. Drop to LB only if scratch space hurts.
+# AE decodes long-GOP h264 badly, every preview frame gets rebuilt from its GOP. DNxHR is
+# all-intra so previews are usually 3-10x faster
+PROXY_PAD = 2.0      # head room so a cut can still be nudged earlier in AE
+PROXY_TAIL = 10.0    # tail room, ends land mid-word way more than starts
+                     # SQ over LB: LB measured SSIM 0.954 on an 8Mbps twitch vod and turns blocking into mush.
+                     # SQ is 0.997 for ~3.2x the disk. only drop to LB if scratch space is tight
 PROXY_PROFILE = "dnxhr_sq"
 
 
@@ -185,8 +180,7 @@ def proxy_clips(video, proxy_dir, clips, pad: float = PROXY_PAD,
     for c in clips:
         a = max(0.0, c["start"] - pad)
         b = c["end"] + tail
-        # profile is in the name: otherwise a quality change silently reuses the old,
-        # worse-looking proxies that already exist for the same span.
+        # profile goes in the name, otherwise changing it silently reuses the old proxies
         p = proxy_dir / f"p_{PROXY_PROFILE}_{a:.3f}-{b:.3f}.mov"
         if not p.exists():
             proxy_dir.mkdir(parents=True, exist_ok=True)
@@ -289,8 +283,7 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
     for sec in sections:
         idxs = []
         for seg in sec["clips"]:
-            # Style pass: a beat's role/energy tilts presentation. No role (legacy detect
-            # path / flat fallback) -> NEUTRAL, so those manifests stay byte-identical.
+            # beat role/energy tweaks presentation. no role -> NEUTRAL so old manifests don't change
             role = seg.get("role", "")
             if role:
                 st = style_for(role, seg.get("energy", 3))
@@ -299,9 +292,8 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
                 cz_exit = min(cz_enter * 0.9, z_exit / st["zoom_sens"])
             else:
                 wpl, cz_enter, cz_exit = words_per_line, z_enter, z_exit
-            # Dead-air pass: `keep` are the clip-relative source spans worth playing;
-            # everything downstream (captions, zoom, overlays) is retimed onto the
-            # gap-free timeline `tight` describes, and AE jump-cuts to it via Time Remap.
+            # dead air: keep = clip-relative spans worth playing. captions/zoom/overlays get retimed
+            # onto the gap-free tight timeline and AE jump-cuts it with time remap
             keep = tight = None
             if deadspace:
                 keep, retimed, cdur = compress_silence(words, seg["start"], seg["end"],
@@ -310,10 +302,8 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
                 groups = group_words(retimed, 0.0, cdur, wpl)
             else:
                 groups = group_words(words, seg["start"], seg["end"], wpl)
-            # `captions="emph"` keeps only the lines carrying an emphasized word (a
-            # yell, an interjection, an ALL-CAPS transcription). A full subtitle track
-            # competes with the cuts in a fast style; sparse text just prevents the
-            # confusion the cutting can't. `emph` is already on every word.
+            # captions="emph" keeps only lines with an emphasized word (yell, interjection, all caps).
+            # full subs fight the cuts in a fast style. emph is already set on every word
             lines = [
                 {"text": " ".join(style_text(w["text"], w["emph"]) for w in g),
                  "start": g[0]["start"], "end": g[-1]["end"]}
@@ -340,9 +330,9 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
                 clip["keep"] = [[round(a, 3), round(b, 3)] for a, b in keep]
                 clip["dur"] = round(cdur, 3)
             if role:
-                clip["role"] = role                  # informational for AE / debugging
+                clip["role"] = role                  # info for AE / debugging
             if "src" in seg:
-                clip["src"] = seg["src"]             # caller-supplied media map (see `sources`)
+                clip["src"] = seg["src"]             # caller-supplied media map (see sources)
             if overlays_by_clip and ci < len(overlays_by_clip):
                 ovs = overlays_by_clip[ci]
                 if tight:
@@ -351,25 +341,24 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
             clips.append(clip)
             idxs.append(len(clips) - 1)
             ci += 1
-        # hook = minimal: no title card (the cut starts hot). Only flag when False so
-        # legacy/neutral sections keep the existing schema.
+        # hook = minimal means no title card. only set when False so other sections keep the schema
         manifest_section = {"title": sec["title"], "clip_indices": idxs}
         if not cards or (sec.get("role")
                          and not style_for(sec["role"], sec.get("energy", 3))["card"]):
             manifest_section["card"] = False
         manifest_sections.append(manifest_section)
 
-    # Each clip gets its own all-intra proxy so AE never decodes the long-GOP VOD.
-    # `source` stays for the raw-VOD case and older manifests.
+    # each clip gets its own all-intra proxy so AE never decodes the long-GOP vod.
+    # source stays for the raw vod case and old manifests
     if sources is not None:
-        parts = list(sources)               # caller owns the media map and the src tags
+        parts = list(sources)               # caller owns the media map and src tags
     else:
         parts = proxy_clips(video, run_dir / "ae" / "proxies", clips) if proxy else []
         if parts:
             for i, c in enumerate(clips):
                 c["src"] = i
         else:
-            # raw VOD: AE can only reach 3h into a file, so a long one ships as parts.
+            # raw vod: AE can only reach 3h in, so long ones ship as parts
             parts = split_source(video, Path(video).with_suffix(".parts"), clips)
             _assign_parts(clips, parts)
             if len(parts) < 2:

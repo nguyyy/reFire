@@ -8,7 +8,7 @@ from __future__ import annotations
 from .emphasis import style_text
 from .transcribe import Word
 
-# 720p canvas; libass scales to the actual frame. Yellow highlight, white idle.
+# 720p canvas, libass scales to the real frame. yellow highlight, white idle
 _HEADER = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1280
@@ -35,7 +35,7 @@ def _ts(seconds: float) -> str:
 
 PAUSE_GAP = 0.35      # seconds of silence that forces a new caption line
 MAX_CARRY = 0.15      # max seconds a word's karaoke highlight may hold past its end
-MAX_WORD_S = 0.7      # longest a single spoken word is assumed to occupy -- see `_gap`
+MAX_WORD_S = 0.7      # longest one spoken word is assumed to take, see _gap
 
 
 def _gap(w: dict, nxt: dict) -> float:
@@ -109,8 +109,8 @@ def build_ass(
         line_end = group[-1]["end"]
         parts = []
         for j, w in enumerate(group):
-            # highlight holds until the next word begins, but never lingers more
-            # than MAX_CARRY past this word's end -- otherwise it hangs over a pause
+            # highlight holds until the next word but never more than MAX_CARRY past this word's end,
+            # otherwise it hangs over a pause
             nxt = group[j + 1]["start"] if j + 1 < len(group) else w["end"]
             hold_end = min(nxt, w["end"] + MAX_CARRY)
             kcs = max(1, round((hold_end - w["start"]) * 100))

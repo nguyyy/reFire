@@ -5,15 +5,12 @@ import json
 
 from .chunk import Chunk
 
-# ponytail: default to a model that actually fits an 8GB GPU and is installed here.
-# qwen2.5:14b scores better but 404s/OOMs on this box; pass --model to use it.
+# default to a model that fits an 8GB gpu. qwen2.5:14b scores better but OOMs here, use --model
 DEFAULT_MODEL = "llama3.1:8b"
 
-# A local scorer that wedges must not cost a whole run. `ollama.chat` has no timeout and
-# blocks forever, so a runner deadlocked on VRAM pressure (another GPU app, an OOM) hangs
-# the pipeline mid-cast with the director's and critic's Claude calls already paid for and
-# `outline.json` not yet written. One rating is worth seconds; the ceiling is generous
-# enough for a big model's first (cold) call and still bounded.
+# a stuck local scorer can't cost a whole run. ollama.chat has no timeout, so a runner stuck
+# on vram pressure would hang mid-cast after the claude calls are already paid for. one
+# rating takes seconds, this leaves room for a big model's cold start
 SCORE_TIMEOUT_S = 180.0
 
 _SYSTEM = (
@@ -23,9 +20,8 @@ _SYSTEM = (
     "reaction). Reply ONLY with JSON: {\"llm_score\": <1-10>, \"reason\": \"<short>\"}."
 )
 
-# Brief-aware scoring: a fully-anchored scale (not just the top end) so scores
-# spread out instead of compressing into the middle, and off-topic content scores
-# low even when it's loud.
+# brief-aware: fully anchored scale so scores spread out instead of bunching in the middle,
+# and off-topic stuff scores low even when it's loud
 _SYSTEM_BRIEF = (
     "You curate clips for a focused highlight video. The EDITOR'S BRIEF states the "
     "subject and vibe the video should capture. Given a transcript snippet, rate it "
@@ -47,7 +43,7 @@ def score_chunk(chunk: Chunk, brief: str = "", model: str = DEFAULT_MODEL) -> di
     detect path); a brief switches to focused relevance+quality scoring. Parse
     failure -> score 0.
     """
-    import ollama  # local import: optional heavy dep
+    import ollama  # optional heavy dep
 
     if brief:
         system, key = _SYSTEM_BRIEF, "score"
@@ -66,9 +62,8 @@ def score_chunk(chunk: Chunk, brief: str = "", model: str = DEFAULT_MODEL) -> di
             ],
         )
     except Exception as e:                      # timeout, dead runner, refused socket
-        # Never propagate: `narrative.cast` is not wrapped, so raising here kills a run
-        # that already spent the director + critic Claude calls. Same shape as a parse
-        # failure -- this beat scores 0 and the cut survives.
+        # never raise, narrative.cast isn't wrapped so it would kill a run that already paid for the
+        # director + critic. same as a parse failure, beat scores 0 and the cut survives
         print(f"[score] local scorer unavailable ({type(e).__name__}); scoring 0")
         return {"llm_score": 0.0, "reason": "scorer_unavailable"}
     try:
