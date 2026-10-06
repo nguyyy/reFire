@@ -11,7 +11,6 @@
   <link rel="icon"
     href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%238CCFF4'/%3E%3Ctext x='4' y='27' font-family='Arial,sans-serif' font-weight='700' font-size='16' letter-spacing='-1' fill='%2307131C'%3ErF%3C/text%3E%3C/svg%3E">
   <script>
-    /* resolve the theme before first paint: saved choice, else the OS preference, else dark */
     (function () {
       var t; try { t = localStorage.getItem("refire-theme") } catch (e) { }
       if (t !== "light" && t !== "dark") t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
@@ -23,11 +22,6 @@
   <link rel="stylesheet"
     href="https://fonts.googleapis.com/css2?family=Google+Sans:ital,wght@0,400..700;1,400..700&display=swap">
   <style>
-    /* reFire site. Google Sans, set tight: every glyph sits ~1.5px from its neighbour and every
-   line's cap tops sit 2px under the baseline above, at any size (see the * rule). Arial for the small
-   print: pills, tags, flags, code and timecodes (Google Sans Code read as "AI"). One sky-blue accent. Text hugs the screen edges so the 3D owns the middle; a
-   projector beam with dust in it lights the page. Radius rule: cards 14px, buttons and
-   pills fully round. Dark is the default; light is a full token swap. */
     :root {
       --ground: #08090C;
       --ground-2: #0C0F13;
@@ -36,23 +30,16 @@
       --line: #29303A;
       --rule: #414B58;
       --surface: rgba(20, 25, 31, .84);
-      /* cards */
       --edge: rgba(255, 255, 255, .07);
-      /* top highlight on cards */
       --lift: 0 24px 60px -28px rgba(0, 0, 0, .8);
       --mute: #A0A9B4;
-      /* 8.37:1 on ground */
       --text: #D8DDE3;
       --strong: #F4F7F9;
       --sky: #8CCFF4;
-      /* blocks */
       --sky-text: #9AD6F7;
-      /* accent as text, 12.6:1 */
       --sky-ink: #07131C;
-      /* text on sky blocks, 11:1 */
       --sky-line: rgba(140, 207, 244, .4);
       --chart: #3A9AD9;
-      /* chart line: passes the dataviz validator on this ground */
       --spot: rgba(140, 207, 244, .09);
       --spot-edge: rgba(140, 207, 244, .7);
       --beam: rgba(140, 207, 244, .11);
@@ -63,7 +50,6 @@
       --grain: .07;
       --grain-invert: 0;
       --shine: #E9F7FF;
-      /* the light that crosses the footer wordmark */
       --sans: "Google Sans", system-ui, sans-serif;
       --detail: Arial, "Helvetica Neue", Helvetica, sans-serif;
       --ease: cubic-bezier(.16, 1, .3, 1);
@@ -84,11 +70,9 @@
       --edge: #FFFFFF;
       --lift: 0 1px 2px rgba(30, 50, 70, .08), 0 24px 48px -24px rgba(30, 50, 70, .3);
       --mute: #4A5460;
-      /* 6.46:1 on ground */
       --text: #1C242D;
       --strong: #070B10;
       --sky-text: #16679A;
-      /* 5.12:1 on ground, 6.1 on white */
       --sky-line: rgba(22, 103, 154, .4);
       --chart: #16679A;
       --spot: rgba(120, 196, 240, .22);
@@ -104,12 +88,6 @@
       color-scheme: light;
     }
 
-    /* Tight setting, measured on Google Sans 400: the median ink gap between neighbouring
-   glyphs is .07em, caps and ascenders stand .72em (Arial: .72em). So 1.5px - .07em
-   leaves ~1.5px between letters at any size (never looser than the font's own spacing), and
-   .72em + 2px puts each line's cap tops 2px under the baseline above. Descenders (.24em)
-   dip into the line below by design. Declared on every element so each computes from its
-   own size; --lh is the same rule for overrides to reuse. */
     :root {
       --lh: calc(.72em + 2px)
     }
@@ -150,7 +128,6 @@
       overflow-x: clip
     }
 
-    /* film grain: fixed, never repaints with scroll */
     body::after {
       content: "";
       position: fixed;
@@ -195,7 +172,6 @@
       height: auto
     }
 
-    /* the small print (.mono is the historical class name): untracked, it is set small */
     code,
     code *,
     pre,
@@ -254,8 +230,6 @@
       color: var(--sky-text)
     }
 
-    /* spec marks, after anduril.com: a bracketed designation in Arial, under a two-line uppercase
-   descriptor. Every code is a real name from the repo (a file, a module, a flag, a model) */
     .tag {
       display: block;
       font: 400 12px/1 var(--detail);
@@ -285,10 +259,6 @@
       font-variant-numeric: tabular-nums
     }
 
-    /* masked headline lines: the hero plays on load, section headlines play on reveal.
-   Padding is room for the ink the tight line box leaves out (ascenders .02em above it,
-   descenders .22em below). Between two lines the negative margins collapse to the larger
-   one instead of adding, so the second line carries the whole sum. */
     .ln {
       display: block;
       overflow: hidden;
@@ -304,7 +274,6 @@
       display: block
     }
 
-    /* ---- atmosphere: two beams, a floor glow, a vignette. Moved by transform only ---------- */
     .atmos {
       position: fixed;
       inset: 0;
@@ -382,7 +351,6 @@
       }
     }
 
-    /* ---- buttons: pill, one label per intent ------------------------------------------- */
     .btn {
       display: inline-flex;
       align-items: center;
@@ -422,7 +390,6 @@
       border-color: var(--mute)
     }
 
-    /* ---- nav ----------------------------------------------------------------------------- */
     .nav {
       position: fixed;
       top: 0;
@@ -534,7 +501,6 @@
       }
     }
 
-    /* ---- the 3D stage: fixed behind everything ----------------------------------------- */
     #scene {
       position: fixed;
       inset: 0;
@@ -577,7 +543,6 @@
       overflow-x: clip
     }
 
-    /* ---- section heads: a rule that draws in, the section's name and its index ------------- */
     .sec-head {
       position: relative;
       display: flex;
@@ -609,7 +574,6 @@
       color: var(--sky-text)
     }
 
-    /* ---- hero: all copy in the bottom-left corner, the reel gets the rest ------------------ */
     .hero {
       min-height: 100dvh;
       display: flex;
@@ -673,7 +637,6 @@
       }
     }
 
-    /* ---- pipeline story: a narrow column on the left edge, the 3D on the right ------------ */
     .story {
       position: relative;
       padding-top: 24px
@@ -756,13 +719,11 @@
       }
     }
 
-    /* ---- sections ------------------------------------------------------------------------ */
     .sec {
       padding-block: clamp(96px, 11vw, 160px);
       scroll-margin-top: var(--nav)
     }
 
-    /* back-to-back sections: the previous one's bottom padding already makes the gap */
     .sec+.sec {
       padding-top: clamp(32px, 4vw, 56px)
     }
@@ -798,7 +759,6 @@
       transform: translateY(150%)
     }
 
-    /* surfaces: lit top edge, and a spotlight that follows the cursor */
     .surface {
       background: var(--surface);
       border: 1px solid var(--line);
@@ -839,7 +799,6 @@
       opacity: 1
     }
 
-    /* ---- proof: the channel's own YouTube Studio export ----------------------------------- */
     .proof-lede {
       margin-top: 30px;
       max-width: 40ch;
@@ -1145,7 +1104,6 @@
       }
     }
 
-    /* split: what the model decides, what code decides */
     .split {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -1208,7 +1166,6 @@
       }
     }
 
-    /* bento */
     .bento {
       display: grid;
       grid-template-columns: repeat(6, 1fr);
@@ -1285,7 +1242,6 @@
       }
     }
 
-    /* karaoke demo: always a dark video frame, in either theme */
     .karaoke {
       position: relative;
       display: grid;
@@ -1325,7 +1281,6 @@
       color: #9AA3AD
     }
 
-    /* names demo */
     .fixes {
       display: grid;
       gap: 14px;
@@ -1363,8 +1318,6 @@
       transform: none
     }
 
-    /* code blocks */
-    /* Arial is proportional, so aligned comments use a tab stop past the longest key: value */
     .code {
       tab-size: 9em;
       margin: 0;
@@ -1386,7 +1339,6 @@
       color: var(--mute)
     }
 
-    /* snap modes */
     .snaps {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
@@ -1417,7 +1369,6 @@
       }
     }
 
-    /* annotated command */
     .cmd-grid {
       display: grid;
       grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
@@ -1487,7 +1438,6 @@
       }
     }
 
-    /* panels */
     .panels {
       display: grid;
       grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
@@ -1556,7 +1506,6 @@
       }
     }
 
-    /* engineering numbers */
     .stats {
       display: grid;
       grid-template-columns: 1.4fr 1fr 1fr 1fr;
@@ -1594,7 +1543,6 @@
       }
     }
 
-    /* install */
     .steps {
       display: grid;
       gap: 14px;
@@ -1655,9 +1603,6 @@
       color: var(--sky-ink)
     }
 
-    /* The finale, staged by JS: .lit once the card is well in view, .settled when it has played.
-   The surface fills in as a beam passes over it, the word rises out of blur, and the
-   wordmark below catches the light. */
     .cta {
       position: relative;
       isolation: isolate
@@ -1742,7 +1687,6 @@
       }
     }
 
-    /* footer: the wordmark, whole, at the foot */
     footer {
       overflow: hidden
     }
@@ -1788,8 +1732,6 @@
       color: var(--sky-text)
     }
 
-    /* the finale's light reaches the wordmark: one beam across the letters (a copy of the word,
-   clipped to its own glyphs), then "Fire" keeps a glow and "re" stays a little lit */
     .giant {
       position: relative;
       transition: color 2s var(--ease) .6s
@@ -1932,10 +1874,6 @@
       </article>
     </section>
 
-    <!-- Real YouTube Studio exports (2026-09-25), nothing adjusted. The chart is one channel's daily
-       engaged views (the before/after story). The tiles consolidate every reFire cut, lifetime.
-       Average % viewed replaces average view duration because a merged duration of short
-       edits and long cuts describes neither. -->
     <section class="sec wrap" id="proof" aria-labelledby="proof-h">
       <div class="sec-head" data-reveal><span class="label">In the wild</span><span class="label idx">/02</span></div>
       <h2 class="display" id="proof-h" data-reveal>14 views a day.<br><span class="sky">Then 1,855.</span></h2>
@@ -2241,12 +2179,10 @@ Never let a moment fully resolve.</pre>
     const root = document.documentElement;
     const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-    /* ---- section headlines become masked lines, like the hero ------------------------------ */
     document.querySelectorAll("h2.display[data-reveal]").forEach(h => {
       h.innerHTML = h.innerHTML.split(/<br\s*\/?>/i).map(l => `<span class="ln"><span>${l}</span></span>`).join("");
     });
 
-    /* ---- reveals, nav state, active story step: IntersectionObserver only ----------------- */
     const once = new IntersectionObserver(es => es.forEach(e => {
       if (e.isIntersecting) { e.target.classList.add("in"); once.unobserve(e.target); }
     }), { rootMargin: "0px 0px -8% 0px" });
@@ -2260,7 +2196,6 @@ Never let a moment fully resolve.</pre>
     new IntersectionObserver(([e]) => nav.classList.toggle("solid", !e.isIntersecting))
       .observe(document.querySelector(".hero h1"));
 
-    /* ---- smooth scroll -------------------------------------------------------------------- */
     const lenis = !reduce && window.Lenis ? new window.Lenis({ lerp: 0.09 }) : null;
     document.querySelectorAll('a[href^="#"]').forEach(a => a.addEventListener("click", ev => {
       const id = a.getAttribute("href"), el = id === "#top" ? 0 : document.querySelector(id);
@@ -2270,7 +2205,6 @@ Never let a moment fully resolve.</pre>
       else (el === 0 ? window.scrollTo(0, 0) : el.scrollIntoView());
     }));
 
-    /* ---- cursor spotlight on cards (hover-capable pointers only) --------------------------- */
     if (matchMedia("(hover: hover) and (pointer: fine)").matches) {
       document.addEventListener("pointermove", e => {
         const el = e.target.closest && e.target.closest(".spot");
@@ -2281,15 +2215,12 @@ Never let a moment fully resolve.</pre>
       }, { passive: true });
     }
 
-    /* ---- finale: the GitHub card fills in and the word rises ------------------------------ */
     {
       const cta = document.querySelector(".cta"), giant = document.querySelector(".giant");
       cta.querySelector(".display").innerHTML = [..."GitHub"].map((c, i) => `<span class="ch" style="--c:${i}">${c}</span>`).join("")
         + ' <span class="arr" style="--c:8">&nearr;</span>';
       let lit = false, giantIn = false;
-      // the wordmark catches the light once the card has lit, or when it's scrolled to after that
       const lightGiant = () => { if (lit && giantIn) giant.classList.add("lit"); };
-      // start as soon as a sliver shows, so scrolling past fast never finds an empty box
       new IntersectionObserver(([e], o) => {
         if (!e.isIntersecting) return;
         o.disconnect();
@@ -2303,7 +2234,6 @@ Never let a moment fully resolve.</pre>
       }, { threshold: [0, 0.35] }).observe(giant);
     }
 
-    /* ---- copy the command ----------------------------------------------------------------- */
     const copy = document.getElementById("copy");
     copy.addEventListener("click", async () => {
       const text = [...document.querySelectorAll(".cmd-row code")].map(c => c.textContent).join(" \\\n  ");
@@ -2312,7 +2242,6 @@ Never let a moment fully resolve.</pre>
       setTimeout(() => (copy.textContent = "Copy"), 1600);
     });
 
-    /* ---- karaoke preview: 3 words per line (reFire's default), uppercase on the spike ------ */
     const LINES = [["okay", "last", "pull"], ["i", "promise", "chat"], ["NO", "WAY", "WHAT"], ["IS", "THAT", "HER"]];
     const kLine = document.getElementById("kara-line"), kTc = document.getElementById("kara-tc");
     let kl = 2, kw = 1, kTimer = null;
@@ -2331,11 +2260,9 @@ Never let a moment fully resolve.</pre>
       }, 340);
     }).observe(document.getElementById("karaoke"));
 
-    /* ---- proof chart: daily engaged views, straight from the YouTube Studio export --------- */
     const VIEWS_ALL = [14, 14, 14, 16, 14, 8, 15, 10, 14, 26, 13, 13, 14, 11, 16, 14, 9, 14, 24, 20, 18, 24, 4, 16, 20, 14, 12, 11, 10, 12, 13, 21, 21, 18, 17, 16, 17, 9, 10, 18, 11, 10, 10, 13, 17, 10, 15, 8, 10, 8, 8, 11, 16, 6, 14, 14, 16, 10, 10, 18, 20, 14, 14, 19, 22, 18, 11, 24, 26, 21, 16, 11, 12, 16, 15, 7, 11, 15, 11, 12, 8, 24, 11, 12, 15, 10, 15, 16, 10, 20, 91, 49, 333, 2089, 733, 884, 3612, 3237, 1870, 3722, 3321, 3152, 3057, 3563, 2407, 1962, 2008, 2152, 1959, 2198, 1303, 1324, 911, 3160, 1243, 552, 464, 451, 377, 222, 266, 152, 171, 159, 144, 154, 192, 203, 151, 155, 2149, 12086, 3540, 4637, 3544, 4942, 3993, 1406, 1237, 1057];
     const WEEKS = [["2026-05-09", 95], ["2026-05-16", 101], ["2026-05-23", 115], ["2026-05-30", 101], ["2026-06-06", 112], ["2026-06-13", 91], ["2026-06-20", 83], ["2026-06-27", 77], ["2026-07-04", 102], ["2026-07-11", 141], ["2026-07-18", 88], ["2026-07-25", 93], ["2026-08-01", 177], ["2026-08-08", 10937], ["2026-08-15", 21092], ["2026-08-22", 12906], ["2026-08-29", 7158], ["2026-09-05", 1268], ["2026-09-12", 18476], ["2026-09-19", 20816]];
     const UPLOADS = ["2026-08-07", "2026-08-12", "2026-08-13", "2026-08-16", "2026-08-18", "2026-08-20", "2026-08-26", "2026-08-30", "2026-09-16", "2026-09-17"];
-    // the chart opens on Jul 25: two weeks of "before" read as flat, three months just read as empty
     const VIEWS = VIEWS_ALL.slice(77);
     const DAY = 864e5, START = Date.UTC(2026, 6, 25), YMAX = 13000, YTICKS = [0, 4000, 8000, 12000];
     const dayIdx = s => Math.round((Date.parse(s) - START) / DAY);
@@ -2352,12 +2279,10 @@ Never let a moment fully resolve.</pre>
       const pts = VIEWS.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" L");
       let s = `<defs><linearGradient id="fade" x1="0" y1="0" x2="0" y2="1"><stop class="fade-stop" offset="0" stop-opacity=".28"/><stop class="fade-stop" offset="1" stop-opacity="0"/></linearGradient></defs>`;
       for (const t of YTICKS) s += `<line class="${t ? "grid" : "base"}" x1="${L}" x2="${W - R}" y1="${y(t)}" y2="${y(t)}"/><text class="ax" x="${L - 10}" y="${y(t) + 4}" text-anchor="end">${t ? t / 1000 + "K" : "0"}</text>`;
-      for (const d of ["2026-08-01", "2026-08-15", "2026-09-01", "2026-09-15"]) {   // date labels, twice a month
+      for (const d of ["2026-08-01", "2026-08-15", "2026-09-01", "2026-09-15"]) {
         s += `<text class="ax" x="${x(dayIdx(d))}" y="${H - 6}" text-anchor="middle">${dfmt.format(Date.parse(d)).replace(/, \d{4}$/, "")}</text>`;
       }
       const first = dayIdx(UPLOADS[0]), fx = x(first);
-      // on narrow plots the peak label owns the top edge and there's no room left of the line,
-      // so the note drops to mid-height on the right, above the early cuts' ~4K days
       const narrow = W < 640;
       s += `<line class="mark" x1="${fx}" x2="${fx}" y1="${T}" y2="${y(0)}"/><text class="note" x="${narrow ? fx + 8 : fx - 10}" y="${narrow ? y(7000) : T + 14}" text-anchor="${narrow ? "start" : "end"}">First long-form cut</text>`;
       s += `<path class="area" d="M${x(0)},${y(0)} L${pts} L${x(n - 1)},${y(0)} Z"/><path class="line" pathLength="1" d="M${pts}"/>`;
@@ -2380,7 +2305,6 @@ Never let a moment fully resolve.</pre>
       dot.setAttribute("cx", cx); dot.setAttribute("cy", cy);
       tip.innerHTML = `${dfmt.format(START + i * DAY)}<b>${nfmt(VIEWS[i])} engaged views</b>${upSet.has(i) ? "<em>Long-form upload</em>" : ""}`;
       tip.hidden = false;
-      // above the point when there is room; otherwise beside the crosshair, never over the header
       const tw = tip.offsetWidth, th = tip.offsetHeight;
       let tx = cx - tw / 2, ty = cy - th - 16;
       if (ty < 0) { ty = Math.min(G.H - th, Math.max(0, cy - th / 2)); tx = cx - tw - 16 >= 0 ? cx - tw - 16 : cx + 16; }
@@ -2390,10 +2314,9 @@ Never let a moment fully resolve.</pre>
     plot.addEventListener("pointermove", e => hover(e.clientX));
     plot.addEventListener("pointerleave", () => { plot.classList.remove("hover"); tip.hidden = true; });
 
-    /* ---- theme: saved choice wins, otherwise follow the OS -------------------------------- */
     const themeBtn = document.getElementById("theme");
     const osLight = matchMedia("(prefers-color-scheme: light)");
-    let sceneTheme = null;   // set once the 3D scene exists
+    let sceneTheme = null;
     let saved = null;
     try { saved = localStorage.getItem("refire-theme"); } catch { }
     function setTheme(t) {
@@ -2409,7 +2332,6 @@ Never let a moment fully resolve.</pre>
       saved = t;
       try { localStorage.setItem("refire-theme", t); } catch { }
       if (!document.startViewTransition || reduce) return setTheme(t);
-      // the new theme opens as a circle from the switch
       const r = themeBtn.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
       const end = Math.hypot(Math.max(x, innerWidth - x), Math.max(y, innerHeight - y));
       document.startViewTransition(() => setTheme(t)).ready.then(() => root.animate(
@@ -2417,7 +2339,6 @@ Never let a moment fully resolve.</pre>
         { duration: 700, easing: "cubic-bezier(.16,1,.3,1)", pseudoElement: "::view-transition-new(root)" }));
     });
 
-    /* ---- the atmosphere: drifts with page progress and sways slowly on its own ------------- */
     const beams = document.querySelectorAll(".atmos .beam:not(.b2)"), beam2 = document.querySelector(".atmos .b2"), glow = document.querySelector(".atmos .glow");
     const beamAt = (p, s) => ({
       tx: -18 + p * 16 + Math.sin(s * 0.07) * 1.8,
@@ -2428,18 +2349,11 @@ Never let a moment fully resolve.</pre>
       if (reduce) return;
       const B = beamAt(p, s), tf = `translate(${B.tx.toFixed(2)}vw, ${B.ty.toFixed(2)}vh) rotate(${B.a.toFixed(2)}deg)`;
       beams.forEach(el => (el.style.transform = tf));
-      // a fainter searchlight crossing the other way, sweeping on a slower clock
       beam2.style.transform = `translate(${(24 + Math.sin(s * 0.05) * 5).toFixed(2)}vw, ${(-30 + p * 18).toFixed(2)}vh) rotate(${(-34 + Math.sin(s * 0.085) * 6).toFixed(2)}deg)`;
       glow.style.transform = `translate(${(38 - p * 22 + Math.sin(s * 0.06) * 6).toFixed(2)}vw, ${(40 - p * 30 + Math.cos(s * 0.045) * 5).toFixed(2)}vh)`;
     }
     const progress = () => { const max = root.scrollHeight - innerHeight; return max > 0 ? Math.min(1, scrollY / max) : 0; };
 
-    /* ---- the 3D reel ------------------------------------------------------------------------
-       One Twitch VOD as ~1500 frame slabs, height = loudness. Scrolling the pipeline section
-       unwinds the reel into a flat timeline (map_v2.txt), lights the beats the director cast
-       (outline.json), then pulls only those together into the short cut (rough.mp4). Dust drifts
-       through the projector beam for the whole page.
-       The loudness curve is synthetic and seeded, for illustration only. */
     let THREE;
     try { THREE = await import("https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.min.js"); }
     catch { THREE = null; }
@@ -2471,7 +2385,6 @@ Never let a moment fully resolve.</pre>
       sun.position.set(3, 6, 8);
       scene.add(sun);
 
-      // seeded PRNG so the reel is the same on every load
       let seed = 11;
       const rand = () => {
         seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
@@ -2495,14 +2408,13 @@ Never let a moment fully resolve.</pre>
       const AT = [0.08, 0.2, 0.33, 0.46, 0.6, 0.74, 0.9];
       AT.forEach((a, b) => {
         const c = Math.round(a * N);
-        for (let i = c - 20; i < c - 9; i++) beat[i] = b;   // the setup segment
-        for (let i = c - 3; i < c + 9; i++) beat[i] = b;    // jump cut, then the payoff segment
+        for (let i = c - 20; i < c - 9; i++) beat[i] = b;
+        for (let i = c - 3; i < c + 9; i++) beat[i] = b;
         spike(c + 1, 0.9 + 0.1 * rand());
       });
-      [0.14, 0.27, 0.53, 0.67, 0.83].forEach(a => spike(Math.round(a * N), 0.85));  // loud, not story
+      [0.14, 0.27, 0.53, 0.67, 0.83].forEach(a => spike(Math.round(a * N), 0.85));
       for (let i = 0; i < N; i++) loud[i] = Math.min(1, Math.max(0.04, loud[i]));
 
-      // state A: an Archimedean spiral, stream start on the outside like tape on a reel
       const reelX = new Float32Array(N), reelY = new Float32Array(N), reelA = new Float32Array(N);
       {
         let th = 0; const r0 = 0.5, b = 0.068;
@@ -2511,7 +2423,6 @@ Never let a moment fully resolve.</pre>
           reelX[i] = Math.cos(th) * r; reelY[i] = Math.sin(th) * r; reelA[i] = th; th += 0.05 / r;
         }
       }
-      // state B/C: a flat timeline. state D: selected slabs packed into the cut.
       const L = 22, lineX = new Float32Array(N), cutX = new Float32Array(N);
       let cutSpan = 0;
       {
@@ -2521,17 +2432,11 @@ Never let a moment fully resolve.</pre>
         sel.forEach(i => (cutX[i] -= x / 2));
         cutSpan = x + 0.1;
       }
-      // the reel's outer diameter, spikes included, so it can be fitted to its slot
       let reelD = 0;
       for (let i = 0; i < N; i++) reelD = Math.max(reelD, Math.hypot(reelX[i], reelY[i]) + 0.2);
       reelD *= 2;
       const beatMid = AT.map(a => Math.round(a * N) + 1);
 
-      // Metal only reads as metal with something to reflect: a studio baked into an environment
-      // map, one per theme. A floor-to-ceiling gradient, a softbox overhead (the lit top edges),
-      // a sky rim on the left, and rings of light around the horizon with dark between them, so
-      // the faces show bright bands that slide up and down them as the camera orbits, the way
-      // chrome catches a studio. The rings sit at the angles the camera corners reflect.
       const pmrem = new THREE.PMREMGenerator(renderer);
       const bakeStudio = (floor, ceil, k) => {
         const studio = new THREE.Scene(), room = new THREE.SphereGeometry(20, 32, 16), yp = room.attributes.position;
@@ -2560,7 +2465,6 @@ Never let a moment fully resolve.</pre>
       scene.add(group);
 
 
-      // dust: brightest inside the projector beam, rising with time and scroll
       const tall0 = innerWidth / innerHeight < 0.9, M = tall0 ? 600 : 1300;
       const mPos = new Float32Array(M * 3), mSeed = new Float32Array(M);
       for (let i = 0; i < M; i++) {
@@ -2619,17 +2523,11 @@ Never let a moment fully resolve.</pre>
         moteMat.uniforms.uAlpha.value = P.moteA;
         moteMat.blending = t === "light" ? THREE.NormalBlending : THREE.AdditiveBlending;
         moteMat.needsUpdate = true;
-        draw(performance.now());   // repaint now so a view transition captures the new colours
+        draw(performance.now());
       };
 
-      // Where the 3D goes: a screen rectangle measured from the layout (beside the copy on wide
-      // screens, above it on tall ones), projected onto z = 0 every frame. Each state is fitted
-      // to that rectangle and kept level, so the reel, the timeline and the cut always sit
-      // square in the space the text leaves, at any window size and under mouse parallax.
       const slot = { l: 0, r: 0, t: 0, b: 0 };
       const heroH1 = document.querySelector(".hero h1"), stepCard = document.querySelector(".step-card");
-      // right edge of the actual glyphs: the headline's lines are block spans, so the element's
-      // own box is full width and would claim the whole screen
       function inkRight(el) {
         const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT), rg = document.createRange();
         let right = 0;
@@ -2643,7 +2541,7 @@ Never let a moment fully resolve.</pre>
         Object.assign(slot, { l: textRight + 56, r: vw - g, t: 92, b: vh - 32 });
       }
       const ray = new THREE.Vector3(), wc = new THREE.Vector3(), wl = new THREE.Vector3(), wr = new THREE.Vector3(), wt = new THREE.Vector3(), wb = new THREE.Vector3();
-      function toWorld(px, py, out) {   // screen pixel -> point on the z = 0 plane
+      function toWorld(px, py, out) {
         ray.set(px / innerWidth * 2 - 1, 1 - py / innerHeight * 2, 0.5).unproject(camera).sub(camera.position).normalize();
         return out.copy(camera.position).addScaledVector(ray, -camera.position.z / ray.z);
       }
@@ -2659,25 +2557,17 @@ Never let a moment fully resolve.</pre>
       }
       resize();
       addEventListener("resize", resize);
-      document.fonts.ready.then(measureSlot);   // the hero headline's width depends on the webfont
+      document.fonts.ready.then(measureSlot);
 
       const pointer = { x: 0, y: 0, sx: 0, sy: 0 };
       if (!reduce) addEventListener("pointermove", e => { pointer.x = e.clientX / innerWidth * 2 - 1; pointer.y = e.clientY / innerHeight * 2 - 1; }, { passive: true });
 
       const clamp = v => Math.min(1, Math.max(0, v));
-      const ease = t => 0.5 - 0.5 * Math.cos(Math.PI * t);   // sine in-out
-      const bump = t => Math.sin(Math.PI * t);                // 0 at rest, 1 mid-transition
-      const glide = t => 0.55 * t + 0.45 * ease(t);           // eased, but never stops (speed >= 0.55)
-      // The camera's path: one Catmull-Rom spline through a corner per step, parameterised by
-      // scroll, so it keeps moving through every key instead of stopping at each. Neighbouring
-      // keys must differ (a corner repeated two keys apart makes the spline stall between them).
-      //   hero   from bottom-right, so the reel's face turns up and to the left
-      //   step 1 top-right, looking down-left along the timeline
-      //   step 2 bottom-left, looking up-right as the beats are cast
-      //   step 3 bottom-right, looking up at the cut
-      //   exit   rising away over the top
+      const ease = t => 0.5 - 0.5 * Math.cos(Math.PI * t);
+      const bump = t => Math.sin(Math.PI * t);
+      const glide = t => 0.55 * t + 0.45 * ease(t);
       const CAM_U = [-1, 0.05, 1.05, 2.05, 2.65];
-      const CAM = [[-0.5, -0.55], [0.36, -0.5], [-0.28, 0.38], [-0.2, -0.45], [0.85, -0.9]];   // [elevation, azimuth]
+      const CAM = [[-0.5, -0.55], [0.36, -0.5], [-0.28, 0.38], [-0.2, -0.45], [0.85, -0.9]];
       function camPath(u, amp, out) {
         const n = CAM_U.length;
         if (u <= CAM_U[0]) u = CAM_U[0];
@@ -2707,32 +2597,24 @@ Never let a moment fully resolve.</pre>
         const dt = Math.min(0.05, Math.max(0, (t - last) / 1000)); last = t;
         if (!reduce) clock += dt;
 
-        // reads first: u = -1 with the hero on screen, 0/1/2 when each story step is centred
         const vh = innerHeight, top = story.getBoundingClientRect().top, p = progress(), sy = scrollY;
         const target = -top / vh;
         u = reduce ? target : lerp(u, target, 1 - Math.pow(0.01, dt));
         atmos(p, clock);
 
-        // The stages are contiguous (each starts where the last ends, no dead scroll between
-        // them) and use glide(), which softens without ever reaching zero speed, so any scroll
-        // inside the story moves something. u = 0.05 / 1.05 / 2.05 is each step fully arrived.
-        const p1 = clamp((u + 1) / 1.05), m1 = glide(p1);      // unwind
-        const p2 = clamp((u - 0.05) / 1), m2 = glide(p2);      // cast beats
-        const p3 = clamp((u - 1.05) / 1), m3 = glide(p3);      // assemble the cut
-        const gone = glide(clamp((u - 2.05) / 0.6));           // the reel leaves; the dust stays
-        // beats are cast and packed one after another, hook to button, each easing once
+        const p1 = clamp((u + 1) / 1.05), m1 = glide(p1);
+        const p2 = clamp((u - 0.05) / 1), m2 = glide(p2);
+        const p3 = clamp((u - 1.05) / 1), m3 = glide(p3);
+        const gone = glide(clamp((u - 2.05) / 0.6));
         const k2 = b => ease(clamp((p2 - 0.5 * b / 6) / 0.5)), k3 = b => ease(clamp((p3 - 0.5 * b / 6) / 0.5));
         if (!reduce) spin += dt * 0.07 * (1 - m1);
 
-        // camera parallax
         pointer.sx = lerp(pointer.sx, pointer.x, 1 - Math.pow(0.02, dt));
         pointer.sy = lerp(pointer.sy, pointer.y, 1 - Math.pow(0.02, dt));
-        // parallax by translation only: a camera with no pitch or yaw keeps verticals vertical
         camera.position.set(pointer.sx * 0.3, 0.3 - pointer.sy * 0.2, 11);
         camera.lookAt(camera.position.x, camera.position.y, 0);
         camera.updateMatrixWorld();
 
-        // dust follows the CSS beam, mapped from screen space onto the z = 0 plane
         const halfH = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 11, halfW = halfH * camera.aspect;
         const B = reduce ? beamAt(0, 0) : beamAt(p, clock), ar = B.a * Math.PI / 180;
         moteMat.uniforms.uBeam.value.set(B.tx / 50 * halfW, -B.ty / 50 * halfH, Math.cos(ar), -Math.sin(ar));
@@ -2740,33 +2622,23 @@ Never let a moment fully resolve.</pre>
         moteMat.uniforms.uTime.value = clock;
         moteMat.uniforms.uScroll.value = reduce ? 0 : sy * 0.0016;
 
-        // tall screens: the 3D is a fixed band the copy scrolls up through between steps, so it
-        // dims while text is passing and returns at each rest pose (u = -1, 0, 1, 2)
         const pass = innerWidth / vh < 0.9 ? 1 - 0.7 * bump(u - Math.floor(u)) : 1;
         group.visible = gone < 1;
         labelBox.style.opacity = ((1 - gone) * pass).toFixed(3);
         if (group.visible) {
-          // fit each state to the slot. The group stays at unit scale: every slab carries its own
-          // reel-space and timeline-space scale, so the unwind never squashes the whole reel at once
           const cx = (slot.l + slot.r) / 2, cy = (slot.t + slot.b) / 2;
           toWorld(cx, cy, wc); toWorld(slot.l, cy, wl); toWorld(slot.r, cy, wr); toWorld(cx, slot.t, wt); toWorld(cx, slot.b, wb);
           const SW = wr.x - wl.x, SH = wt.y - wb.y;
           let sA = Math.min(SW, SH) * 0.94 / reelD, sxT = SW * 0.96 / L, syT = SH * 0.4 / 2.4, sxD = SW * 0.9 / cutSpan;
 
-          // A camera that orbits the scene along camPath. Rotating the group by (elevation,
-          // azimuth) in three.js's default XYZ order applies yaw first, then pitch: the same maths
-          // as orbiting the camera around the slot's centre. Positive elevation looks down;
-          // positive azimuth views from the left.
-          const tall = innerWidth / vh < 0.9, amp = tall ? 0.6 : 1;   // narrower screens: gentler corners
+          const tall = innerWidth / vh < 0.9, amp = tall ? 0.6 : 1;
           camPath(u, amp, cam);
           const b1 = bump(m1), sw = reduce ? 0 : 1;
-          const drift = reduce ? 0 : 1 - Math.max(b1, bump(m2), bump(m3));   // idle sway only at rest
+          const drift = reduce ? 0 : 1 - Math.max(b1, bump(m2), bump(m3));
           const el = cam[0] + 0.03 * Math.sin(clock * 0.17) * drift;
           const az = cam[1] + 0.05 * Math.sin(clock * 0.23) * drift;
           group.position.set(wc.x, wc.y - gone * SH * 0.2, (-0.8 * b1 - 1.6 * gone) * sw);
           group.rotation.set(el, az, 0);
-          // a yawed timeline reaches toward the camera at one end; shrink it by the yaw so that
-          // end stays on screen
           const fitK = 1 - 0.32 * Math.abs(Math.sin(az));
           sxT *= fitK; sxD *= fitK; sA *= 1 - 0.12 * Math.abs(Math.sin(az));
           slabMat.opacity = (1 - gone) * pass;
@@ -2774,28 +2646,24 @@ Never let a moment fully resolve.</pre>
           const cs = Math.cos(spin), sn = Math.sin(spin);
           for (let i = 0; i < N; i++) {
             const lo = loud[i], b = beat[i], sel = b >= 0;
-            // per-slab stagger: the outer end of the reel peels off first, each slab easing once
             const k1 = ease(clamp((p1 - 0.45 * (i / N)) / 0.55));
-            // A: on the reel
             const ax = (reelX[i] * cs - reelY[i] * sn) * sA, ay = (reelX[i] * sn + reelY[i] * cs) * sA;
             const aa = wrap(reelA[i] + spin - Math.PI / 2);
             const ah = (0.05 + lo * 0.3) * sA;
-            // B/C: on the timeline; a cast beat rises and comes forward, the rest settles back
             const c2 = sel ? k2(b) : m2, c3 = sel ? k3(b) : m3;
             let bh = 0.05 + Math.pow(lo, 1.5) * 1.9;
             bh *= sel ? 1 + 0.12 * c2 : 1 - 0.45 * c2;
             const lift = sel ? 0.18 * c2 * (1 - c3) : -0.1 * c2;
-            // D: packed into the cut; everything else sinks away
             const tx = lerp(lineX[i] * sxT, sel ? cutX[i] * sxD : lineX[i] * sxT, sel ? c3 : 0);
             const ty = (lift - (sel ? 0 : 0.6 * c3)) * syT;
             const x = lerp(ax, tx, k1), y = lerp(ay, ty, k1);
             const h = lerp(ah, bh * syT, k1) * (sel ? 1 : 1 - c3);
-            const tw = sel ? lerp(0.0147 * sxT, 0.036 * sxD, c3) : 0.0147 * sxT;   // 0.0147 = L / N: slabs sit edge to edge
+            const tw = sel ? lerp(0.0147 * sxT, 0.036 * sxD, c3) : 0.0147 * sxT;
             const w = lerp(0.024 * sA, tw, k1);
             e3.set(0, 0, lerp(aa, 0, k1));
             q.setFromEuler(e3);
             pos.set(x, y, (sel ? 0.25 * c2 * (1 - c3) : -0.2 * c2) * k1);
-            const gone3 = sel ? 1 : 1 - c3;   // discarded slabs shrink away entirely, not to hairlines
+            const gone3 = sel ? 1 : 1 - c3;
             const d = lerp(0.2 * sA, (sel ? lerp(0.1, 0.16, c3) : 0.1) * 0.8, k1);
             scl.set(Math.max(w * gone3, 1e-4), Math.max(h, 1e-4), Math.max(d * gone3, 1e-4));
             m4.compose(pos, q, scl);
@@ -2809,8 +2677,6 @@ Never let a moment fully resolve.</pre>
           mesh.instanceMatrix.needsUpdate = true;
           mesh.instanceColor.needsUpdate = true;
 
-          // role labels ride each beat once it is cast, on two fixed rows (above and below the
-          // tallest slab) so they line up instead of bobbing with each beat's height
           labels.forEach((el, b) => {
             const i = beatMid[b], up = b % 2 === 0;
             const x = lerp(lineX[i] * sxT, cutX[i] * sxD, k3(b));
