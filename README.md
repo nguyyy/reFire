@@ -136,7 +136,8 @@ the flags above are the ones a cut actually turns on. the rest, grouped by what 
 
 **director and cost**
 - `--claude-model`: model for the narrative pass (default `claude-opus-5`, up from sonnet -- story shape and continuity are the axis opus is better on; `claude-sonnet-5` is cheaper and faster, but weaker at story shape and continuity).
-- `--effort <low|medium|high|xhigh|max>`: reasoning effort for the director and critic calls (default `xhigh`). Lower is faster and spends less subscription quota.
+- `--effort <low|medium|high|xhigh|max>`: reasoning effort for the director call (default `xhigh`). Lower is faster and spends less subscription quota.
+- `--review-effort <low|medium|high|xhigh|max>`: reasoning effort for the critic rounds (default `high`). The critic returns edits to the director's outline (`keep` / `edit` / new beat) instead of rewriting it, so it needs less thinking. Pass `xhigh` to restore the old behavior.
 - `--scout <local|off>`: the chapterize pass that runs before the story pass — free on local ollama by default. `off` is single-shot and only sane on short vods.
 - `--flat`: skip the claude director entirely and fall back to flat brief-relevance selection.
 - `--title`: the stream title, handed to the director as context (and to the caption fix).

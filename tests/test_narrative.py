@@ -1358,3 +1358,118 @@ def test_seam_log_records_what_each_jump_cut_deleted():
     assert seams[0]["dur"] == 4.0 and seams[0]["at"] == 20.0
     assert seams[0]["text"] == "the reply nobody kept"
     assert narrative._seam_log([(10.0, 20.0)], lambda a, b: "x") == []
+
+
+# --- score cache: review rounds only re-score beats the critic changed ---
+
+def _two_beat_outline(second_start=6.0):
+    return SimpleNamespace(central_idea="x", beats=[
+        SimpleNamespace(title="A", intent="i", query="q", start_s=0.0, end_s=2.8),
+        SimpleNamespace(title="B", intent="i", query="q", start_s=second_start, end_s=8.8)])
+
+
+def test_a_recast_with_the_same_outline_makes_no_scorer_calls(monkeypatch):
+    seen = []
+    monkeypatch.setattr("refire.score.score_chunk",
+                        lambda c, brief="", model="": (seen.append(c["text"]),
+                                                       {"llm_score": 7.0, "reason": "r"})[1])
+    words = _words("a b c. d e f. g h i.")
+    cache = {}
+    _s, log, _w = narrative.cast(_two_beat_outline(), [], words, target_s=1000.0,
+                                 model="m", score_cache=cache)
+    assert len(seen) == 2 and [b["score"] for b in log["beats"]] == [7.0, 7.0]
+    _s, log, _w = narrative.cast(_two_beat_outline(), [], words, target_s=1000.0,
+                                 model="m", score_cache=cache)
+    assert len(seen) == 2                                   # all hits
+    assert [b["score"] for b in log["beats"]] == [7.0, 7.0]
+
+
+def test_only_the_retimed_beat_is_rescored(monkeypatch):
+    seen = []
+    monkeypatch.setattr("refire.score.score_chunk",
+                        lambda c, brief="", model="": (seen.append(c["text"]),
+                                                       {"llm_score": 7.0, "reason": "r"})[1])
+    words = _words("a b c. d e f. g h i.")
+    cache = {}
+    narrative.cast(_two_beat_outline(), [], words, target_s=1000.0, model="m",
+                   score_cache=cache)
+    narrative.cast(_two_beat_outline(second_start=3.0), [], words, target_s=1000.0,
+                   model="m", score_cache=cache)
+    assert len(seen) == 3
+
+
+def test_a_failed_score_is_not_cached(monkeypatch):
+    replies = iter([{"llm_score": 0.0, "reason": "scorer_unavailable"},
+                    {"llm_score": 6.0, "reason": "r"}])
+    monkeypatch.setattr("refire.score.score_chunk",
+                        lambda c, brief="", model="": next(replies))
+    words = _words("a b c. d e f. g h i.")
+    ol = SimpleNamespace(central_idea="x", beats=[
+        SimpleNamespace(title="T", intent="i", query="q", start_s=3.0, end_s=5.8)])
+    cache = {}
+    narrative.cast(ol, [], words, target_s=1000.0, model="m", score_cache=cache)
+    _s, log, _w = narrative.cast(ol, [], words, target_s=1000.0, model="m",
+                                 score_cache=cache)
+    assert log["beats"][0]["score"] == 6.0                  # retried, not stuck at 0
+
+
+# --- review patch: the critic edits the cast outline instead of rewriting it ---
+
+def _patch_fixture():
+    from refire import director
+    prev = director.Outline(central_idea="c", story_shape="s", beats=[
+        director.Beat(title="Late", start_s=500.0, end_s=520.0, reaction_end_s=525.0),
+        director.Beat(title="Early", start_s=10.0, end_s=30.0, intent="open"),
+        director.Beat(title="Mid", start_s=200.0, end_s=230.0)])
+    # the critic numbers beats in CUT order (chrono), not outline order
+    log_beats = [{"title": "Early", "src": 1}, {"title": "Mid", "src": 2},
+                 {"title": "Late", "src": 0}]
+    return director, prev, log_beats
+
+
+def test_patch_keep_edit_add_drop_and_reorder():
+    director, prev, log_beats = _patch_fixture()
+    rv = director.Review.model_validate({
+        "approved": False, "notes": "n", "story_shape": "new shape",
+        "beats": [{"keep": 3},                                    # Late, moved first
+                  {"edit": 1, "end_s": 25.0,
+                   "segments": [{"start_s": 10.0, "end_s": 14.0},
+                                {"start_s": 20.0, "end_s": 25.0}]},
+                  {"title": "New", "role": "button", "start_s": 600.0, "end_s": 610.0}]})
+    ol = rv.apply(prev, log_beats)                                # Mid (#2) dropped
+    assert [b.title for b in ol.beats] == ["Late", "Early", "New"]
+    assert ol.beats[0].reaction_end_s == 525.0     # keep = the original Beat, unlogged fields too
+    assert ol.beats[1].end_s == 25.0 and ol.beats[1].start_s == 10.0
+    assert ol.beats[1].intent == "open"            # edit only overrides what it names
+    assert len(ol.beats[1].segments) == 2
+    assert ol.story_shape == "new shape" and ol.central_idea == "c"
+
+
+def test_patch_rejects_a_beat_number_not_in_the_cut():
+    director, prev, log_beats = _patch_fixture()
+    for bad in (0, 4, 1.5, "x"):
+        rv = director.Review(approved=False, notes="n", beats=[{"keep": bad}])
+        with pytest.raises(ValueError):
+            rv.apply(prev, log_beats)
+    with pytest.raises(ValueError):                # a revision with no beats is unusable
+        director.Review(approved=False, notes="n").apply(prev, log_beats)
+
+
+def test_a_full_outline_reply_is_still_accepted():
+    director, prev, log_beats = _patch_fixture()
+    full = director.Outline(central_idea="z", beats=[
+        director.Beat(title="Only", start_s=1.0, end_s=2.0)])
+    rv = director.Review(approved=False, notes="n", outline=full)
+    assert rv.apply(prev, log_beats) is full
+
+
+def test_cast_logs_each_beats_source_index(monkeypatch):
+    """The log is chrono-sorted; `src` is how a patch's beat number finds its Beat."""
+    monkeypatch.setattr("refire.score.score_chunk",
+                        lambda c, brief="", model="": {"llm_score": 7.0, "reason": "r"})
+    words = _words("a b c. d e f. g h i.")
+    ol = SimpleNamespace(central_idea="x", beats=[
+        SimpleNamespace(title="Second", intent="i", query="q", start_s=6.0, end_s=8.8),
+        SimpleNamespace(title="First", intent="i", query="q", start_s=0.0, end_s=2.8)])
+    _s, log, _w = narrative.cast(ol, [], words, target_s=1000.0, model="m")
+    assert [(b["title"], b["src"]) for b in log["beats"]] == [("First", 1), ("Second", 0)]

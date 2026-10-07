@@ -186,6 +186,15 @@ def test_blank_thinking_deltas_drive_a_live_tick(monkeypatch, capsys):
     assert chr(13) not in out
     assert out.count("thinking... 0m00s") == 1
 
+    # live=False (parallel caption batches): no echo at all, just the -> / <- lines
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    got = director._complete_cli("m", "sys", [{"type": "text", "text": "u"}], Ans,
+                                 live=False)
+    assert got.answer == "done"
+    out = capsys.readouterr().out
+    assert chr(13) not in out and "thinking..." not in out and "---" not in out
+    assert "<- stop_reason=end_turn" in out
+
 
 REVIEW_JSON = json.dumps({
     "approved": True, "notes": "reads well",
@@ -248,3 +257,13 @@ def test_a_failed_resume_falls_back_to_a_full_call(monkeypatch):
     assert rv.approved is True
     assert calls == [True, False]                # tried warm, then resent everything
     assert smap in seen["stdin"]                 # the fallback carries the full map
+
+
+def test_review_runs_at_its_own_effort(monkeypatch):
+    """--review-effort: the critic edits a plan, it doesn't need the director's xhigh."""
+    seen = _fake_cli(monkeypatch, [_result(REVIEW_JSON)])
+    director.review("[0s] map", "brief", "title", _LOG, 600.0, effort="high",
+                    session_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--effort") + 1] == "high"
+    assert '{"keep": <n>}' in seen["stdin"]       # asked for a patch, not a full outline

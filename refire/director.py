@@ -121,33 +121,105 @@ class _ChapterOut(_JsonModel):
 
 
 class Review(_JsonModel):
+    """The critic's verdict. A revision comes back as a PATCH on the current outline, not a
+    full replan: `beats` lists the new cut in story order, each item `{"keep": n}`,
+    `{"edit": n, <changed fields>}` or a whole new beat, where n is the beat's number in the
+    realized script the critic read. Re-emitting all ~20 beats cost ~10k output tokens a
+    round (~35KB per reply on the 2026-09-16 runs) for the 2-5 beats that actually changed.
+    `outline` is the old full-replan shape, still accepted if the model sends it.
+    """
     approved: bool   # true = rough cut already works, ship it
     notes: str       # what's wrong (or why it's fine), logged to outline.json
-    outline: Outline # revised plan (full replan: reorder/drop/merge/add/rebound)
+    beats: list[dict] = []
+    central_idea: str | None = None      # top-level fields only when the critic changes them
+    story_shape: str | None = None
+    viewer_promise: str | None = None
+    ending_needed: str | None = None
+    cold_open: list[Segment] | None = None
+    outline: Outline | None = None
+
+    @field_validator("cold_open", mode="before")
+    @classmethod
+    def _as_list(cls, v):
+        return [v] if isinstance(v, dict) else v
+
+    def apply(self, prev: Outline, log_beats: list[dict]) -> Outline:
+        """The revised Outline: this patch resolved against `prev`, the outline that was
+        cast. `log_beats` is that cast's `outline_log["beats"]`, whose order is the numbering
+        the critic saw (cut order, not outline order) and whose `src` points back into
+        `prev.beats` -- the original Beat, so fields the log doesn't carry survive a `keep`.
+        Raises ValueError on a beat number that isn't in the cut or an edit that doesn't
+        validate; the caller keeps the current cut.
+        """
+        if self.outline is not None:
+            return self.outline
+        if not self.beats:
+            raise ValueError("revision lists no beats")
+
+        def src(n) -> Beat:
+            try:
+                k = int(n)
+            except (TypeError, ValueError):
+                raise ValueError(f"beat number {n!r} is not a number") from None
+            if k != n or not 1 <= k <= len(log_beats):
+                raise ValueError(f"no beat #{n} in the cut ({len(log_beats)} beats)")
+            i = log_beats[k - 1].get("src")
+            if i is None or not 0 <= i < len(prev.beats):
+                raise ValueError(f"beat #{k} has no source beat")
+            return prev.beats[i]
+
+        beats = []
+        for item in self.beats:
+            item = {str(k).lower(): v for k, v in item.items()}
+            if "keep" in item:
+                beats.append(src(item["keep"]))
+            elif "edit" in item:
+                base = src(item.pop("edit")).model_dump()
+                beats.append(Beat.model_validate({**base, **item}))
+            else:
+                beats.append(Beat.model_validate(item))
+        changed = {k: getattr(self, k) for k in ("central_idea", "story_shape",
+                                                 "viewer_promise", "ending_needed",
+                                                 "cold_open")
+                   if getattr(self, k) is not None}
+        return prev.model_copy(update={**changed, "beats": beats})
 
 
 # outline/review schema is too deep for claude's strict output_format (400 "Schema is too
 # complex") so we prompt for json and validate it ourselves, same as the ollama director.
 # one shared shape string keeps both in sync
-_OUTLINE_JSON = (
-    '{"central_idea": "<str>", "story_shape": "<str>", "viewer_promise": "<str>", '
-    '"ending_needed": "<str>", '
-    '"cold_open": [{"start_s": <number>, "end_s": <number>}, ...], '
-    '"beats": [{"title": "<str>", "role": '
+_BEAT_JSON = (
+    '{"title": "<str>", "role": '
     '"<hook|setup|escalation|reversal|climax|payoff|button>", "intent": "<str>", '
     '"viewer_question": "<str>", "turn": "<str>", "transition_in": "<str>", '
     '"texture": "<str>", "energy": <1-5>, "setup_start_s": <number|null>, '
     '"payoff_start_s": <number|null>, "reaction_end_s": <number|null>, '
     '"start_s": <number>, "end_s": <number>, '
     '"segments": [{"start_s": <number>, "end_s": <number>}, ...], '
-    '"query": "<str>"}]}'
+    '"query": "<str>"}'
+)
+_OUTLINE_JSON = (
+    '{"central_idea": "<str>", "story_shape": "<str>", "viewer_promise": "<str>", '
+    '"ending_needed": "<str>", '
+    '"cold_open": [{"start_s": <number>, "end_s": <number>}, ...], '
+    '"beats": [' + _BEAT_JSON + ']}'
 )
 _OUTLINE_INSTR = (
     " Reply ONLY with a single JSON object (no markdown, no prose) of this shape: "
     + _OUTLINE_JSON)
+# a patch, not a full outline (see Review). "send segments whole" matters: a partial
+# segments list would silently drop the kept lines it left out
 _REVIEW_INSTR = (
     ' Reply ONLY with a single JSON object (no markdown, no prose) of this shape: '
-    '{"approved": <true|false>, "notes": "<str>", "outline": ' + _OUTLINE_JSON + "}")
+    '{"approved": <true|false>, "notes": "<str>", "beats": [<item>, ...]} -- plus '
+    '"central_idea", "story_shape", "viewer_promise", "ending_needed" or "cold_open" '
+    '(same shapes as the outline) ONLY if you change them. "beats" is the revised cut in '
+    'story order, one item per beat, numbered as in CURRENT ROUGH CUT: {"keep": <n>} '
+    'keeps beat n exactly as it is; {"edit": <n>, <only the fields you change>} keeps '
+    'beat n and overrides just those fields (re-cutting a beat? send its "segments" list '
+    'whole, it replaces the old one); and a full beat object adds a new beat: '
+    + _BEAT_JSON + '. Any current beat you leave out is dropped. When approved is true, '
+    '"beats" may be empty.')
 
 
 # fraction of selected footage left after compress_silence (finished_s / span_s). the director
@@ -182,7 +254,7 @@ def _role_note(shrink: float = 1.0, pace: float = 1.0) -> str:
 
 _SYSTEM = (
     "You are a video editor cutting a Twitch gaming stream into one focused, cohesive "
-    "short. You are given the stream's title, the editor's brief (the subject and vibe "
+    "video. You are given the stream's title, the editor's brief (the subject and vibe "
     "to capture), and a time-stamped map of everything said. Each map line begins with "
     "its start time IN SECONDS, like `[546s]` (that is 546 seconds, i.e. 9m06s, into the "
     "stream). Streams run for hours, so these values get large. Do NOT list interesting "
@@ -299,7 +371,7 @@ _MAP_LEGEND = (
 
 _SYSTEM_STREAM_INTRO = (
     "You are a video editor cutting a Twitch gaming stream into one focused, cohesive "
-    "short. NO editorial brief was given: your job is to find the ONE story this stream "
+    "video. NO editorial brief was given: your job is to find the ONE story this stream "
     "actually tells and cut that. Read the whole time-stamped map -- what was said, where "
     "chat exploded, where the streamer got loud, what was on screen -- and mine the "
     "stream's own best arc: its running joke, its slow-burn disaster, its comeback, "
@@ -547,10 +619,12 @@ _REVIEW_SYSTEM = (
     "genuinely supports in the stretches the cut skips over. Never fix it by "
     "padding with slow footage.\n"
     "If the cut already tells a cohesive story, set approved=true and briefly say why in "
-    "notes. Otherwise set approved=false, name the main problems in notes, and return a "
-    "REVISED outline: reorder, drop, merge, or ADD connective beats, re-tag roles, and "
-    "retighten each beat's in/out (start_s/end_s from the stream map, ending right after "
-    "the payoff + reaction lands). Only include beats the footage supports. The target "
+    "notes. Otherwise set approved=false, name the main problems in notes, and return the "
+    "REVISION as edits to the current cut: reorder, drop, merge, or ADD connective beats, "
+    "re-tag roles, and retighten a beat's in/out (start_s/end_s from the stream map, "
+    "ending right after the payoff + reaction lands). Keep every beat that already works "
+    "as it is and edit only what you are fixing. Only include beats the footage supports. "
+    "The target "
     "runtime (about {n} beats) is a rough guide, not a hard limit -- only add/drop/trim "
     "beats for the STORY reasons above; don't chase the exact number by padding a thin cut "
     "or gutting a beat's setup/payoff to shave seconds."
@@ -941,7 +1015,8 @@ def _think_tick(tag: str, secs: float, beats: int) -> str:
 def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=None,
                   tools: str = "", cwd=None, timeout_s: float = 1200.0,
                   effort: str = DEFAULT_EFFORT,
-                  session_id: str | None = None, resume: bool = False):
+                  session_id: str | None = None, resume: bool = False,
+                  live: bool = True):
     """Same contract as `_complete`, but through Claude Code headless mode (`claude -p`)
     instead of the SDK -- the call bills the user's Claude SUBSCRIPTION, not the pay-as-you-
     go API key (~$1.2/video on Opus otherwise). Raises RuntimeError when the CLI is missing
@@ -967,6 +1042,9 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
     created and cannot be swapped on a resume, so a resumed call prepends `system` to the
     user turn instead. Callers must be ready for a resume to fail (stale session, older
     CLI) and retry as a normal standalone call -- see `review()`.
+
+    `live=False` drops the streamed thinking/answer echo (the -> / <- lines stay), for
+    calls run in parallel, whose ticks would all fight over one console line.
     """
     import os
     import shutil
@@ -1061,6 +1139,8 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
             elif kind == "text_delta" and d.get("text"):
                 chunk = d["text"]
             else:
+                continue
+            if not live:
                 continue
             label = "thinking" if kind == "thinking_delta" else "writing"
             if phase != label:

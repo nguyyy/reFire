@@ -193,3 +193,26 @@ def test_missing_chat_is_empty_not_fatal(tmp_path):
     missing = tmp_path / "nope.json"
     assert chat_terms(missing) == [] and chat_names(missing) == []
     assert chat_lines(missing, 0, 100) == []
+
+
+def test_batches_run_in_parallel_and_one_failure_spares_the_rest(monkeypatch, tmp_path):
+    """Each batch is its own call; a failed batch leaves only its own lines as built."""
+    import threading
+
+    from refire import caption_fix
+
+    monkeypatch.setattr(caption_fix, "BATCH", 2)
+    lines = ["the zhegef", "a", "the zhegef", "b", "the zhegef", "c"]
+    tags, gate = [], threading.Barrier(3, timeout=5)   # all 3 batches in flight at once
+
+    def ask(system, user, model, backend, trace=None, tag=""):
+        tags.append(tag)
+        gate.wait()
+        first = int(user.split("CAPTION LINES:\n")[1].split(":")[0])
+        if first == 2:
+            raise RuntimeError("batch 2 down")
+        return Fixes(fixes=[Fix(i=first, was="the zhegef", text="the zajef")])
+
+    out, _learned = caption_fix.fix_lines(lines, corrections_dir=tmp_path, ask=ask)
+    assert out == ["the zajef", "a", "the zhegef", "b", "the zajef", "c"]
+    assert sorted(tags) == ["captions1", "captions2", "captions3"]   # distinct trace names

@@ -13,6 +13,11 @@ DEFAULT_MODEL = "llama3.1:8b"
 # rating takes seconds, this leaves room for a big model's cold start
 SCORE_TIMEOUT_S = 180.0
 
+# ollama unloads a model after 5 idle minutes and the director/critic calls run longer than
+# that, so every cast paid a ~13s cold load (measured on the qwen3 30b scorer). make() unloads
+# it when the run ends so the next run's whisper gets the card back
+KEEP_ALIVE = "30m"
+
 _SYSTEM = (
     "You rate moments from a Twitch gaming stream for a highlights compilation. "
     "Given a transcript snippet, rate how clip-worthy it is for a highlight reel "
@@ -56,6 +61,7 @@ def score_chunk(chunk: Chunk, brief: str = "", model: str = DEFAULT_MODEL) -> di
         resp = ollama.Client(timeout=SCORE_TIMEOUT_S).chat(
             model=model,
             format="json",
+            keep_alive=KEEP_ALIVE,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -74,3 +80,26 @@ def score_chunk(chunk: Chunk, brief: str = "", model: str = DEFAULT_MODEL) -> di
         return out
     except (json.JSONDecodeError, KeyError, ValueError, TypeError):
         return {"llm_score": 0.0, "reason": "parse_error"}
+
+
+def warm_scorer(model: str = DEFAULT_MODEL) -> None:
+    """Load the scorer model ahead of the first cast (run it in a thread while Claude thinks,
+    the card is idle then). Same default options as `score_chunk` -- a different num_ctx
+    would make ollama reload anyway. Best effort: a cold cast still works, just slower."""
+    try:
+        import ollama
+        ollama.Client(timeout=SCORE_TIMEOUT_S).generate(model=model, keep_alive=KEEP_ALIVE)
+    except Exception:
+        pass
+
+
+def release_scorer(model: str = DEFAULT_MODEL) -> None:
+    """Unload the scorer if it is still resident (see KEEP_ALIVE). Best effort."""
+    try:
+        import ollama
+        client = ollama.Client(timeout=30)
+        # an unload request for a model that isn't loaded can load it first, so check
+        if any(m.model == model for m in client.ps().models):
+            client.generate(model=model, keep_alive=0)
+    except Exception:
+        pass

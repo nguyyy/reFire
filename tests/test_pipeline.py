@@ -34,3 +34,19 @@ def test_chat_signal_offsets_to_window(tmp_path):
     counts = [z for _, z in sig]
     assert counts[0] == max(counts)            # both messages land in the first bucket
     assert counts[1] == counts[2] == counts[3]  # and nothing leaked into the rest
+
+
+def test_stopwatch_logs_each_stage_and_saves_ascii_timings(tmp_path, capsys):
+    from refire.pipeline import _Stopwatch
+
+    clock = _Stopwatch()
+    for name in ("download", "cast 1", "review 1", "cast 2"):
+        clock.lap(name)
+    clock.save(tmp_path / "timings.json")
+
+    data = json.loads((tmp_path / "timings.json").read_text(encoding="utf-8"))
+    assert [s["stage"] for s in data["stages"]] == ["download", "cast 1", "review 1", "cast 2"]
+    assert data["total_s"] >= 0
+    out = capsys.readouterr().out
+    assert "[time] total" in out
+    out.encode("cp1252")   # the console is cp1252, a stray glyph would kill the run

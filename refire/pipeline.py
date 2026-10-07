@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import random
+import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -10,13 +12,44 @@ from .audio import extract_audio
 from .chat import chat_signal
 from .chunk import make_chunks
 from .glossary import game_glossary
-from .score import DEFAULT_MODEL, score_chunk
+from .score import DEFAULT_MODEL, release_scorer, score_chunk, warm_scorer
 from .transcribe import (DEFAULT_BATCH_SIZE, DEFAULT_WHISPER_MODEL, release_whisper,
                          speech_regions, transcribe)
 
 
 def _noop(*_a, **_k):
     pass
+
+
+class _Stopwatch:
+    """Wall time per stage of one `make` run, printed at the end and saved as timings.json.
+
+    `lap(name)` closes the stage that has been running since the last lap, so make() just
+    marks stage ends instead of wrapping every block. Repeat stages carry their round in
+    the name ("cast 2", "review 1").
+    """
+
+    def __init__(self):
+        self._t = time.perf_counter()
+        self.laps: list[tuple[str, float]] = []
+
+    def lap(self, name: str) -> None:
+        now = time.perf_counter()
+        self.laps.append((name, now - self._t))
+        self._t = now
+
+    def lines(self) -> list[str]:
+        # ascii only, the console is cp1252
+        def mmss(s: float) -> str:
+            return f"{int(s) // 60}m{int(s) % 60:02d}s"
+        out = [f"[time] {name:<12} {mmss(s)}" for name, s in self.laps]
+        return out + [f"[time] {'total':<12} {mmss(sum(s for _, s in self.laps))}"]
+
+    def save(self, path) -> None:
+        print("\n".join(self.lines()))
+        Path(path).write_text(json.dumps(
+            {"stages": [{"stage": n, "s": round(s, 1)} for n, s in self.laps],
+             "total_s": round(sum(s for _, s in self.laps), 1)}, indent=2), encoding="utf-8")
 
 
 # docker-style adjective-noun tag so repeat runs on the same vod get their own folder
@@ -145,6 +178,7 @@ def make(
     claude_model: str = "claude-opus-5",
     effort: str = "xhigh",    # low|medium|high|xhigh|max, matches director.DEFAULT_EFFORT
                               # (literal since director is imported lazily)
+    review_effort: str = "high",   # critic rounds only. it edits a plan instead of writing one
     director_backend: str = "cli",   # "cli" = claude -p on the subscription, "api" = sdk key
     flat: bool = False,
     local_director: bool = False,
@@ -207,6 +241,7 @@ def make(
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"[run] {run_name}  (cache: {run_dir}, artifacts: {out_dir})")
     model = _resolve_ollama_model(model)       # don't 404 deep into the run
+    clock = _Stopwatch()
     report(0.0, "downloading VOD")
     if tag:
         # everything downstream is zero-based off this cropped file, add start back for stream time
@@ -216,6 +251,7 @@ def make(
     video, chat = ensure_vod(
         vod_id, cache_dir, start=start, end=end,
         progress=lambda f, m: report(0.10 * f, f"downloading VOD -- {m}"))
+    clock.lap("download")
     # transcription is the slow part, maps to 0.10..0.55
     report(0.10, "transcribing")
     words, chunks, _chat_z = _detect_core(   # chat_z rides on chunks for the flat fallback
@@ -223,6 +259,7 @@ def make(
         transcriber=transcriber, chat_offset=start or 0.0,
         whisper_model=whisper_model, batch_size=batch_size, compute_type=compute_type,
         tx_progress=lambda f: report(0.10 + 0.45 * f, "transcribing"))
+    clock.lap("transcribe")
     if not words:
         raise SystemExit("Empty transcript -- nothing to edit.")
     print(f"[transcribe] {len(words)} words, ~{words[-1]['end'] / 60:.0f} min of speech, "
@@ -240,6 +277,7 @@ def make(
     # vod, cast and both renderers share it
     voiced = (speech_regions(run_dir / "audio.wav", cache_path=run_dir / "speech.json")
               if deadspace else None)
+    clock.lap("perception")
 
     # embeddings aren't computed here, only the flat fallback and narrative's invalid-bounds
     # branch use them. both embed on demand (cached in chunks.json) so a normal run skips a
@@ -277,6 +315,7 @@ def make(
                 for i, c in enumerate(chapters, 1):
                     (map_dir / f"chapter_{i:02d}.txt").write_text(
                         perception.excerpt(smap, c.start_s, c.end_s), encoding="utf-8")
+                clock.lap("scout")
             if map_tok <= FULL_MAP_TOK_LIMIT:
                 director_input = (perception.chapter_guide(chapters) + "\n\n" + smap
                                   if chapters else smap)
@@ -295,6 +334,10 @@ def make(
             # one cli session per run, director opens it and review rounds resume it so the ~240KB map
             # isn't resent every round
             session_id = str(uuid.uuid4())
+            if not local_director:
+                # the card is idle while claude thinks, load the cast scorer now instead of
+                # paying its cold load after the director returns
+                threading.Thread(target=warm_scorer, args=(model,), daemon=True).start()
             ol = (director.outline_local(director_input, brief, title, duration_s,
                                          model=model, style=style, pace=pace,
                                          stack=stack, keep_build=keep_build)
@@ -305,11 +348,13 @@ def make(
                                         style=style, pace=pace, stack=stack,
                                         keep_build=keep_build, effort=effort,
                                         session_id=session_id))
+            clock.lap("director")
             # review loop: cast, let a claude critic read the actual cut and approve or return a revised
             # outline, recast, repeat. this is what turns a reel into a story. local_director stays
             # single pass since the critic costs money
             report(0.66, "casting beats")
             review_log: list[dict] = []
+            score_cache: dict = {}   # beats the critic leaves alone aren't re-scored
             rounds = 0 if local_director else max(0, review_rounds)
             for rnd in range(rounds + 1):
                 sections, outline_log, warning = narrative.cast(
@@ -317,7 +362,9 @@ def make(
                     progress=lambda f, m: report(0.66 + 0.24 * f, m),
                     # so the durations the critic and trimmer see are what actually renders
                     deadspace=deadspace, silence_pad=silence_pad, voiced=voiced,
-                    order=order, snap=snap, stack=stack, truncate=truncate)
+                    order=order, snap=snap, stack=stack, truncate=truncate,
+                    score_cache=score_cache)
+                clock.lap(f"cast {rnd + 1}")
                 if outline_log.get("dropped"):
                     print("[cast] dropped for budget: "
                           + ", ".join(d["title"] for d in outline_log["dropped"]))
@@ -334,17 +381,24 @@ def make(
                                          backend=director_backend, run_dir=out_dir,
                                          shrink=shrink, style=style, pace=pace,
                                          stack=stack, keep_build=keep_build,
-                                         effort=effort, session_id=session_id)
+                                         effort=review_effort, session_id=session_id)
                 except Exception as re:   # a failed review must not throw away a good cast
                     print(f"[review] round {rnd + 1} unavailable ({re}); keeping current cut")
+                    clock.lap(f"review {rnd + 1}")
                     break
+                clock.lap(f"review {rnd + 1}")
                 note = (rv.notes or "").splitlines()[0][:140] if rv.notes else ""
                 review_log.append({"round": rnd + 1, "approved": rv.approved, "notes": rv.notes})
                 if rv.approved:
                     print(f"[review] round {rnd + 1}: approved -- {note}")
                     break
                 print(f"[review] round {rnd + 1}: revising -- {note}")
-                ol = rv.outline
+                try:
+                    ol = rv.apply(ol, outline_log["beats"])
+                except ValueError as pe:   # bad beat number / edit, same as a failed review
+                    print(f"[review] round {rnd + 1} revision unusable ({pe}); "
+                          f"keeping current cut")
+                    break
             if sections:
                 outline_log["rounds"] = len(review_log)
                 outline_log["review"] = review_log
@@ -393,6 +447,7 @@ def make(
         if not picked:
             raise SystemExit("No clips cleared selection for this brief.")
         sections = [{"title": "", "clips": picked}]
+        clock.lap("flat select")
 
     report(0.90, "selecting clips")
     flat_clips = [clip for sec in sections for clip in sec["clips"]]
@@ -401,6 +456,7 @@ def make(
     overlays = (pick_overlays(words, flat_clips, assets_dir, model=model, sfx=sfx)
                 if emotes else [[] for _ in flat_clips])
     music = pick_bgm(assets_dir, override=bgm)
+    clock.lap("overlays")
 
     report(0.95, "building manifest" + (" (motion scan)" if motion_zoom else ""))
     z_enter = min(0.95, ENTER / max(zoom_sens, 1e-3))
@@ -411,6 +467,7 @@ def make(
                         motion_zoom=motion_zoom, deadspace=deadspace,
                         silence_pad=silence_pad, cards=cards, proxy=proxy,
                         captions=captions, voiced=voiced)
+    clock.lap("manifest")
     if caption_fix:
         # the transcriber never knew the game or the streamer's friends. first point captions exist
         # as lines, before premiere opens. timestamps/line count unchanged
@@ -419,6 +476,7 @@ def make(
         fix_manifest(mp, game=game, title=title, terms=terms, chat_json=chat,
                      model=claude_model, backend=director_backend,
                      corrections_dir=run_dir.parent, trace=out_dir / "trace")
+        clock.lap("captions")
     if render:
         # rough cut without AE: ffmpeg trim+reframe+subs+concat+music
         report(0.97, "rendering rough cut (ffmpeg)")
@@ -427,7 +485,10 @@ def make(
                              music=music, encoder=encoder, silence_pad=silence_pad,
                              motion_zoom=motion_zoom, deadspace=deadspace,
                              loudnorm=loudnorm, voiced=voiced)
+        clock.lap("render")
         print("Rough cut:", rough)
+    release_scorer(model)   # kept resident through the run (score.KEEP_ALIVE), give the card back
+    clock.save(out_dir / "timings.json")
     report(1.0, "done")
     if warning:
         print("WARNING:", warning)

@@ -149,8 +149,12 @@ def main(argv: list[str] | None = None) -> None:
                          "(claude-sonnet-5 = cheaper/faster, weaker on story shape)")
     mk.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"],
                     default="xhigh",
-                    help="reasoning effort for the director and critic calls "
+                    help="reasoning effort for the director call "
                          "(default xhigh; lower = faster and less subscription quota)")
+    mk.add_argument("--review-effort", choices=["low", "medium", "high", "xhigh", "max"],
+                    default="high",
+                    help="reasoning effort for the critic rounds (default high; they "
+                         "edit the director's plan instead of writing one)")
     mk.add_argument("--director-backend", choices=["cli", "api"], default="cli",
                     help="cli = Claude Code headless on your subscription (~$0, default; "
                          "auto-falls back to api); api = ANTHROPIC_API_KEY pay-as-you-go")
@@ -368,7 +372,7 @@ def main(argv: list[str] | None = None) -> None:
                        end=parse_duration(args.end) if args.end else None,
                        assets_dir=args.assets_dir, bgm=args.bgm,
                        title=args.title, claude_model=args.claude_model,
-                       effort=args.effort,
+                       effort=args.effort, review_effort=args.review_effort,
                        director_backend=args.director_backend,
                        flat=args.flat, local_director=args.local_director,
                        review_rounds=args.review_rounds, scout=args.scout,

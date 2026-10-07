@@ -8,6 +8,8 @@ pipeline -- no new model work here.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 from .select import SILENCE_PAD, compress_silence   # pure, imports nothing back
 
 K_RETRIEVE = 6   # candidates per beat by embedding similarity (fallback path)
@@ -272,13 +274,45 @@ def _valid_bounds(s0, e0, stream_end: float) -> bool:
     return stream_end == 0.0 or s0 < stream_end
 
 
+SCORE_WORKERS = 4   # ollama queues past OLLAMA_NUM_PARALLEL, so more is never slower than 1
+
+
+def _score_spans(jobs: list[tuple[dict, dict, str]], model: str, score_chunk,
+                 cache: dict, report) -> None:
+    """Score the director-bounded beats in place: cache hits are free, misses run in parallel.
+
+    Keyed on exactly what the scorer reads (span, text, intent, model), so a beat the critic
+    didn't change between rounds costs nothing. Failed scores (0, "scorer_unavailable" /
+    "parse_error") aren't cached, so one bad round doesn't stick for the rest of the run.
+    """
+    def key(span, intent):
+        return (round(span["start"], 2), round(span["end"], 2), span["text"], intent, model)
+
+    todo = {}
+    for _row, span, intent in jobs:
+        todo.setdefault(key(span, intent), (span, intent))
+    todo = {k: v for k, v in todo.items() if k not in cache}
+    got = {}
+    if todo:
+        report(1.0, f"scoring {len(todo)} beat(s) locally")
+        with ThreadPoolExecutor(max_workers=min(SCORE_WORKERS, len(todo))) as ex:
+            got = dict(zip(todo, ex.map(
+                lambda si: score_chunk(si[0], brief=si[1], model=model), todo.values())))
+        cache.update({k: r for k, r in got.items()
+                      if r.get("reason") not in ("scorer_unavailable", "parse_error")})
+    for row, span, intent in jobs:
+        k = key(span, intent)
+        res = got.get(k) or cache[k]
+        row["score"], row["reason"] = res["llm_score"], res.get("reason", "")
+
+
 def cast(outline, chunks, words: list[dict], target_s: float,
          model: str, tol: float = 0.35, progress=None,
          deadspace: bool = True, silence_pad: float = SILENCE_PAD,
          voiced=None,   # transcribe.speech_regions, renderer must get the same list
          # style machinery (see styles.py), all defaults are identity so an unstyled cast is unchanged
          order: str = "chrono", snap: str = "sentence", stack: int = 0,
-         truncate: float = 0.3):
+         truncate: float = 0.3, score_cache: dict | None = None):
     """Outline -> (sections, outline_log, warning).
 
     Primary path: the director chose explicit in/out timestamps per beat, so we just snap
@@ -293,6 +327,9 @@ def cast(outline, chunks, words: list[dict], target_s: float,
     `chunks` may be a list, or a zero-arg callable returning one -- only the fallback
     branch below needs chunk embeddings, and computing them costs a full local embedding
     pass over the VOD, so the caller can defer that until a beat actually needs it.
+
+    `score_cache` is shared across one run's review rounds so a beat the critic left alone
+    is never re-scored (see `_score_spans`).
     """
     from .retrieve import embed, retrieve_with_vec
     from .score import score_chunk
@@ -313,6 +350,7 @@ def cast(outline, chunks, words: list[dict], target_s: float,
     report = progress or (lambda *_a, **_k: None)
     used: set[float] = set()           # chunk starts used by the fallback path
     picked: list[dict] = []
+    to_score: list[tuple[dict, dict, str]] = []   # (picked row, span, intent), scored after the loop
     n_beats = len(outline.beats)
     for i, beat in enumerate(outline.beats):
         report(i / n_beats, f"casting beat {i + 1}/{n_beats}: {beat.title}")
@@ -364,9 +402,7 @@ def cast(outline, chunks, words: list[dict], target_s: float,
             parts = [span_text(x, y) for x, y in spans]
             text = " ".join(t for t in parts if t)
             seams = _seam_log(spans, span_text)
-            res = score_chunk({"start": a, "end": b, "text": text},
-                              brief=beat.intent, model=model)
-            sc, reason = res["llm_score"], res.get("reason", "")
+            sc, reason = 0.0, ""   # _score_spans fills these in below
         else:
             # fallback: no usable bounds, retrieve footage by the beat's query
             pool = [c for c in get_chunks() if c["start"] not in used]
@@ -388,6 +424,7 @@ def cast(outline, chunks, words: list[dict], target_s: float,
             parts, seams = [text], []  # one span, nothing cut from the middle
             s0 = e0 = None             # marks this beat as fallback in the log
         picked.append({"title": beat.title, "intent": beat.intent,
+                       "src": i,   # index into outline.beats, how a review patch finds this beat
                        "query": getattr(beat, "query", ""),
                        "role": getattr(beat, "role", ""),
                        "viewer_question": getattr(beat, "viewer_question", ""),
@@ -408,6 +445,11 @@ def cast(outline, chunks, words: list[dict], target_s: float,
                        "text": text,    # kept transcript -> editor review
                        # plus what got cut between spans, text alone hides a severed exchange
                        "parts": parts, "seams": seams})
+        if s0 is not None:
+            to_score.append((picked[-1], {"start": a, "end": b, "text": text}, beat.intent))
+
+    _score_spans(to_score, model, score_chunk,
+                 {} if score_cache is None else score_cache, report)
 
     # only shed beats past the tolerance ceiling, most expendable first (see _trim_to_budget).
     # warn, don't pad, if we come in under
@@ -450,7 +492,7 @@ def cast(outline, chunks, words: list[dict], target_s: float,
         "ending_needed": getattr(outline, "ending_needed", ""),
         "cold_open": cold,
         "beats": [
-            {"title": p["title"], "role": p["role"], "intent": p["intent"],
+            {"title": p["title"], "src": p["src"], "role": p["role"], "intent": p["intent"],
              "viewer_question": p["viewer_question"], "turn": p["turn"],
              "transition_in": p["transition_in"], "texture": p["texture"],
              "energy": p["energy"], "query": p["query"],

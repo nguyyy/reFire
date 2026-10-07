@@ -283,12 +283,20 @@ casting, `pipeline.make` loops up to `review_rounds` (default 2; `0` = single pa
    ENDING (same scrutiny as the hook — must breathe), PACING (energy variety). This is a
    text-only critic — it judges the realized transcript, not rendered frames (the old
    480p-proxy visual critic was removed with the rest of the vision layer).
-   Returns `Review{approved: bool, notes: str, outline: Outline}` — either an
-   approval or a **full re-plan** (reorder/drop/merge/add connective beats/re-tag
-   roles/retighten bounds).
-3. If approved, or rounds are exhausted, or the review call itself fails (never
-   discard a working cast over a review hiccup), the loop stops. Otherwise `cast()`
-   re-runs on the revised outline and the loop repeats.
+   Returns `Review{approved, notes, beats}`. That is either an approval or a **patch** on
+   the current outline: `beats` is the new cut in story order, each item `{"keep": n}`,
+   `{"edit": n, <changed fields>}` or a whole new beat (n = the beat's number in the
+   realized script; anything left out is dropped). Top-level fields come back only if
+   they changed. `Review.apply` resolves n through `outline_log["beats"][n-1]["src"]`
+   (the realized script is in cut order, not outline order) and rebuilds the `Outline`.
+   The patch exists for speed: re-emitting the full outline was ~10k output tokens per
+   round. The critic runs at `--review-effort` (default `high`), not the director's
+   `--effort`. The old `outline: Outline` full-replan reply is still accepted.
+3. If approved, or rounds are exhausted, or the review call itself fails, or its patch
+   doesn't resolve (never discard a working cast over a review hiccup), the loop stops.
+   Otherwise `cast()` re-runs on the revised outline and the loop repeats. One
+   `score_cache` is shared across the rounds, so the local scorer only re-scores beats
+   the patch changed.
 4. The map is paid for once per run. **CLI backend:** `pipeline.make` mints one session
    id; the director opens it (`--session-id`) and each review round `--resume`s it,
    sending only the budget note + realized cut (a failed resume falls back to a full

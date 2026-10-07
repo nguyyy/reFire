@@ -23,6 +23,7 @@ from __future__ import annotations
 import difflib
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .director import CLAUDE_MODEL, _complete, _complete_cli, _JsonModel
@@ -238,19 +239,22 @@ def _context(game: str, title: str, glossary: list[str], chat_terms_: list[str],
     return "\n\n".join(out)
 
 
-def _ask(system: str, user: str, model: str, backend: str, trace=None) -> Fixes:
+def _ask(system: str, user: str, model: str, backend: str, trace=None,
+         tag: str = "captions") -> Fixes:
     """One completion. CLI (subscription) first, API key as the fallback -- the same
-    arrangement `director.outline` uses."""
+    arrangement `director.outline` uses. Batches run in parallel, so no live echo, and a
+    per-batch `tag` because trace files are named tag + second and same-second calls collided."""
     content = [{"type": "text", "text": user}]
     if backend == "cli":
         try:
-            return _complete_cli(model, system, content, Fixes, tag="captions", trace=trace)
+            return _complete_cli(model, system, content, Fixes, tag=tag, trace=trace,
+                                 live=False)
         except (RuntimeError, OSError) as e:
-            print(f"[captions] claude CLI unavailable ({e}); using API key")
+            print(f"[{tag}] claude CLI unavailable ({e}); using API key")
     import anthropic          # optional heavy dep, no key -> raises and caller degrades
 
     return _complete(anthropic.Anthropic(), model, system, content, Fixes,
-                     tag="captions", trace=trace)
+                     tag=tag, trace=trace)
 
 
 # -------------------------------------------------------------------------------- main
@@ -282,21 +286,30 @@ def fix_lines(lines: list[str], llm: bool = True, game: str = "", title: str = "
     if not llm or not out:
         return out, learned
 
-    # 2. one llm pass over the rest
+    # 2. one llm pass over the rest, every batch at once (each is its own claude -p process)
     ctx = _context(game, title, parse_terms(terms),
                    _chat_terms(chat_json), _chat_names(chat_json), corrections)
-    for lo in range(0, len(out), BATCH):
-        chunk = out[lo:lo + BATCH]
+    los = list(range(0, len(out), BATCH))
+
+    def one(n: int, lo: int):
         user = (ctx + "\n\nCAPTION LINES:\n"
-                + "\n".join(f"{lo + i}: {t}" for i, t in enumerate(chunk)))
+                + "\n".join(f"{lo + i}: {t}" for i, t in enumerate(out[lo:lo + BATCH])))
         try:
-            reply = ask(_SYSTEM, user, model, backend, trace)
+            return ask(_SYSTEM, user, model, backend, trace, tag=f"captions{n + 1}")
         except Exception as e:
-            # same as the director: a failed pass leaves captions as built, never fails the run
-            print(f"[captions] fix pass failed ({type(e).__name__}: {e}); captions unchanged")
-            break
+            # same as the director: a failed batch leaves its captions as built, never fails the run
+            print(f"[captions] batch {n + 1}/{len(los)} failed ({type(e).__name__}: {e}); "
+                  f"those captions unchanged")
+            return None
+
+    with ThreadPoolExecutor(max_workers=len(los)) as ex:
+        replies = list(ex.map(one, range(len(los)), los))
+    # applied in batch order once all of them are back, same result as a sequential pass
+    for lo, reply in zip(los, replies):
+        if reply is None:
+            continue
         for fix in reply.fixes:
-            if not lo <= fix.i < lo + len(chunk):
+            if not lo <= fix.i < lo + min(BATCH, len(out) - lo):
                 continue
             ok = vet(out[fix.i], fix)
             if ok:
