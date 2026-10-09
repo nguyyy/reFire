@@ -1,8 +1,0 @@
-C:\dev\reFire\reFire\README.md
-C:\dev\reFire\reFire\docs\ai-editor-workflow-memory.md
-C:\dev\reFire\reFire\docs\director-pipeline.md
-C:\dev\reFire\reFire\genshin.txt
-C:\dev\reFire\reFire\longFormEditor.md
-C:\dev\reFire\reFire\refire\ae\index.html
-C:\dev\reFire\reFire\refire\ppro\index.html
-C:\dev\reFire\reFire\ryukStyl.md

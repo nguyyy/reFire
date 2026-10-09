@@ -1,21 +1,36 @@
+# python
 __pycache__/
 *.pyc
 *.egg-info/
+.venv/
 .pytest_cache/
 .ruff_cache/
+.env
+
+# pipeline output and local footage
 run/
+vods/
 assets/**/_cache/
+
+# media (the emotes and sfx in assets/ are the exception)
 *.wav
 *.mp4
-*.exe
+*.m4a
 *.png
-vods/
+*.jpg
+!assets/**/*.jpg
+*.csv
+*.exe
+
+# license files generated at build time
 COPYRIGHT.txt
 THIRD-PARTY-LICENSES.txt
-.claude
 
-.env
-*.jpg
-.venv/
-*.m4a
-*.csv
+# local tooling and notes
+.claude/
+.agents/
+skills-lock.json
+graphify-out/
+guiRedesign.md
+longFormEditor.md
+docs/ai-editor-workflow-memory.md

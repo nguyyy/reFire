@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<ExtensionList>
-  <Extension Id="com.refire.panel.main">
-    <HostList>
-      <!-- with the panel open in AE, hit http://localhost:8088 in Chrome for the console -->
-      <Host Name="AEFT" Port="8088"/>
-    </HostList>
-  </Extension>
-</ExtensionList>

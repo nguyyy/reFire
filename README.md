@@ -385,6 +385,3 @@ uv run pytest        # 311 tests, ~2s, no network and no gpu
 - [director pipeline](docs/director-pipeline.md) — how `make` turns a raw multi-hour vod
   into a titled, ordered set of clips: the scout pass, the story pass, casting, and the
   pacing audit. start here.
-- [ai editor workflow memory](docs/ai-editor-workflow-memory.md) — the implementation
-  brief the narrative editor was built against. load it before changing `director.py`,
-  `narrative.py`, `select.py`, or the transcription path.

@@ -27,5 +27,5 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-package-dir = {"refire" = "reFire"}
+package-dir = {"refire" = "refire"}
 packages = ["refire"]
