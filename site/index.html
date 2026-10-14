@@ -238,23 +238,6 @@
       color: var(--mute)
     }
 
-    .spec {
-      display: grid;
-      justify-items: start;
-      gap: 16px;
-      margin-bottom: 26px
-    }
-
-    .spec .label {
-      font-size: 12px;
-      line-height: var(--lh);
-      color: var(--strong)
-    }
-
-    .spec .tag {
-      color: var(--sky-text)
-    }
-
     .num {
       font-variant-numeric: tabular-nums
     }
@@ -640,10 +623,6 @@
     .story {
       position: relative;
       padding-top: 24px
-    }
-
-    .story .sec-head {
-      margin-bottom: 0
     }
 
     .step {
@@ -1195,14 +1174,6 @@
       max-width: 40ch;
       color: var(--mute);
       font-size: 19px
-    }
-
-    .cell .tag {
-      margin-bottom: 18px
-    }
-
-    .cell-sky .tag {
-      color: var(--sky-ink)
     }
 
     .c4 {
@@ -1838,14 +1809,8 @@
     </section>
 
     <section class="story" id="pipeline" aria-label="How a cut is made">
-      <div class="edge">
-        <div class="sec-head" data-reveal><span class="label">How a cut is made</span><span class="label idx">/01</span>
-        </div>
-      </div>
       <article class="step edge">
         <div class="step-card">
-          <div class="spec"><span class="label">Word-timed transcript<br>faster-whisper large-v3-turbo</span><span
-              class="tag">[map_v2.txt]</span></div>
           <h2 class="display">Hear all of it.</h2>
           <p>faster-whisper transcribes the whole stream on your GPU. Every sentence gets a timestamp in raw seconds and
             a mark where the room got loud.</p>
@@ -1856,8 +1821,6 @@
       </article>
       <article class="step edge">
         <div class="step-card">
-          <div class="spec"><span class="label">Story outline<br>one Claude session, whole stream</span><span
-              class="tag">[outline.json]</span></div>
           <h2 class="display">Plan it like an editor.</h2>
           <p>Claude reads the entire map in one session, decides what the video is about, then casts moments into beats
             that each have a job. Loud is a hint, not the plan.</p>
@@ -1865,8 +1828,6 @@
       </article>
       <article class="step edge">
         <div class="step-card">
-          <div class="spec"><span class="label">Rough cut, then a critic<br>up to two review rounds</span><span
-              class="tag">[rough.mp4]</span></div>
           <h2 class="display">Cut clean. Reread it.</h2>
           <p>Beats snap to sentence boundaries and dead air comes out. Then a critic reads the cut as it actually plays
             and sends back a revised outline, up to two rounds.</p>
@@ -1875,7 +1836,6 @@
     </section>
 
     <section class="sec wrap" id="proof" aria-labelledby="proof-h">
-      <div class="sec-head" data-reveal><span class="label">In the wild</span><span class="label idx">/02</span></div>
       <h2 class="display" id="proof-h" data-reveal>14 views a day.<br><span class="sky">Then 1,855.</span></h2>
       <p class="proof-lede" data-reveal>Shorts until August 2026, then long-form story cuts made with reFire. Below:
         YouTube Studio numbers, unedited.</p>
@@ -1940,7 +1900,6 @@
     </section>
 
     <section class="sec wrap" aria-labelledby="split-h">
-      <div class="sec-head" data-reveal><span class="label">Architecture</span><span class="label idx">/03</span></div>
       <h2 class="display" id="split-h" data-reveal>Judgment from the model.<br><span class="sky">Cuts from code.</span>
       </h2>
       <div class="split">
@@ -1970,7 +1929,6 @@
     </section>
 
     <section class="sec wrap" id="features" aria-labelledby="feat-h">
-      <div class="sec-head" data-reveal><span class="label">Features</span><span class="label idx">/04</span></div>
       <h2 class="display" id="feat-h" data-reveal style="margin-bottom:clamp(48px,6vw,80px)">Every rule came<br>from a
         bad cut.</h2>
       <div class="bento">
@@ -1980,7 +1938,6 @@
             <div class="line" id="kara-line"></div>
           </div>
           <div>
-            <span class="tag">[emphasis.py]</span>
             <h3 class="display">Captions that shout back</h3>
             <p>Word-by-word karaoke subtitles, lowercase by default and uppercase when the audio spikes.</p>
           </div>
@@ -1992,7 +1949,6 @@
             <div class="fix"><s>arlekino</s><em>Arlecchino</em></div>
           </div>
           <div>
-            <span class="tag">[caption_fix.py]</span>
             <h3 class="display">Names, spelled right</h3>
             <p>One pass rereads the captions against the game glossary and the VOD's own chat. Accepted fixes are
               learned and reapplied free next time.</p>
@@ -2009,7 +1965,6 @@
 Cut on the peak, not after it.
 Never let a moment fully resolve.</pre>
           <div>
-            <span class="tag">[style.py]</span>
             <h3 class="display">Style as a document</h3>
             <p>Prose tells the director how to cut. Frontmatter sets the numbers prose can't reach. Any flag on the
               command line still wins.</p>
@@ -2018,7 +1973,6 @@ Never let a moment fully resolve.</pre>
         <article class="cell c3 cell-sky" data-reveal style="--i:1">
           <div class="big">239s &rarr; 24s</div>
           <div>
-            <span class="tag">[silero vad]</span>
             <h3 class="display">Silence that wasn't</h3>
             <p>Speech the dead-air cutter deleted across seven real cuts, before silence was checked against a Silero
               speech pass instead of the transcript alone.</p>
@@ -2027,7 +1981,6 @@ Never let a moment fully resolve.</pre>
         <article class="cell c2 surface spot" data-reveal>
           <code class="mono sky" style="font-size:17px">--stack 8</code>
           <div>
-            <span class="tag">[pacing.py]</span>
             <h3 class="display">Cold opens that pay off</h3>
             <p>A montage of unexplained moments before beat one, best last. Each is footage a later beat actually
               delivers.</p>
@@ -2040,7 +1993,6 @@ Never let a moment fully resolve.</pre>
             <div><b>transient</b><span>Lands on the audio peak and leaves 0.3s before the joke resolves.</span></div>
           </div>
           <div>
-            <span class="tag">[--snap]</span>
             <h3 class="display">Cuts land where you choose</h3>
             <p>The snap mode is the real floor on shot length. The last cut of the video always keeps its sentence, so
               the ending never stops dead.</p>
@@ -2050,7 +2002,6 @@ Never let a moment fully resolve.</pre>
     </section>
 
     <section class="sec wrap" aria-labelledby="cmd-h">
-      <div class="sec-head" data-reveal><span class="label">Usage</span><span class="label idx">/05</span></div>
       <div class="cmd-grid">
         <div data-reveal>
           <h2 class="display" id="cmd-h">One command.</h2>
@@ -2075,7 +2026,6 @@ Never let a moment fully resolve.</pre>
     </section>
 
     <section class="sec wrap" id="panels" aria-labelledby="panels-h">
-      <div class="sec-head" data-reveal><span class="label">Editors</span><span class="label idx">/06</span></div>
       <div class="panels">
         <figure class="shot" data-reveal>
           <img src="panel.webp" width="840" height="1340"
@@ -2102,8 +2052,6 @@ Never let a moment fully resolve.</pre>
     </section>
 
     <section class="sec wrap" aria-labelledby="num-h">
-      <div class="sec-head" data-reveal><span class="label">Under the hood</span><span class="label idx">/07</span>
-      </div>
       <h2 class="display" id="num-h" data-reveal>Cheap to run.<br>Quick to redo.</h2>
       <div class="stats">
         <div class="stat" data-reveal>
@@ -2127,7 +2075,6 @@ Never let a moment fully resolve.</pre>
     </section>
 
     <section class="sec wrap" id="install" aria-labelledby="inst-h">
-      <div class="sec-head" data-reveal><span class="label">Install</span><span class="label idx">/08</span></div>
       <h2 class="display" id="inst-h" data-reveal>Runs on your machine.</h2>
       <ol class="steps">
         <li data-reveal>
