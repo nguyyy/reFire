@@ -17,9 +17,9 @@ captions: emph        # "captions only on lines that are genuinely hard to hear"
 loudnorm: true        # "normalize aggressively... or the whiplash becomes annoying" (S4)
 ---
 
-# The "ryuk1 / ryuk34" Editing Style — Reference Spec
+# The "ryuk1 / ryuk34" Editing Style | Reference Spec
 
-> **Sourcing note:** This is a reconstruction of the style from observed behavior, not documentation from the editor. Treat it as a working model to test against, not gospel. Where a rule is an inference rather than an observation, it's marked *(inferred)*.
+> **Sourcing note:** This is a reconstruction of the style from observed behavior, not directly from said editor. Treat it as a basis model to test against, not gospel. Where a rule is an inference rather than an observation, it's marked *(inferred)*.
 
 ---
 
@@ -144,7 +144,7 @@ Minimal and functional. The pacing carries the video; text just prevents confusi
 
 Things that break this style specifically:
 
-- ❌ Letting a moment breathe "so it lands" — it lands harder truncated
+- ❌ Letting a moment breathe "so it lands," it lands harder truncated
 - ❌ Explanatory setup before a clip
 - ❌ Smooth, designed transitions between every clip
 - ❌ Consistent music bed across the whole runtime
@@ -179,10 +179,10 @@ If this is driving a pipeline rather than a human timeline:
 
 | Field | Purpose |
 |---|---|
-| `peak_timestamp` | The transient to cut on — not the segment boundary |
+| `peak_timestamp` | The transient to cut on, not the segment boundary |
 | `truncation_offset` | How far *before* natural resolution to cut (target 200–400ms) |
 | `reads_without_context` | Boolean gate for stack eligibility |
-| `tonal_register` | For juxtaposition scoring — you want adjacent beats to *mismatch* |
+| `tonal_register` | For juxtaposition scoring - you want adjacent beats to *mismatch* |
 | `transition_type` | Enum, weighted heavily toward `hard_cut` |
 | `audio_offset` | J-cut / L-cut lead or lag, in frames |
 
