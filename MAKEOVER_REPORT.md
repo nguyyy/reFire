@@ -68,9 +68,9 @@ What the data says, measured:
   anti-predicts trimming. **A loud end** predicts extending (22% vs 10%) and almost
   never an overstay. Referent words ("he", "that", "wait") barely predict anything
   (12% vs 9%).
-- **Interior cuts are content, not silence.** In the full pairs you removed whole
-  utterances like "It's not loading.", "Anyways.", or a YouTube-poll aside: 3.6% of
-  utterances (36/992). No surface feature (length, filler words, loudness, position)
+- **Interior cuts are content, not silence.** In the full pairs 77s of the 98s you cut
+  inside clips was speech: whole utterances like "It's not loading.", "Anyways.", or a
+  YouTube-poll aside. Across all four edits that's 3.6% of utterances (36/992). No surface feature (length, filler words, loudness, position)
   separates them.
 - **You never merged two reFire clips** and almost never restored a dead-air gap
   (2/141 and 0/50 gaps), so the "protect the pause before a punchline" rule has no
@@ -87,17 +87,17 @@ propose).
 
 | VOD | baseline (shipped cut) | D markers | E boundary | F trim | H critics |
 |---|---|---|---|---|---|
-| 2862200457 (rebuilt) | 243.4 | 243.4 | 248.6 | 243.4 | 259.4 |
+| 2862200457 (rebuilt) | 243.4 | 243.4 | 248.6 | 243.8 | 259.4 |
 | 2872051525@5400-14400 (rebuilt) | 236.5 | 236.5 | 257.9 | 238.5 | 253.3 |
 | 2875394138@6840-8760 | 132.2 | 132.2 | 132.2 | 133.7 | 168.3 |
 | 2875784108 | 251.1 | 251.1 | 263.3 | 251.1 | 252.7 |
-| **overall** | **863.2** | **863.2** | **902.0** | **866.7** | **933.7** |
+| **overall** | **863.2** | **863.2** | **902.0** | **867.1** | **933.7** |
 | full pairs only | 383.3 | 383.3 | 395.5 | 384.8 | 421.0 |
 
 Markers don't change the cut (fix_cost identical by construction). They're measured by
 whether they land within ±3s (VOD time) of a real fix. At the default threshold that's
 **11.25 markers/video, 0.24 precision, against 0.30 for marking every edge**. Across
-thresholds 0.10–0.45 precision moves between 0.07 and 0.42 with no trend, i.e. chance.
+thresholds 0.10–0.40 precision moves between 0.0 and 0.42 with no trend, i.e. chance.
 I first reported 0.57 at ~10/video. That was an artifact: cold-open teaser edges are
 short and mid-sentence (so they score risky) and "hit" edits through the VOD time
 they share with their beat, while in Premiere they sit at the start of the video.
@@ -106,8 +106,9 @@ Excluding teasers from both scoring and training removed the lift.
 Phase G (fades, L-cuts) changes audio only, so it has no fix_cost effect. It was
 measured on real audio instead (§4).
 
-Critics were run twice (the LLM is stochastic): 914.1 and 933.7. The table shows the
-second run, which used the corrected lesson pool.
+Trim and critics were each run twice. Trim gave 866.7 then 867.1, critics 914.1 then
+933.7 (the LLM is stochastic). The table shows the second runs, which used the
+corrected lesson pool.
 
 The baseline was recorded once before any stage, then re-recorded (same shipped cuts)
 after two learn-side fixes: rebuilt proposals use `voiced` only for projects after
@@ -121,8 +122,8 @@ above uses the corrected data. `run/eval/*.json` holds every run.
 | review markers (`--markers`, `--marker-threshold 0.26`) | off | no better than chance under leave-one-out (0.24 precision vs 0.30 base at ~11/video). The plumbing is done: Premiere sequence markers, AE comp markers, `markers.csv`, trimmed-span and critic-conflict markers. Re-check with `refire eval --all --markers` as edits accumulate |
 | de-pop fades (`--crossfade-ms 15`, rough render + AE) | **on** | on real feral-ferret audio, the waveform step at each jump cut dropped 6–10× (median 0.40→0.06 of the p99.9 sample delta). Dips, not overlaps, so no A/V drift. `--crossfade-ms 0` restores hard cuts. Note: no hard cut exceeded the p99.9 click level even before, so the audible gain is small |
 | boundary stage (`--boundary`) | off | fix_cost 863.2 → 902.0. Back-expansion and tail rules land on edges you left alone |
-| trim stage (`--trim`, local ollama) | off | fix_cost 863.2 → 866.7. The local judge cut 4 spans (9.7s) across 4 VODs, ~25% overlapping your cuts. Too timid to matter, and wrong when it acted. (This is the first trim run, from before the lesson-pool fix; the re-run hadn't finished when the session ended.) |
-| structured critics (`--critics`, `--critic-effort low`) | off | fix_cost 863.2 → 914.1 / 933.7 (two runs). ~46 edits applied per run, mostly continuity start-extensions and drop-off cuts you never made, zero conflicts |
+| trim stage (`--trim`, local ollama) | off | fix_cost 863.2 → 867.1 (first run 866.7). In the first run the local judge cut 4 spans (9.7s) across 4 VODs, ~25% overlapping your cuts. Too timid to matter, and wrong when it acted |
+| structured critics (`--critics`, `--critic-effort low`) | off | fix_cost 863.2 → 914.1 / 933.7 (two runs). 46 edits applied in the first run, mostly continuity start-extensions and drop-off cuts you never made, zero conflicts |
 | L-cuts (`--lcut`, rough render only) | off | not measurable with fix_cost; unproven taste call |
 | past-edit few-shots in director/review (`--lessons`) | off | **unmeasured**: it changes selection, and a re-selected cut can't be fairly scored against edits made from the old proposal's proxies (§6). Needs a fresh `make` A/B with and without it, several VODs each |
 
@@ -185,6 +186,9 @@ Opt-in additions, measured:
   phase commits staged `reFire/…`. That added new files but silently skipped edits to
   existing ones, so commit `31af4a0` carries the phase B–E edits to existing files.
   Phase commits from F on are complete. CLAUDE.md now documents the trap.
+- The phase D commit and `d46cd09` say markers default on at 0.57 / 0.60 precision.
+  Those numbers were the cold-open artifact described in §3; `b6ddc85` turned markers
+  off.
 - Written into `run/` (new files only, nothing existing modified): `clip_diff.json` in
   the four cache folders, `clip_lessons_genshin-impact.json`, `clip_lessons_report.md`,
   `eval/`. Also two **new cache folders**, `run/2862200457/` and
@@ -201,7 +205,7 @@ refire eval --all           # see whether reFire is getting closer to your edits
 ```
 
 `refire learn` finds the project on its own (`REFIRE_PROJECTS`, default
-`~/Desktop/iphone`), so every finished edit sharpens the next run's markers. To try a
+`~/Desktop/iphone`), so every finished edit adds to the lessons the markers and stages train on. To try a
 stage on your next real run, add `--boundary`, `--trim`, `--critics` or `--lessons`
 (or the style keys), then score the result with
 `refire eval <vod> --manifest run/<vod>/<run>/ae/manifest.json` after you've edited and
