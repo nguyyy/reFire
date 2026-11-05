@@ -1113,7 +1113,7 @@ def test_stack_survives_the_stream_driven_intro():
 
     s = director.pick_system(None, style="fast", stack=6)
     assert s.startswith("You are a video editor cutting a Twitch gaming stream into one "
-                        "focused, cohesive short. NO editorial brief")
+                        "focused, cohesive video. NO editorial brief")
     assert "MONTAGE STACK of about 6 moments" in s
 
 
