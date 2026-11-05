@@ -194,6 +194,12 @@ def make(
     proxy: bool = True,       # all-intra proxies for AE instead of the long-GOP VOD
     caption_fix: bool = True,  # one claude pass over proper nouns in captions
     boundary: bool = False,    # boundary stage (refire/boundary.py), off: raised fix_cost in eval
+    trim: bool = False,        # intra-clip filler trim (refire/trim.py, local llm), off by default
+    lessons: bool = False,     # past finished edits as few-shot pairs in director + critic
+    critics: bool = False,     # structured continuity/payoff/filler/dropoff critics (claude)
+    critic_effort: str = "low",   # those critics' effort -- they edit spans, they don't plan
+    crossfade: float = 0.015,  # de-pop fade at every cut (rough render + AE), 0 = hard cuts
+    lcut: bool = False,        # rough render: a shouted line's audio runs under the next shot
     markers: bool = True,      # review markers on risky cut points (learned from past edits)
     marker_threshold: float = 0.33,   # markers.THRESHOLD, literal since it's imported lazily
 
@@ -244,6 +250,9 @@ def make(
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"[run] {run_name}  (cache: {run_dir}, artifacts: {out_dir})")
     model = _resolve_ollama_model(model)       # don't 404 deep into the run
+    from . import director as _director
+    # every claude call this run makes (director, review, critics, captions) -> cost.json
+    _director.COST_LOG = {"path": run_dir / "cost.json", "run": run_name}
     clock = _Stopwatch()
     report(0.0, "downloading VOD")
     if tag:
@@ -337,6 +346,14 @@ def make(
             # one cli session per run, director opens it and review rounds resume it so the ~240KB map
             # isn't resent every round
             session_id = str(uuid.uuid4())
+            lesson_note = ""
+            if lessons:
+                from .glossary import _slug
+                from .learn.lessons import load_lessons
+                lesson_note = director.lessons_note(
+                    load_lessons(run_dir.parent, _slug(game) if game else ""))
+                print(f"[lessons] {lesson_note.count(chr(10) + '- ')} past-edit example(s) "
+                      f"in the director/critic prompts")
             if not local_director:
                 # the card is idle while claude thinks, load the cast scorer now instead of
                 # paying its cold load after the director returns
@@ -350,7 +367,7 @@ def make(
                                         backend=director_backend, run_dir=out_dir,
                                         style=style, pace=pace, stack=stack,
                                         keep_build=keep_build, effort=effort,
-                                        session_id=session_id))
+                                        session_id=session_id, lessons=lesson_note))
             clock.lap("director")
             # review loop: cast, let a claude critic read the actual cut and approve or return a revised
             # outline, recast, repeat. this is what turns a reel into a story. local_director stays
@@ -384,7 +401,8 @@ def make(
                                          backend=director_backend, run_dir=out_dir,
                                          shrink=shrink, style=style, pace=pace,
                                          stack=stack, keep_build=keep_build,
-                                         effort=review_effort, session_id=session_id)
+                                         effort=review_effort, session_id=session_id,
+                                         lessons=lesson_note)
                 except Exception as re:   # a failed review must not throw away a good cast
                     print(f"[review] round {rnd + 1} unavailable ({re}); keeping current cut")
                     clock.lap(f"review {rnd + 1}")
@@ -464,6 +482,32 @@ def make(
                                voiced=voiced, pad=silence_pad, snap=snap,
                                keep_build=keep_build)
         print(f"[boundary] {blog}")
+    if trim:
+        # cut filler inside kept clips: local-llm span labels + a deterministic removal test,
+        # capped at the editor's own measured rate. written as each clip's `cut`
+        from .glossary import _slug
+        from .learn.diff import Context
+        from .learn.lessons import load_lessons
+        from .trim import trim_sections
+        report(0.89, "trimming filler")
+        tlog = trim_sections(sections, words, Context(words, audio_z, _chat_z),
+                             load_lessons(run_dir.parent, _slug(game) if game else ""),
+                             voiced=voiced, pad=silence_pad, model=model)
+        print(f"[trim] {tlog['cut']} of {tlog['spans']} span(s), {tlog['cut_s']}s")
+        clock.lap("trim")
+    if critics and not local_director and sections:
+        # job-specific critics on the realized cut: JSON edits, an arbiter, conflicts -> markers
+        from .critics import review_sections
+        from .glossary import _slug
+        from .learn.diff import Context
+        from .learn.lessons import load_lessons
+        report(0.89, "running critics")
+        clog = review_sections(sections, words, Context(words, audio_z, _chat_z),
+                               load_lessons(run_dir.parent, _slug(game) if game else ""),
+                               voiced=voiced, pad=silence_pad, model=claude_model,
+                               effort=critic_effort, trace=out_dir / "trace")
+        print(f"[critics] {clog['rounds']}")
+        clock.lap("critics")
 
     report(0.90, "selecting clips")
     flat_clips = [clip for sec in sections for clip in sec["clips"]]
@@ -482,7 +526,7 @@ def make(
                         overlays_by_clip=overlays, bgm=music,
                         motion_zoom=motion_zoom, deadspace=deadspace,
                         silence_pad=silence_pad, cards=cards, proxy=proxy,
-                        captions=captions, voiced=voiced)
+                        captions=captions, voiced=voiced, fade=crossfade, lcut=lcut)
     clock.lap("manifest")
     if markers:
         # flag the cut points an editor most likely has to move, so review is a jump list
@@ -510,7 +554,8 @@ def make(
         rough = render_clips(video, out_dir, flat_clips, words,
                              music=music, encoder=encoder, silence_pad=silence_pad,
                              motion_zoom=motion_zoom, deadspace=deadspace,
-                             loudnorm=loudnorm, voiced=voiced)
+                             loudnorm=loudnorm, voiced=voiced, fade=crossfade,
+                             lcut=lcut)
         clock.lap("render")
         print("Rough cut:", rough)
     release_scorer(model)   # kept resident through the run (score.KEEP_ALIVE), give the card back

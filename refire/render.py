@@ -16,6 +16,51 @@ W, H, FPS = 1280, 720, 30
 # headroom for the screams we keep on purpose
 LOUDNORM = "loudnorm=I=-16:TP=-1.5:LRA=11"
 
+# de-pop ramp at every cut: each kept span fades in and out over this long. a jump cut
+# between two arbitrary samples is a step in the waveform, i.e. a click. a dip (not an
+# overlapping crossfade) so audio stays sample-locked to the video's frame cuts
+FADE_S = 0.015
+
+
+def audio_graph(keep, dur: float, fade: float = FADE_S, tails=None,
+                loudnorm: bool = False) -> str:
+    """filter_complex chain [0:a] -> [a] for one clip: the kept spans, each faded in/out.
+
+    `tails[k]` > 0 makes span k an L-CUT: its audio runs that many seconds past its
+    video out-point, fading out under the head of span k+1 (mixed, not replacing it), so
+    a reaction is not chopped mid-breath by the jump cut. With no tails the spans are
+    concatenated, which is exact; tails need amix with each span delayed to its slot.
+    """
+    spans = [tuple(s) for s in keep] if keep else [(0.0, dur)]
+    n = len(spans)
+    tails = list(tails or [0.0] * n)
+    lcut = any(t > 0 for t in tails)
+    head = (f"[0:a]asplit={n}" + "".join(f"[s{k}]" for k in range(n))) if n > 1 else ""
+    parts = [head] if head else []
+    off = 0.0
+    for k, ((a, b), tl) in enumerate(zip(spans, tails)):
+        src = f"[s{k}]" if n > 1 else "[0:a]"
+        length = (b - a) + tl
+        f = min(fade, max(0.0, (b - a) / 4))
+        fo = tl if tl > 0 else f
+        chain = f"{src}atrim=start={a:.4f}:end={b + tl:.4f},asetpts=PTS-STARTPTS"
+        if f > 0:
+            chain += (f",afade=t=in:st=0:d={f:.4f}"
+                      f",afade=t=out:st={max(0.0, length - fo):.4f}:d={fo:.4f}")
+        if lcut:
+            chain += f",adelay={off * 1000:.1f}:all=1"
+        parts.append(chain + f"[x{k}]")
+        off += b - a
+    ins = "".join(f"[x{k}]" for k in range(n))
+    if lcut:
+        tail = f"{ins}amix=inputs={n}:normalize=0:dropout_transition=0,atrim=end={off:.4f}"
+    elif n > 1:
+        tail = f"{ins}concat=n={n}:v=0:a=1"
+    else:
+        tail = "[x0]anull"
+    parts.append(tail + (f",{LOUDNORM}" if loudnorm else "") + "[a]")
+    return ";".join(parts)
+
 
 def _run(cmd: list[str]) -> None:
     proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
@@ -41,6 +86,8 @@ def render_clip(
     enter: float = ENTER,
     exit: float = EXIT,
     loudnorm: bool = False,
+    fade: float = FADE_S,
+    tails=None,
 ) -> Path:
     """Trim [seg.start, seg.end], dynamic reframe, burn subtitles. Raises on fail.
 
@@ -56,6 +103,9 @@ def render_clip(
     the level jump lands on every cut -- audible as fatigue rather than as energy. Off by
     default: it costs an audio filter pass and changes the mix, so only a style that
     asks for it gets it.
+
+    `fade` is the de-pop ramp at every cut (`audio_graph`; 0 = the old hard cuts) and
+    `tails` the per-span L-cut lengths.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -65,16 +115,27 @@ def render_clip(
 
     # A: trim + normalize fps, keep source res (reframe crops from it) and audio.
     # if keep cuts dead air, select+setpts drops the gaps in one encode. one full span skips it
+    if keep and len(keep) == 1 and keep[0][0] <= 1e-3 and keep[0][1] >= dur - 1e-3:
+        keep = None
     cut, afilters = [], []
-    if keep and not (len(keep) == 1 and keep[0][0] <= 1e-3 and keep[0][1] >= dur - 1e-3):
-        sel = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in keep)
-        cut = ["-vf", f"select='{sel}',setpts=N/FRAME_RATE/TB"]
-        afilters += [f"aselect='{sel}'", "asetpts=N/SR/TB"]
-    if loudnorm:
-        # single pass, two-pass needs a measuring run per clip and doesn't help at these lengths
-        afilters.append(LOUDNORM)
-    if afilters:
-        cut += ["-af", ",".join(afilters)]
+    if fade > 0 or (tails and any(tails)):
+        graph = [audio_graph(keep, dur, fade, tails if keep else None, loudnorm)]
+        vmap = "0:v"
+        if keep:
+            sel = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in keep)
+            graph.insert(0, f"[0:v]select='{sel}',setpts=N/FRAME_RATE/TB[v]")
+            vmap = "[v]"
+        cut = ["-filter_complex", ";".join(graph), "-map", vmap, "-map", "[a]"]
+    else:                                   # fade 0: the original hard-cut path
+        if keep:
+            sel = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in keep)
+            cut = ["-vf", f"select='{sel}',setpts=N/FRAME_RATE/TB"]
+            afilters += [f"aselect='{sel}'", "asetpts=N/SR/TB"]
+        if loudnorm:
+            # single pass, two-pass needs a measuring run per clip and doesn't help at these lengths
+            afilters.append(LOUDNORM)
+        if afilters:
+            cut += ["-af", ",".join(afilters)]
     _run(["ffmpeg", "-ss", str(seg["start"]), "-t", str(dur), "-i", str(video),
           *cut, "-r", str(FPS), "-c:v", encoder, "-pix_fmt", "yuv420p",
           "-c:a", "aac", "-ar", "48000", "-ac", "2", "-dn", "-y", str(work)])

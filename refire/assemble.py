@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 from .reframe import ENTER, EXIT
-from .render import render_clip
+from .render import FADE_S, render_clip
 from .select import SILENCE_PAD, compress_silence, speech_intervals
 from .style import style_for
 from .subtitles import build_ass
@@ -52,6 +52,28 @@ def assemble(
     return out_path
 
 
+LCUT_S = 0.35   # longest an outgoing reaction may run under the next shot
+
+
+def lcut_tails(words, start: float, keep) -> list[float]:
+    """Per kept span, how far its audio runs past its video out-point (L-cut).
+
+    Only where the span ends on an emphasized word (a shout, an interjection, all caps:
+    `emphasis.annotate_emphasis`) -- the reaction a hard jump cut would chop mid-breath.
+    Never longer than the removed gap, so no audio plays twice; the last span has no
+    next shot to run under."""
+    out = []
+    for k, (a, b) in enumerate(keep):
+        if k == len(keep) - 1:
+            out.append(0.0)
+            continue
+        inside = [w for w in words if start + a <= w["start"] < start + b]
+        gap = keep[k + 1][0] - b
+        out.append(round(min(LCUT_S, gap), 3) if inside and inside[-1].get("emph")
+                   and gap > 0.05 else 0.0)
+    return out
+
+
 def render_clips(
     video: str | Path,
     run_dir: str | Path,
@@ -65,6 +87,8 @@ def render_clips(
     deadspace: bool = True,
     loudnorm: bool = False,
     voiced=None,
+    fade: float = FADE_S,
+    lcut: bool = False,
 ) -> Path:
     """Render a flat list of {start,end} clips into a watchable rough cut.
 
@@ -93,7 +117,8 @@ def render_clips(
             wpl, c_enter, c_exit = 3, ENTER, EXIT
         if deadspace:
             keep, retimed, cdur = compress_silence(words, seg["start"], seg["end"],
-                                                   pad=silence_pad, voiced=voiced)
+                                                   pad=silence_pad, voiced=voiced,
+                                                   exclude=seg.get("cut"))
         else:                                   # keep=None -> ffmpeg trims, cuts nothing
             keep, cdur = None, seg["end"] - seg["start"]
             retimed = [{"text": w["text"], "start": w["start"] - seg["start"],
@@ -103,6 +128,7 @@ def render_clips(
         seg_speech = speech_intervals(retimed)  # phrase runs on the clip timeline
         render_clip(video, seg, ass, out, encoder=encoder, speech=seg_speech, keep=keep,
                     motion_zoom=motion_zoom, enter=c_enter, exit=c_exit,
-                    loudnorm=loudnorm)
+                    loudnorm=loudnorm, fade=fade,
+                    tails=lcut_tails(words, seg["start"], keep) if lcut and keep else None)
         rendered.append(out)
     return assemble(rendered, run_dir / out_name, music=music)

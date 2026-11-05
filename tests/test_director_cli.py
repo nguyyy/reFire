@@ -267,3 +267,18 @@ def test_review_runs_at_its_own_effort(monkeypatch):
     cmd = seen["cmd"]
     assert cmd[cmd.index("--effort") + 1] == "high"
     assert '{"keep": <n>}' in seen["stdin"]       # asked for a patch, not a full outline
+
+
+def test_cost_log_accumulates_per_stage(tmp_path, monkeypatch):
+    from refire import director
+    monkeypatch.setattr(director, "COST_LOG", {"path": tmp_path / "cost.json", "run": "r1"})
+    director._log_cost("director", "m", "cli", {"input_tokens": 100, "output_tokens": 7})
+    director._log_cost("captions 2/3", "m", "cli", {"input_tokens": 5})
+    director._log_cost("captions 3/3", "m", "cli", None)
+    import json
+    run = json.loads((tmp_path / "cost.json").read_text())["runs"]["r1"]
+    assert len(run["calls"]) == 3
+    assert run["by_stage"]["captions"]["calls"] == 2
+    assert run["by_stage"]["director"]["input_tokens"] == 100
+    monkeypatch.setattr(director, "COST_LOG", None)
+    director._log_cost("x", "m", "cli", {})            # off: no file, no error

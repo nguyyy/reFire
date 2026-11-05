@@ -343,3 +343,37 @@ def learn(vod_id=None, project=None, run_root="run", projects_dir=DEFAULT_PROJEC
     for p in out:
         print(f"[learn] wrote {p}")
     return done + out
+
+
+# --------------------------------------------------------------------------- few-shot
+
+_VERB = {"start_late": "started earlier, keeping", "start_early": "trimmed the lead-in",
+         "end_early": "kept going through", "end_late": "cut the overstay",
+         "interior_cut": "removed", "dropped": "dropped the whole clip",
+         "restored": "put back", "added": "added", "merged": "joined across"}
+
+
+def few_shot(lessons: dict | None, labels, n: int = 2, role: str | None = None,
+             energy: int | None = None) -> list[str]:
+    """Up to `n` "reFire proposed X -> the editor did Y" lines per label.
+
+    Retrieval is by similarity to the moment being judged: same beat role first, then
+    closest energy, then the label's own ranking (closest to its median delta). The
+    caller passes leave-one-out lessons when scoring, so a VOD never sees its own edits.
+    Small and fixed on purpose -- these ride in prompts."""
+    out = []
+    for lab in labels:
+        ex = ((((lessons or {}).get("labels") or {}).get(lab) or {}).get("examples")) or []
+
+        def rank(k_e):
+            k, e = k_e
+            b = e.get("beat") or {}
+            same = role is not None and b.get("role") == role
+            de = abs(int(b.get("energy") or 3) - energy) if energy is not None else 0
+            return (not same, de, k)
+        for _k, e in sorted(enumerate(ex), key=rank)[:n]:
+            b = e.get("beat") or {}
+            tag = f"{lab} {e['delta_s']:+.1f}s" + (f", {b['role']}" if b.get("role") else "")
+            out.append(f'- ({tag}) ..."{e["before"][-70:]}" -> the editor '
+                       f'{_VERB.get(lab, "changed")} [[{e["text"][:150]}]]')
+    return out

@@ -234,6 +234,21 @@ def annotate_manifest(manifest_path, ctx, model, threshold: float = THRESHOLD) -
         dur = c.get("dur") or (c["end"] - a)
         for m in tmp["markers"]:
             m["at"] = 0.0 if m["side"] == "start" else round(max(0.0, dur - 0.5), 3)
+        keep_rel = c.get("keep") or [[0.0, c["end"] - a]]
+        for m in c.get("markers") or []:           # critic notes carry a VOD time
+            if m.get("side") == "critic":
+                m["at"] = round(sum(max(0.0, min(kb, m["vod"] - a) - ka)
+                                    for ka, kb in keep_rel), 3)
+                tmp["markers"].append(m)
+                n += 1
+        for x, y in c.get("cut") or []:            # each trimmed span is worth a glance
+            at = sum(max(0.0, min(kb, x - a) - ka) for ka, kb in
+                     (c.get("keep") or [[0.0, c["end"] - a]]))
+            tmp["markers"].append({"side": "trim", "kind": "trim", "vod": round(x, 2),
+                                   "risk": 0.5, "at": round(at, 3),
+                                   "name": "reFire: trimmed",
+                                   "comment": f"trimmed {y - x:.1f}s of filler -- check the flow"})
+            n += 1
         if tmp["markers"]:
             c["markers"] = tmp["markers"]
     mp.write_text(json.dumps(man, indent=2), encoding="utf-8")

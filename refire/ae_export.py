@@ -250,7 +250,7 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
                    motion_zoom: bool = True, deadspace: bool = True,
                    silence_pad: float = SILENCE_PAD, cards: bool = True,
                    proxy: bool = True, captions: str = "all", sources=None,
-                   voiced=None) -> Path:
+                   voiced=None, fade: float = 0.0, lcut: bool = False) -> Path:
     """Write run_dir/ae/manifest.json from already-chosen sections. Returns its path.
 
     Shared by `export_ae` (legacy detect path) and `pipeline.make` (brief path).
@@ -264,6 +264,9 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
     `keep` (clip-relative source spans) + `dur` (tightened length) that AE jump-cuts with
     Time Remap, and captions/zoom/overlays are retimed onto that tight timeline. `voiced`
     keeps speech the transcript has no words for (see `select.compress_silence`).
+    `fade` > 0 is written as `audio_fade` for the AE build's de-pop dips at every jump
+    cut; `lcut` records each clip's L-cut points as `transitions` (the rough render plays
+    them; AE/Premiere hard-cut there -- see MAKEOVER_REPORT.md).
     `cards=False` marks every section `card: False`, so the Master runs clip-to-clip with
     no section title cards (titles stay in the manifest for the outline/debugging).
     `proxy=True` cuts each clip to an all-intra DNxHR LB proxy and points AE at those
@@ -297,7 +300,8 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
             keep = tight = None
             if deadspace:
                 keep, retimed, cdur = compress_silence(words, seg["start"], seg["end"],
-                                                       pad=silence_pad, voiced=voiced)
+                                                       pad=silence_pad, voiced=voiced,
+                                                       exclude=seg.get("cut"))
                 tight = _tighten(keep)
                 groups = group_words(retimed, 0.0, cdur, wpl)
             else:
@@ -329,8 +333,20 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
             if keep and cdur < (seg["end"] - seg["start"]) - 1e-3:
                 clip["keep"] = [[round(a, 3), round(b, 3)] for a, b in keep]
                 clip["dur"] = round(cdur, 3)
+                if lcut:
+                    from .assemble import lcut_tails
+                    at, trans = 0.0, []
+                    for (a, b), tl in zip(keep, lcut_tails(words, seg["start"], keep)):
+                        at += b - a
+                        trans.append({"at": round(at, 3),
+                                      "type": "lcut" if tl > 0 else "cut", "tail": tl})
+                    clip["transitions"] = trans[:-1]
             if role:
                 clip["role"] = role                  # info for AE / debugging
+            if seg.get("cut"):
+                clip["cut"] = seg["cut"]             # trimmed filler (trim.py), for markers
+            if seg.get("markers"):
+                clip["markers"] = seg["markers"]     # critic notes, placed by markers.py
             if "src" in seg:
                 clip["src"] = seg["src"]             # caller-supplied media map (see sources)
             if overlays_by_clip and ci < len(overlays_by_clip):
@@ -373,6 +389,8 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
     if len(parts) > 1 or sources is not None:
         manifest["sources"] = [{"path": str(p.resolve()).replace("\\", "/"),
                                 "offset": round(off, 3)} for p, off in parts]
+    if fade > 0:
+        manifest["audio_fade"] = round(fade, 4)
     if bgm:
         manifest["bgm"] = str(Path(bgm).resolve()).replace("\\", "/")
         manifest["bgm_db"] = bgm_db

@@ -173,7 +173,7 @@ SILENCE_PAD = 0.3   # the short breath left around each phrase
 
 
 def compress_silence(words, start: float, end: float, pad: float = SILENCE_PAD,
-                     voiced=None):
+                     voiced=None, exclude=None):
     """Clip [start, end] -> (keep, retimed, dur) with internal dead air removed.
 
     Words alone are not a speech map: whisper returns no words for some speech it was
@@ -192,6 +192,9 @@ def compress_silence(words, start: float, end: float, pad: float = SILENCE_PAD,
     ~2*pad survives untouched (nothing worth cutting) while a real silence collapses
     to a `pad`-sized breath on each side. No speech -> the whole clip is kept (no-op).
 
+    `exclude` (absolute [a, b] spans, a clip's `cut` from `trim.py`) is removed on top,
+    so every renderer drops a trimmed span the same way it drops dead air.
+
     Returns:
       keep    : clip-relative spans [(a, b)...] for the ffmpeg select filter
       retimed : words on the gap-free, 0-based clip timeline (carry `emph`)
@@ -199,7 +202,7 @@ def compress_silence(words, start: float, end: float, pad: float = SILENCE_PAD,
     """
     runs = [(s, e) for s, e in speech_intervals(words)
             if e > start and s < end]
-    if not runs:
+    if not runs and not exclude:
         retimed = [{"text": w["text"], "start": w["start"] - start,
                     "end": w["end"] - start, "emph": bool(w.get("emph"))}
                    for w in words if start <= w["start"] < end]
@@ -209,12 +212,23 @@ def compress_silence(words, start: float, end: float, pad: float = SILENCE_PAD,
 
     # pad + clamp to clip, then merge spans that touch after padding
     merged: list[list[float]] = []
-    for s, e in runs:
+    for s, e in runs or [(start, end)]:
         a, b = max(start, s - pad), min(end, e + pad)
         if merged and a <= merged[-1][1]:
             merged[-1][1] = max(merged[-1][1], b)
         else:
             merged.append([a, b])
+    for x, y in exclude or ():
+        out = []
+        for a, b in merged:
+            if y <= a or x >= b:
+                out.append([a, b])
+                continue
+            if x > a:
+                out.append([a, x])
+            if y < b:
+                out.append([y, b])
+        merged = out or merged          # never trim a clip down to nothing
 
     keep = [(a - start, b - start) for a, b in merged]   # clip-relative
     # cumulative output offset where each kept span begins on the tight timeline

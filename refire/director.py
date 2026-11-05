@@ -894,6 +894,48 @@ def _n_beats(target_s: float, pace: float = 1.0) -> int:
     return max(2, min(n, ceiling))
 
 
+# where every Claude call's tokens go: {"path": run/<vod>/cost.json, "run": run name}.
+# pipeline.make sets it; None (tests, one-off verbs) logs nothing
+COST_LOG: dict | None = None
+_COST_LOCK = __import__("threading").Lock()   # caption batches finish in parallel
+
+
+def _log_cost(tag: str, model: str, backend: str, usage: dict | None,
+              cost_usd: float | None = None, secs: float | None = None) -> None:
+    """Append one call to cost.json under this run, keyed by stage (the tag's first word:
+    director / review / captions / critic). Never raises -- accounting is not the job."""
+    if not COST_LOG:
+        return
+    import re
+    from pathlib import Path
+    u = usage or {}
+    row = {"tag": tag, "stage": re.split(r"[^a-z]", tag.lower())[0] or tag, "model": model,
+           "backend": backend, "secs": round(secs, 1) if secs else None,
+           "cost_usd": cost_usd,
+           **{k: int(u.get(k) or 0) for k in ("input_tokens", "output_tokens",
+                                             "cache_read_input_tokens",
+                                             "cache_creation_input_tokens")}}
+    try:
+        with _COST_LOCK:
+            path = Path(COST_LOG["path"])
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            run = data.setdefault("runs", {}).setdefault(COST_LOG["run"], {"calls": []})
+            run["calls"].append(row)
+            by: dict = {}
+            for c in run["calls"]:
+                b = by.setdefault(c["stage"], {"calls": 0, "input_tokens": 0,
+                                               "output_tokens": 0, "cache_read_input_tokens": 0,
+                                               "cache_creation_input_tokens": 0})
+                b["calls"] += 1
+                for k in ("input_tokens", "output_tokens", "cache_read_input_tokens",
+                          "cache_creation_input_tokens"):
+                    b[k] += c[k]
+            run["by_stage"] = by
+            path.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    except (OSError, ValueError, TypeError):
+        pass
+
+
 def _extract_json(txt: str) -> str:
     """Slice the JSON object out of a model reply (tolerates prose / ``` fences)."""
     a, b = txt.find("{"), txt.rfind("}")
@@ -971,6 +1013,7 @@ def _complete(client, model, system, user_content, model_cls, tag="claude", trac
         text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
         return text, resp.stop_reason, "".join(thought), getattr(resp, "usage", None)
 
+    t_call = time.monotonic()
     text, stop, thought, usage = _call(effort)
     # max_tokens with text = thinking ate the budget and the json got cut off. no
     # auto-continuation here so do what the empty case does: low effort, budget goes to the
@@ -989,6 +1032,10 @@ def _complete(client, model, system, user_content, model_cls, tag="claude", trac
                  f"out={getattr(usage, 'output_tokens', 0):,}\n")
         print(f"[{tag}] {cache.strip()}")
     print(f"[{tag}] <- stop_reason={stop}, {len(text):,} chars")
+    _log_cost(tag, model, "api", {k: getattr(usage, k, 0) for k in (
+        "input_tokens", "output_tokens", "cache_read_input_tokens",
+        "cache_creation_input_tokens")} if usage is not None else None,
+        secs=time.monotonic() - t_call)
     if trace:
         _trace_write(trace, f"{stamp}-{tag}-response.txt",
                      f"STOP_REASON: {stop}\n{cache}\n=== THINKING (summarized) ===\n{thought}\n\n"
@@ -1115,6 +1162,7 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
     turns: list[str] = []
     stops: list[str] = []
     text, stop, is_err = "", None, False
+    usage, cost_usd = None, None
     for line in proc.stdout:
         try:
             ev = json.loads(line)
@@ -1160,6 +1208,7 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
             text = ev.get("result") or ""
             stop = ev.get("stop_reason") or ev.get("subtype")
             is_err = bool(ev.get("is_error"))
+            usage, cost_usd = ev.get("usage"), ev.get("total_cost_usd")
     proc.wait()
     killer.cancel()
     os.unlink(sp.name)
@@ -1168,6 +1217,7 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
     joined = "".join(turns)
     print(f"[{tag}] <- stop_reason={stop}, {len(text):,} chars "
           f"({len(turns)} turn{'s' * (len(turns) != 1)}, {len(joined):,} chars joined)")
+    _log_cost(tag, model, "cli", usage, cost_usd, time.monotonic() - t_call)
     if trace:
         # turn count + per-turn stop reasons, a fragment that looks like a whole answer is hard to spot
         _trace_write(trace, f"{stamp}-{tag}-response.txt",
@@ -1255,13 +1305,29 @@ def _budget_note(target_s: float, shrink: float = CUT_SHRINK, pace: float = 1.0)
     return out + "\n"
 
 
+def lessons_note(lessons: dict | None, n: int = 2) -> str:
+    """Past finished edits as few-shot pairs for the director/critic system prompts.
+
+    "reFire proposed X -> the editor did Y", for the failure modes the boundaries and the
+    beat selection own. Appended AFTER `.format()` (lesson text can hold braces) and
+    fixed for the whole run, so it never moves the cached prefix between rounds."""
+    from .learn.lessons import few_shot
+    lines = few_shot(lessons, ("start_late", "end_early", "interior_cut", "dropped"), n)
+    if not lines:
+        return ""
+    return ("\n\nPAST EDITS: how this editor corrected earlier reFire cuts of this game "
+            "(reFire's proposal, then what they did). Cut the way they would -- and note "
+            "how rarely they had to act; most proposed boundaries were kept:\n"
+            + "\n".join(lines) + "\n")
+
+
 def outline(stream_map_text: str, brief: str, title: str, target_s: float,
             model: str = CLAUDE_MODEL, examples=None, trace=None,
             backend: str = "cli", run_dir=None,
             shrink: float = CUT_SHRINK, style: str | None = None,
             pace: float = 1.0, stack: int = 0,
             keep_build: bool = True, effort: str = DEFAULT_EFFORT,
-            session_id: str | None = None) -> Outline:
+            session_id: str | None = None, lessons: str = "") -> Outline:
     """One Claude call: stream map + brief -> story outline (central idea + beats).
 
     `examples` is the deferred reference-video few-shot hook (prior edits' beat
@@ -1275,7 +1341,7 @@ def outline(stream_map_text: str, brief: str, title: str, target_s: float,
     # or it breaks the cache prefix
     system = (pick_system(brief, style, stack, keep_build, pace)
               .format(n=_n_beats(target_s, pace), roles=_role_note(CUT_SHRINK, pace))
-              + _OUTLINE_INSTR)
+              + lessons + _OUTLINE_INSTR)
     user_content = [
         {
             "type": "text",
@@ -1311,7 +1377,7 @@ def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
            shrink: float = CUT_SHRINK, style: str | None = None,
            pace: float = 1.0, stack: int = 0,
            keep_build: bool = True, effort: str = DEFAULT_EFFORT,
-           session_id: str | None = None) -> Review:
+           session_id: str | None = None, lessons: str = "") -> Review:
     """Critic pass: read the realized rough cut + stream map, approve or return a revised
     Outline. One Claude call; same `backend` semantics as `outline()` (CLI-first, API
     fallthrough). Raises on no-backend-available / API error so the caller keeps the
@@ -1350,7 +1416,7 @@ def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
                    "so it escalates, and none of them should be long enough to explain "
                    "itself. Do not collapse it to one clip, and do not ask for context "
                    "inside it; the viewer being half a beat behind is the intent.")
-    system += _REVIEW_INSTR
+    system += lessons + _REVIEW_INSTR
     # the only part that changes between rounds. a resumed cli session sends just this
     tail = {
         "type": "text",

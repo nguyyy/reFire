@@ -560,7 +560,25 @@ var reFire = (function () {
         }
         foot.inPoint = 0;
         foot.outPoint = dur;
+        dipAudio(foot, times, M_FADE);
         return true;
+    }
+
+    // De-pop: a jump cut joins two arbitrary samples, a step in the waveform. Dip the
+    // footage layer's Audio Levels to -40dB across each jump (`audio_fade` seconds either
+    // side), the AE twin of render.audio_graph's fades. times[] are applyKeep's remap
+    // keys in pairs (span head, span tail), so every head after the first is a jump.
+    var M_FADE = 0;
+    function dipAudio(foot, times, f) {
+        if (!(f > 0) || times.length < 4) { return; }
+        try {
+            var lv = foot.property("Audio").property("Audio Levels"), ts = [], vs = [], k;
+            for (k = 2; k < times.length; k += 2) {
+                ts.push(times[k] - f, times[k], times[k] + f);
+                vs.push([0, 0], [-40, -40], [0, 0]);
+            }
+            lv.setValuesAtTimes(ts, vs);
+        } catch (e) { /* no audio on this layer: nothing to de-pop */ }
     }
 
     function buildClip(M, clip, srcs, tmpl, zoomScale, idx, folder, overlayTmpl, ovFolder,
@@ -729,6 +747,7 @@ var reFire = (function () {
         var M = readManifest(manifestPath);
         if (!M) { return "Manifest not found:\n" + manifestPath; }
         if (!M.clips || !M.clips.length) { return "Manifest has no clips to build."; }
+        M_FADE = M.audio_fade || 0;
         app.beginUndoGroup("reFire build");
         try {
             var tplF = ensureFolder("reFire templates");   // shared singletons

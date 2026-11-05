@@ -193,6 +193,27 @@ def main(argv: list[str] | None = None) -> None:
                          "began, push ends through the reaction tail (caps learned from "
                          "your past edits). Off by default -- it did not lower fix_cost "
                          "in `refire eval`")
+    mk.add_argument("--trim", action="store_true", default=None,
+                    help="intra-clip trim: cut filler/off-topic lines inside kept clips "
+                         "(local Ollama labels + a no-later-line-depends-on-it test). Off "
+                         "by default until `refire eval --trim` shows it helps")
+    mk.add_argument("--lessons", action="store_true", default=None,
+                    help="show the director and critic a few 'reFire proposed X, the "
+                         "editor did Y' pairs from your past finished edits "
+                         "(run/clip_lessons_<game>.json, built by `refire learn`)")
+    mk.add_argument("--critics", action="store_true", default=None,
+                    help="after the review loop, run four job-specific critics "
+                         "(continuity, payoff, filler, drop-off) on the realized cut; "
+                         "their disagreements become review markers. +4 small Claude "
+                         "calls per round, max 2 rounds")
+    mk.add_argument("--critic-effort", choices=["low", "medium", "high", "xhigh", "max"],
+                    default="low", help="reasoning effort for --critics (default low)")
+    mk.add_argument("--crossfade-ms", type=float, default=15.0,
+                    help="de-pop fade at every cut, in the rough render and the AE build "
+                         "(default 15; 0 = hard cuts as before)")
+    mk.add_argument("--lcut", action="store_true",
+                    help="rough render: where a line ends on a shout, let its audio run "
+                         "up to 0.35s under the next shot instead of chopping it")
     mk.add_argument("--no-markers", action="store_true",
                     help="skip the review markers (risky cut points, as Premiere sequence "
                          "markers, AE comp markers and ae/markers.csv)")
@@ -455,6 +476,11 @@ def main(argv: list[str] | None = None) -> None:
                        proxy=not args.no_proxy,
                        caption_fix=not args.no_caption_fix,
                        boundary=bool(pick(args.boundary, "boundary", False)),
+                       trim=bool(pick(args.trim, "trim", False)),
+                       lessons=bool(pick(args.lessons, "lessons", False)),
+                       critics=bool(pick(args.critics, "critics", False)),
+                       critic_effort=args.critic_effort,
+                       crossfade=max(0.0, args.crossfade_ms) / 1000.0, lcut=args.lcut,
                        markers=not args.no_markers,
                        marker_threshold=args.marker_threshold,
                        transcriber=args.transcriber,
