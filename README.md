@@ -149,6 +149,29 @@ the flags above are the ones a cut actually turns on. the rest, grouped by what 
 - `--words-per-line`: caption grouping (default `3`).
 - `--silence-pad`: breath in seconds left around each phrase when dead space is cut (default `0.3`; smaller is tighter).
 
+**review markers and post-selection stages** (each measured with `refire eval` against
+finished edits, see [learning from your edits](#learning-from-your-finished-edits-refire-learn);
+numbers in `MAKEOVER_REPORT.md`)
+- `--no-markers` / `--marker-threshold <0-1>`: review markers are **on** -- every clip edge
+  gets a risk (the probability you will move it, learned from your past edits) and the
+  risky ones become Premiere sequence markers, After Effects Master comp markers and
+  `ae/markers.csv`, each with a reason ("end may cut off the reaction -- loudness z=1.8").
+  default `0.33`, about 10 per video; lower = more markers.
+- `--boundary`: pull clip starts back to where the thought began and push ends through
+  the reaction tail, capped by your past edits. **off** -- it raised fix_cost in eval.
+- `--trim`: cut filler/off-topic lines inside kept clips (local ollama labels + a "no
+  later line depends on it" test, never mid-word). **off** -- it barely found your cuts.
+- `--critics` / `--critic-effort`: four job-specific Claude critics (continuity, payoff,
+  filler, drop-off) read the realized cut and return span edits; where they disagree
+  you get a review marker instead of a change. ~4 small calls per round, max 2 rounds.
+  **off** -- in eval their edits landed where you had not cut (fix_cost +51s).
+- `--lessons`: show the director and critic a few "reFire proposed X, you did Y" pairs
+  from your past edits.
+- `--crossfade-ms <ms>`: de-pop fade at every cut in the rough render and the AE build
+  (default `15`; `0` = hard cuts). Premiere cuts stay hard (no scriptable audio fades).
+- `--lcut`: rough render only -- where a line ends on a shout, its audio runs up to
+  0.35s under the next shot instead of being chopped.
+
 **render and output**
 - `--zoom-sens`: punch-zoom amount (default `1.0`; `>1` is more and earlier).
 - `--bgm`: pick the music bed instead of taking a random one from the assets folder.
@@ -176,6 +199,9 @@ captions: emph        # caption only the lines that are hard to hear
 # My Style
 ...everything from here down is fed to the director and the critic verbatim...
 ```
+
+`boundary`, `trim`, `critics` and `lessons` (all `true`/`false`) switch on the matching
+stages above.
 
 every key is also a plain cli flag, and **the flag wins** -- `--style ryukStyl.md --pace 1.0` reads the document but overrides its pace. a `.md` with no frontmatter is prose-only, exactly like passing the text inline. unknown keys and bad values warn and are skipped rather than killing a run that already spent director calls.
 
@@ -205,6 +231,52 @@ refire fixcaps run/<vod_id>/<run>/ae/manifest.json \
 ```
 
 every progress line carries elapsed minutes, so a run tells you which stage it spent them in.
+
+#### learning from your finished edits: `refire learn`
+the clip-selection twin of the caption corrections file. after you finish editing a
+video in premiere, run
+
+```bash
+refire learn <vod_id>          # or --all
+```
+
+it finds the `.prproj` that imported that run's proxies (searching `--projects-dir`,
+default `~/Desktop/iphone`, or env `REFIRE_PROJECTS`; `--project` to name one), reads it
+**in memory only** (never re-saved), picks the sequence you exported (top-level, most
+footage; the choice and reason are logged), flattens nested sequences, and maps every
+item back to VOD seconds through the manifest's `sources[]`, the proxy file names, the
+raw vod or `rough.mp4`. memes, sfx and graphics go to a separate `overlays` list. then it
+diffs your final against what reFire proposed and labels every difference:
+`start_late`, `start_early`, `end_early`, `end_late`, `interior_cut`, `restored`,
+`dropped`, `added`, `merged`, `reordered`, each with the transcript (plus 10s of
+context), loudness/chat z over the span, and the beat role/energy reFire had given it
+(`--motion` adds on-screen motion, slower).
+
+writes `run/<vod_id>/clip_diff.json`, `run/clip_lessons_<game>.json` (per-label counts,
+median deltas, examples) and `run/clip_lessons_report.md` (where reFire goes wrong
+most). safe to re-run; it never touches its inputs. the review-marker model, the
+boundary caps, and the trim/critic/director few-shots all read these files, so every
+edit you finish and `learn` makes the next run's markers sharper. a run whose `run/`
+folder was deleted is rebuilt from the proxy names the project still references.
+
+#### scoring reFire against your edits: `refire eval`
+
+```bash
+refire eval --all                      # replay the shipped cuts, score them
+refire eval --all --markers            # + how often markers land on a real fix
+refire eval --all --boundary --trim    # what those stages would have saved
+refire eval <vod_id> --manifest run/<vod_id>/<run>/ae/manifest.json   # a fresh make
+```
+
+`fix_cost` is seconds of human correction: `|start delta| + |end delta|` per clip plus
+interior cuts, dropped clips and footage you added. scoring is **leave-one-out**:
+every lesson a stage reads while scoring vod X comes from the other vods' edits only.
+no whisper (transcripts are cached), no claude unless `--critics`. results land in
+`run/eval/<timestamp>.json` with a table against the previous eval and the latest one
+tagged `--tag baseline`.
+
+**day to day:** `refire make ...` -> build in premiere, jump marker to marker and fix
+what they point at, add your memes/sfx -> `refire learn <vod_id>`.
 
 ### loudest moments across a month of streams: `refire loud`
 
@@ -268,6 +340,10 @@ output files are saved under `run/<vod_id>/`:
   by `refire srt` for the premiere panel (and anything else that eats srt).
 - `ae/timeline.tsv`, `ae/captions.recutN.srt` - written by the premiere panel's
   **recaption** button: what is on v1 right now, and the captions rebuilt to match.
+- `ae/markers.csv` - the review markers in premiere master-timeline time, with reasons.
+- `run/<vod_id>/cost.json` - every claude call per run: stage, model, tokens.
+- `run/<vod_id>/clip_diff.json`, `run/clip_lessons_<game>.json`,
+  `run/clip_lessons_report.md`, `run/eval/` - written by `refire learn` / `refire eval`.
 
 ---
 
@@ -375,7 +451,7 @@ python -m refire srt run\<vod>\<run>\ae\manifest.json --offset -0.15
 ## testing
 
 ```bash
-uv run pytest        # 311 tests, ~2s, no network and no gpu
+uv run pytest        # 361 tests, ~3s, no network and no gpu
 ```
 
 ---

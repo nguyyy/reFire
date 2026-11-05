@@ -21,7 +21,12 @@ regress** (fix_cost vs the previous `run/eval/*.json`, leave-one-out).
 | budget | `narrative._trim_to_budget` | drops by role priority |
 | pacing audit | `pacing.audit` | `skipped_build`, `severed_exchange`, ... fed to the critic as facts |
 | **critic loop** | `pipeline.make` loop -> `director.review` -> `Review.apply` -> re-`cast` | `--review-rounds` (2), CLI session resume |
+| boundary stage (off) | `boundary.refine_sections` | `--boundary`: thread-head starts, reaction tails, merges; caps from lessons |
+| trim stage (off) | `trim.trim_sections` (ollama) | `--trim`: writes each clip's `cut`, removed via `compress_silence(exclude=)` |
+| structured critics (off) | `critics.review_sections` (Claude, parallel) | `--critics`: continuity/payoff/filler/dropoff -> arbiter; conflicts -> markers |
 | dead air | `select.compress_silence` (used by cast, `ae_export`, `assemble`) | per-clip `keep` spans |
+| review markers (on) | `markers.annotate_manifest` after `build_manifest` | edge risk = naive Bayes fit on `clip_diff.json` boundaries; `clip.markers`, `ae/markers.csv` |
+| de-pop / L-cuts | `render.audio_graph` (rough), `ae/reFire.jsx dipAudio` | `--crossfade-ms` (15, on), `--lcut` (off) |
 | overlays / bgm | `overlay.pick_overlays`, `pick_bgm` | |
 | **manifest** | `ae_export.build_manifest` | `run/<vod>/<run>/ae/manifest.json`, DNxHR proxies `p_dnxhr_sq_<a>-<b>.mov` (offset `a` = clip start - 2s) |
 | captions | `caption_fix.fix_manifest` | learns into `run/corrections_<game>.json` |
@@ -40,11 +45,25 @@ diffs it against what reFire proposed (`diff.py`), and writes `run/<vod>/clip_di
 + `run/clip_lessons_<game>.json` + `run/clip_lessons_report.md`. `refire eval` scores a
 cut against those finals (`fix_cost`, leave-one-out) into `run/eval/<timestamp>.json`.
 
+Day to day: `refire make` -> edit in Premiere using the markers -> `refire learn <vod>`.
+learn finds the project by the run's proxy paths under `REFIRE_PROJECTS`
+(default `~/Desktop/iphone`), so a finished edit is ingested with no extra input, the
+same way `corrections_<game>.json` grows. Lost run folders are rebuilt from proxy names
+(`p_<profile>_<clip start - 2>-<clip end + 10>.mov`); `voiced` is gated by project date
+(compress_silence only kept Silero audio from 2026-09-13).
+
+Data facts that shaped the defaults (2026-11, 4 edits): ~80% of edges are left alone, so
+blanket boundary rules lose; whole-utterance cuts are 3.6%; the editor cannot extend a
+start more than PROXY_PAD (2s) inside a proxy, which caps observed `start_late`.
+
 ## Conventions
 
 - **uv only**: `uv run pytest`, `uv run refire ...`. The package dir is `reFire/` but
   imports as `refire` (`pyproject.toml` package-dir).
 - **Console is cp1252**: anything printed during a run must be ASCII.
+- **Git on this case-insensitive checkout**: the index tracks `refire/...`. Stage edits
+  with `git add -u` and new files as `git add reFire/<file>`, then check
+  `git status --short` is clean -- either spelling alone silently skips the other kind.
 - Tests are pure local (no network/GPU/LLM), whole suite in a few seconds.
 - No Claude call inside a per-clip or per-chunk loop. Bulk work -> ollama or
   deterministic code; Claude only for whole-cut reasoning. Log every Claude call to

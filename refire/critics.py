@@ -20,7 +20,10 @@ never mid-word). At most MAX_ROUNDS rounds, stopping early when nothing changes.
 Few-shot examples come from clip_lessons (the caller passes leave-one-out lessons).
 
 Claude, not ollama: this is whole-cut judgment, one call per critic per round, at the
-run's own model and a low effort (`--critic-effort`). Off by default (`--critics`).
+run's own model and a low effort (`--critic-effort`). Off by default (`--critics`):
+measured 2026-11 (LOO, 4 finished edits) it RAISED fix_cost 863.2 -> 914.1s -- 46 edits
+applied, mostly continuity start-extensions and drop-off cuts the editor never made,
+zero conflicts -- for 32 calls / ~265k processed input tokens ($0.64 notional per VOD).
 """
 from __future__ import annotations
 

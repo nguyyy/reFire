@@ -115,6 +115,8 @@ def _latest(eval_dir, tag=None, before=None) -> dict | None:
         if before and f.name >= before:
             continue
         d = json.loads(f.read_text(encoding="utf-8"))
+        if "per_vod" not in d:                  # cost.json lives here too
+            continue
         if tag is None or d.get("tag") == tag:
             return d
     return None
@@ -162,9 +164,13 @@ def evaluate(vod=None, stages=(), run_root="run", vods_dir="vods", tag="",
                 if manifest_path else None)
     if manifest and len(diffs) != 1:
         raise SystemExit("--manifest scores one VOD: pass its vod_id too")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    if "critics" in stages:                    # the one stage that spends Claude tokens
+        from .. import director
+        director.COST_LOG = {"path": Path(run_root) / "eval" / "cost.json", "run": stamp}
+        (Path(run_root) / "eval").mkdir(parents=True, exist_ok=True)
     per = [score_vod(d, stages, run_root, vods_dir, manifest, marker_threshold)
            for d in diffs]
-    stamp = time.strftime("%Y%m%d-%H%M%S")
     cur = {"stamp": stamp, "tag": tag, "stages": list(stages),
            "loo": True, "per_vod": per, "overall": overall(per)}
     eval_dir = Path(run_root) / "eval"
