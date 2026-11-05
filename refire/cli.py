@@ -214,12 +214,14 @@ def main(argv: list[str] | None = None) -> None:
     mk.add_argument("--lcut", action="store_true",
                     help="rough render: where a line ends on a shout, let its audio run "
                          "up to 0.35s under the next shot instead of chopping it")
-    mk.add_argument("--no-markers", action="store_true",
-                    help="skip the review markers (risky cut points, as Premiere sequence "
-                         "markers, AE comp markers and ae/markers.csv)")
-    mk.add_argument("--marker-threshold", type=float, default=0.33,
-                    help="risk (0-1) at or above which a cut point gets a review marker; "
-                         "lower = more markers (default 0.33, ~10 per video)")
+    mk.add_argument("--markers", action="store_true",
+                    help="review markers on the cut points you are most likely to move "
+                         "(Premiere sequence markers, AE comp markers, ae/markers.csv), "
+                         "learned from your past edits. Off by default: no better than "
+                         "chance yet in `refire eval --markers`")
+    mk.add_argument("--marker-threshold", type=float, default=0.26,
+                    help="with --markers: risk (0-1) at or above which a cut point gets "
+                         "a marker; lower = more (default 0.26, ~10 per video)")
     mk.add_argument("--progress-file", default=None,
                     help="write {pct,msg,done} JSON here for a GUI progress bar")
 
@@ -319,6 +321,9 @@ def main(argv: list[str] | None = None) -> None:
                          "(env REFIRE_PROJECTS; default ~/Desktop/iphone). Read-only")
     ln.add_argument("--run-root", default="run", help="reFire run folder (default run)")
     ln.add_argument("--cache-dir", default="vods", help="VOD/chat cache (default vods)")
+    ln.add_argument("--game", default="",
+                    help="game for runs whose cache has no glossary file (lessons are "
+                         "pooled per game), e.g. 'genshin impact'")
     ln.add_argument("--motion", action="store_true",
                     help="also measure on-screen motion over every diff span (decodes "
                          "the VOD, a few minutes per video)")
@@ -361,7 +366,7 @@ def main(argv: list[str] | None = None) -> None:
         from .learn.lessons import learn
         learn(None if args.all else args.vod_id, project=args.project,
               run_root=args.run_root, projects_dir=args.projects_dir,
-              vods_dir=args.cache_dir, motion=args.motion)
+              vods_dir=args.cache_dir, motion=args.motion, game=args.game)
         return
 
     if args.cmd == "fixcaps":
@@ -481,7 +486,7 @@ def main(argv: list[str] | None = None) -> None:
                        critics=bool(pick(args.critics, "critics", False)),
                        critic_effort=args.critic_effort,
                        crossfade=max(0.0, args.crossfade_ms) / 1000.0, lcut=args.lcut,
-                       markers=not args.no_markers,
+                       markers=args.markers,
                        marker_threshold=args.marker_threshold,
                        transcriber=args.transcriber,
                        whisper_model=args.whisper_model,

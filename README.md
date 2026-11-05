@@ -152,11 +152,12 @@ the flags above are the ones a cut actually turns on. the rest, grouped by what 
 **review markers and post-selection stages** (each measured with `refire eval` against
 finished edits, see [learning from your edits](#learning-from-your-finished-edits-refire-learn);
 numbers in `MAKEOVER_REPORT.md`)
-- `--no-markers` / `--marker-threshold <0-1>`: review markers are **on** -- every clip edge
-  gets a risk (the probability you will move it, learned from your past edits) and the
-  risky ones become Premiere sequence markers, After Effects Master comp markers and
+- `--markers` / `--marker-threshold <0-1>`: review markers -- every clip edge gets a risk
+  (the probability you will move it, learned from your past edits) and the risky ones
+  become Premiere sequence markers, After Effects Master comp markers and
   `ae/markers.csv`, each with a reason ("end may cut off the reaction -- loudness z=1.8").
-  default `0.33`, about 10 per video; lower = more markers.
+  threshold default `0.26`, about 10 per video. **off** -- on four edits they were no
+  better than chance; the model retrains on every `refire learn`.
 - `--boundary`: pull clip starts back to where the thought began and push ends through
   the reaction tail, capped by your past edits. **off** -- it raised fix_cost in eval.
 - `--trim`: cut filler/off-topic lines inside kept clips (local ollama labels + a "no
@@ -275,8 +276,10 @@ no whisper (transcripts are cached), no claude unless `--critics`. results land 
 `run/eval/<timestamp>.json` with a table against the previous eval and the latest one
 tagged `--tag baseline`.
 
-**day to day:** `refire make ...` -> build in premiere, jump marker to marker and fix
-what they point at, add your memes/sfx -> `refire learn <vod_id>`.
+**day to day:** `refire make ...` -> build in premiere, edit, add your memes/sfx ->
+`refire learn <vod_id>` -> `refire eval --all --markers` now and then. once that shows
+markers beating "marking every edge", add `--markers` to `make` and jump marker to
+marker instead of rewatching.
 
 ### loudest moments across a month of streams: `refire loud`
 

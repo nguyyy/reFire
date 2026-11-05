@@ -25,7 +25,7 @@ regress** (fix_cost vs the previous `run/eval/*.json`, leave-one-out).
 | trim stage (off) | `trim.trim_sections` (ollama) | `--trim`: writes each clip's `cut`, removed via `compress_silence(exclude=)` |
 | structured critics (off) | `critics.review_sections` (Claude, parallel) | `--critics`: continuity/payoff/filler/dropoff -> arbiter; conflicts -> markers |
 | dead air | `select.compress_silence` (used by cast, `ae_export`, `assemble`) | per-clip `keep` spans |
-| review markers (on) | `markers.annotate_manifest` after `build_manifest` | edge risk = naive Bayes fit on `clip_diff.json` boundaries; `clip.markers`, `ae/markers.csv` |
+| review markers (off) | `markers.annotate_manifest` after `build_manifest` | edge risk = naive Bayes fit on `clip_diff.json` boundaries; `clip.markers`, `ae/markers.csv` |
 | de-pop / L-cuts | `render.audio_graph` (rough), `ae/reFire.jsx dipAudio` | `--crossfade-ms` (15, on), `--lcut` (off) |
 | overlays / bgm | `overlay.pick_overlays`, `pick_bgm` | |
 | **manifest** | `ae_export.build_manifest` | `run/<vod>/<run>/ae/manifest.json`, DNxHR proxies `p_dnxhr_sq_<a>-<b>.mov` (offset `a` = clip start - 2s) |

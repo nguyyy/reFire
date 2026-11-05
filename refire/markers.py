@@ -5,6 +5,13 @@ finished edits: `refire learn` stores each proposed clip's boundary features and
 the human moved that edge (clip_diff.json `boundaries`); `fit` turns those rows into a
 naive-Bayes model. With no history yet the measured 2026-11 priors below are used.
 
+OFF by default (`make --markers`). Measured 2026-11, leave-one-out over 4 finished
+edits, cold-open teasers excluded: precision 0.24-0.42 against 0.30 for marking every
+edge, not monotonic in the threshold -- no better than chance yet. (An earlier 0.57 was
+an artifact: teaser edges are short and mid-sentence, and "hit" edits through the VOD
+time they share with their beats while sitting at the start of the video.) The model
+retrains from every `refire learn`, so re-check with `refire eval --all --markers`.
+
 Features are cheap and deterministic, measured over 196 kept clips in 4 finished edits
 (edit rate when the feature is on vs off):
   start: speech within 1s before the cut  16% vs 4%  (the clip opens mid-thought)
@@ -38,39 +45,39 @@ REF = re.compile(r"^(he|she|they|it|that|this|those|these|him|her|them|again|wai
 # fallback when no finished edits exist yet: `fit` over the 2026-11 data (196 clips, 4
 # VODs), as prior + {feature: (P(on|fix), P(on|no fix))}
 DEFAULT: dict = {
-    "start_late": {"prior": 0.106, "p": {
-        "speech_before_03": (0.591, 0.287),
-        "speech_before_1": (0.773, 0.478),
-        "referent": (0.364, 0.236),
-        "loud_before": (0.318, 0.298),
+    "start_late": {"prior": 0.084, "p": {
+        "speech_before_03": (0.529, 0.291),
+        "speech_before_1": (0.765, 0.486),
+        "referent": (0.294, 0.229),
+        "loud_before": (0.176, 0.297),
     }},
-    "start_early": {"prior": 0.106, "p": {
-        "speech_before_03": (0.273, 0.326),
-        "speech_before_1": (0.273, 0.539),
-        "referent": (0.273, 0.247),
-        "loud_before": (0.318, 0.298),
+    "start_early": {"prior": 0.079, "p": {
+        "speech_before_03": (0.375, 0.307),
+        "speech_before_1": (0.375, 0.523),
+        "referent": (0.375, 0.222),
+        "loud_before": (0.375, 0.278),
     }},
-    "end_early": {"prior": 0.136, "p": {
-        "speech_after_03": (0.393, 0.262),
-        "speech_after_1": (0.75, 0.547),
-        "no_terminal": (0.286, 0.105),
-        "loud_end": (0.429, 0.238),
-        "chat_after_1": (0.429, 0.326),
-        "chat_after_2": (0.179, 0.099),
+    "end_early": {"prior": 0.126, "p": {
+        "speech_after_03": (0.28, 0.269),
+        "speech_after_1": (0.64, 0.551),
+        "no_terminal": (0.16, 0.108),
+        "loud_end": (0.36, 0.24),
+        "chat_after_1": (0.4, 0.329),
+        "chat_after_2": (0.12, 0.096),
     }},
-    "end_late": {"prior": 0.081, "p": {
-        "speech_after_03": (0.176, 0.29),
-        "speech_after_1": (0.588, 0.574),
-        "no_terminal": (0.176, 0.126),
-        "loud_end": (0.176, 0.273),
-        "chat_after_1": (0.294, 0.344),
-        "chat_after_2": (0.059, 0.115),
+    "end_late": {"prior": 0.074, "p": {
+        "speech_after_03": (0.2, 0.277),
+        "speech_after_1": (0.6, 0.559),
+        "no_terminal": (0.2, 0.107),
+        "loud_end": (0.2, 0.26),
+        "chat_after_1": (0.333, 0.339),
+        "chat_after_2": (0.067, 0.102),
     }},
 }
-THRESHOLD = 0.33      # --marker-threshold default: LOO eval 2026-11, 9.5/video at 0.57
-                      # precision (marking every edge: 0.30)
+THRESHOLD = 0.26      # --marker-threshold default: ~11/video in the 2026-11 LOO eval
 NEAR_S = 3.0          # a marker "hits" an edit within this many VOD seconds
 MIN_ROWS = 60         # fewer training boundaries than this -> DEFAULT
+COLD_OPEN = "Cold Open"   # narrative.cast's section title for the teaser / stack
 
 
 def features(ctx, ks: float, ke: float) -> tuple[dict, dict, dict]:
@@ -142,18 +149,27 @@ def risk(model: dict, kind: str, feats: dict) -> tuple[float, str | None]:
     return 1 / (1 + math.exp(-lo)), top
 
 
+def _gap(g: float, where: str) -> str:
+    # the visible edge carries compress_silence's breath pad, so the neighbouring word can
+    # overlap it -- that reads as "runs straight into", not as a negative gap
+    if g < 0.1:
+        return "speech runs straight into the cut" if where == "before" else \
+            "speech runs straight past the cut"
+    return f"speech {g:.1f}s {where} the cut"
+
+
 def _reason(top: str | None, kind: str, info: dict) -> str:
     if kind == "start_early":
         return "start may include lead-in -- consider trimming in"
     if kind == "end_late":
         return "end may overstay -- consider trimming out"
     return {
-        "speech_before_03": f"start may be mid-thought -- speech {info['gap_before']:.1f}s before the cut",
-        "speech_before_1": f"start may be mid-thought -- speech {info['gap_before']:.1f}s before the cut",
+        "speech_before_03": "start may be mid-thought -- " + _gap(info["gap_before"], "before"),
+        "speech_before_1": "start may be mid-thought -- " + _gap(info["gap_before"], "before"),
         "referent": f"opens on '{info['first']}' -- the setup may be earlier",
         "loud_before": f"start may miss the build-up -- loud z={info['loud_start']:.1f} just before",
-        "speech_after_03": f"end may cut off speech -- next word {info['gap_after']:.1f}s after",
-        "speech_after_1": f"end may cut off speech -- next word {info['gap_after']:.1f}s after",
+        "speech_after_03": "end may cut off speech -- " + _gap(info["gap_after"], "after"),
+        "speech_after_1": "end may cut off speech -- " + _gap(info["gap_after"], "after"),
         "no_terminal": "end lands mid-sentence -- the payoff may continue",
         "loud_end": f"end may cut off the reaction -- loudness z={info['loud_end']:.1f}",
         "chat_after_1": f"end may cut off the reaction -- chat still z={info['chat_end']:.1f}",
@@ -166,6 +182,9 @@ def clip_markers(clips, ctx, model, threshold: float = THRESHOLD) -> int:
     One marker per edge at most: the riskiest fix direction for that edge."""
     n = 0
     for c in clips:
+        if c.get("section") == COLD_OPEN:      # teasers are short and mid-line on purpose
+            c.setdefault("markers", [])
+            continue
         keep = c.get("keep") or [[c["start"], c["end"]]]
         ks, ke = keep[0][0], keep[-1][1]
         sf, ef, info = features(ctx, ks, ke)
@@ -226,10 +245,13 @@ def annotate_manifest(manifest_path, ctx, model, threshold: float = THRESHOLD) -
     mp = Path(manifest_path)
     man = json.loads(mp.read_text(encoding="utf-8"))
     n = 0
-    for c in man.get("clips") or []:
+    section = {k: sec.get("title", "") for sec in man.get("sections") or []
+               for k in sec.get("clip_indices") or []}
+    for ci, c in enumerate(man.get("clips") or []):
         a = float(c["start"])
         keep = [[a + x, a + y] for x, y in (c.get("keep") or [[0.0, c["end"] - a]])]
-        tmp = {"start": a, "end": float(c["end"]), "keep": keep}
+        tmp = {"start": a, "end": float(c["end"]), "keep": keep,
+               "section": section.get(ci, "")}
         n += clip_markers([tmp], ctx, model, threshold)
         dur = c.get("dur") or (c["end"] - a)
         for m in tmp["markers"]:

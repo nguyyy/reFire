@@ -23,10 +23,15 @@ EXAMPLES_PER_LABEL = 4
 VOICED_SINCE = time.mktime((2026, 9, 13, 0, 0, 0, 0, 0, -1))   # select.compress_silence(voiced=)
 
 
-def game_of(cache_dir) -> str:
-    """Game slug from the glossary file the run left behind ('genshin-impact')."""
+def game_of(cache_dir, fallback: str = "") -> str:
+    """Game slug from the glossary file the run left behind ('genshin-impact'), else the
+    `--game` the caller gave (a cache whose glossary pass failed has no file), else
+    'unknown'. Lessons pool by game, so a wrong 'unknown' splits the history."""
     g = sorted(Path(cache_dir).glob("glossary_*.json"))
-    return g[0].stem[len("glossary_"):] if g else "unknown"
+    if g:
+        return g[0].stem[len("glossary_"):]
+    from ..glossary import _slug
+    return _slug(fallback) if fallback.strip() else "unknown"
 
 
 def projects(projects_dir) -> list[Path]:
@@ -123,7 +128,7 @@ def boundary_rows(prop, res, ctx) -> list[dict]:
     kept = {c["i"] for c in res["clips"] if c["kept"]}
     out = []
     for c in prop:
-        if c["i"] not in kept:
+        if c["i"] not in kept or c.get("section") == "Cold Open":   # markers skip teasers too
             continue
         sf, ef, _info = features(ctx, c["keep"][0][0], c["keep"][-1][1])
         out.append({"i": c["i"], "start_feats": sf, "end_feats": ef,
@@ -133,7 +138,7 @@ def boundary_rows(prop, res, ctx) -> list[dict]:
 
 
 def learn_run(run_dir, project=None, projects_dir=DEFAULT_PROJECTS, vods_dir="vods",
-              index=None, quiet=False, motion=False) -> Path | None:
+              index=None, quiet=False, motion=False, game: str = "") -> Path | None:
     """One run (or orphan run key) -> run/<cache>/clip_diff.json. None if unpaired."""
     run_dir = Path(run_dir)
     key = run_key(run_dir)
@@ -176,7 +181,7 @@ def learn_run(run_dir, project=None, projects_dir=DEFAULT_PROJECTS, vods_dir="vo
     video = Path(vods_dir) / f"{cache_dir.name}.mp4"
     if motion and video.exists():
         add_motion(res["records"], video)
-    out = {"vod": cache_dir.name, "run": run_dir.name, "game": game_of(cache_dir),
+    out = {"vod": cache_dir.name, "run": run_dir.name, "game": game_of(cache_dir, game),
            "window_start": align.window_start(cache_dir),
            "project": str(project), "sequence": proj.seqs[uid]["name"],
            "sequence_reason": why, "align_methods": mapped["methods"],
@@ -324,7 +329,7 @@ def write_lessons(run_root="run") -> list[Path]:
 
 
 def learn(vod_id=None, project=None, run_root="run", projects_dir=DEFAULT_PROJECTS,
-          vods_dir="vods", motion=False) -> list[Path]:
+          vods_dir="vods", motion=False, game: str = "") -> list[Path]:
     """CLI body: diff one VOD (or every paired run, orphans included) then re-aggregate."""
     idx = None if project else project_index(projects_dir)
     runs = find_runs(run_root, vod_id)
@@ -335,7 +340,7 @@ def learn(vod_id=None, project=None, run_root="run", projects_dir=DEFAULT_PROJEC
         raise SystemExit(f"no reFire run found for {vod_id or 'any VOD'} under {run_root}")
     done = [p for r in runs
             if (p := learn_run(r, project, projects_dir, vods_dir, idx,
-                                motion=motion)) is not None]
+                                motion=motion, game=game)) is not None]
     if not done:
         print("[learn] nothing paired -- no lessons written")
         return []

@@ -200,8 +200,8 @@ def make(
     critic_effort: str = "low",   # those critics' effort -- they edit spans, they don't plan
     crossfade: float = 0.015,  # de-pop fade at every cut (rough render + AE), 0 = hard cuts
     lcut: bool = False,        # rough render: a shouted line's audio runs under the next shot
-    markers: bool = True,      # review markers on risky cut points (learned from past edits)
-    marker_threshold: float = 0.33,   # markers.THRESHOLD, literal since it's imported lazily
+    markers: bool = False,     # review markers on risky cut points, off: chance-level in eval
+    marker_threshold: float = 0.26,   # markers.THRESHOLD, literal since it's imported lazily
 
     transcriber: str = "local",
     whisper_model: str = DEFAULT_WHISPER_MODEL,
