@@ -20,6 +20,7 @@ from . import align, diff, prproj
 DEFAULT_PROJECTS = os.environ.get("REFIRE_PROJECTS",
                                   str(Path.home() / "Desktop" / "iphone"))
 EXAMPLES_PER_LABEL = 4
+VOICED_SINCE = time.mktime((2026, 9, 13, 0, 0, 0, 0, 0, -1))   # select.compress_silence(voiced=)
 
 
 def game_of(cache_dir) -> str:
@@ -63,6 +64,15 @@ def find_runs(run_root="run", vod_id=None) -> list[Path]:
     return out
 
 
+def voiced_of(cache_dir):
+    """Cached Silero regions (transcribe.speech_regions' file), or None -- never rescans."""
+    p = Path(cache_dir) / "speech.json"
+    if not p.exists():
+        return None
+    from ..transcribe import speech_regions
+    return speech_regions(Path(cache_dir) / "audio.wav", cache_path=p) or None
+
+
 def _words(cache_dir) -> list[dict]:
     p = Path(cache_dir) / "transcript.json"
     return json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
@@ -103,6 +113,25 @@ def add_motion(records, video) -> None:
                                       "max": round(max(inten[1:]), 2)}
 
 
+def boundary_rows(prop, res, ctx) -> list[dict]:
+    """Per kept clip: the features markers.py scores + which fix the human made."""
+    from ..markers import features
+    fixed = {}
+    for r in res["records"]:
+        if r["label"] in diff.BOUNDARY and r["clips"]:
+            fixed[(r["clips"][0], r["label"].split("_")[0])] = r["label"]
+    kept = {c["i"] for c in res["clips"] if c["kept"]}
+    out = []
+    for c in prop:
+        if c["i"] not in kept:
+            continue
+        sf, ef, _info = features(ctx, c["keep"][0][0], c["keep"][-1][1])
+        out.append({"i": c["i"], "start_feats": sf, "end_feats": ef,
+                    "start_label": fixed.get((c["i"], "start"), "ok"),
+                    "end_label": fixed.get((c["i"], "end"), "ok")})
+    return out
+
+
 def learn_run(run_dir, project=None, projects_dir=DEFAULT_PROJECTS, vods_dir="vods",
               index=None, quiet=False, motion=False) -> Path | None:
     """One run (or orphan run key) -> run/<cache>/clip_diff.json. None if unpaired."""
@@ -131,10 +160,11 @@ def learn_run(run_dir, project=None, projects_dir=DEFAULT_PROJECTS, vods_dir="vo
     if manifest:
         prop, prop_from = align.proposal(manifest), "manifest"
     else:
-        voiced = None
-        sp = cache_dir / "speech.json"
-        if sp.exists():
-            voiced = json.loads(sp.read_text(encoding="utf-8"))
+        # compress_silence only kept Silero-voiced audio from 2026-09-13 on; a cut built
+        # before that never had it, so re-deriving keep with it invents interior cuts.
+        # ponytail: dated by project mtime, the only date a lost run leaves behind
+        voiced = (voiced_of(cache_dir)
+                  if Path(project).stat().st_mtime >= VOICED_SINCE else None)
         media = [i["media"] for s in proj.seqs.values() for i in s["items"]
                  if i["media"] and in_run in align.norm(i["media"])]
         media += [p for p in _bin_media(proj) if in_run in align.norm(p)]
@@ -142,6 +172,7 @@ def learn_run(run_dir, project=None, projects_dir=DEFAULT_PROJECTS, vods_dir="vo
         prop_from = "proxy names" + (" + transcript keep" if words else " (no transcript)")
     ctx = _context(cache_dir, run_dir if manifest else None, vods_dir)
     res = diff.diff(prop, mapped["segments"], ctx)
+    res["boundaries"] = boundary_rows(prop, res, ctx)
     video = Path(vods_dir) / f"{cache_dir.name}.mp4"
     if motion and video.exists():
         add_motion(res["records"], video)

@@ -193,6 +193,9 @@ def make(
     cards: bool = True,       # section title cards in the AE master
     proxy: bool = True,       # all-intra proxies for AE instead of the long-GOP VOD
     caption_fix: bool = True,  # one claude pass over proper nouns in captions
+    boundary: bool = False,    # boundary stage (refire/boundary.py), off: raised fix_cost in eval
+    markers: bool = True,      # review markers on risky cut points (learned from past edits)
+    marker_threshold: float = 0.36,   # markers.THRESHOLD, literal since it's imported lazily
 
     transcriber: str = "local",
     whisper_model: str = DEFAULT_WHISPER_MODEL,
@@ -449,6 +452,19 @@ def make(
         sections = [{"title": "", "clips": picked}]
         clock.lap("flat select")
 
+    if boundary:
+        # between selection and render: pull starts back to the thread head, push ends through
+        # the reaction tail, merge near-adjacent clips. caps come from past edits
+        from .boundary import refine_sections
+        from .glossary import _slug
+        from .learn.diff import Context
+        from .learn.lessons import load_lessons
+        blog = refine_sections(sections, words, Context(words, audio_z, _chat_z),
+                               load_lessons(run_dir.parent, _slug(game) if game else ""),
+                               voiced=voiced, pad=silence_pad, snap=snap,
+                               keep_build=keep_build)
+        print(f"[boundary] {blog}")
+
     report(0.90, "selecting clips")
     flat_clips = [clip for sec in sections for clip in sec["clips"]]
 
@@ -468,6 +484,16 @@ def make(
                         silence_pad=silence_pad, cards=cards, proxy=proxy,
                         captions=captions, voiced=voiced)
     clock.lap("manifest")
+    if markers:
+        # flag the cut points an editor most likely has to move, so review is a jump list
+        # instead of a rewatch. model = past finished edits (refire learn), else priors
+        from . import markers as markers_mod
+        from .learn.diff import Context
+        from .learn.lessons import load_diffs
+        model = markers_mod.fit(markers_mod.training_rows(load_diffs(run_dir.parent)))
+        n = markers_mod.annotate_manifest(mp, Context(words, audio_z, _chat_z), model,
+                                          marker_threshold)
+        print(f"[markers] {n} review marker(s) -> {mp.parent / 'markers.csv'}")
     if caption_fix:
         # the transcriber never knew the game or the streamer's friends. first point captions exist
         # as lines, before premiere opens. timestamps/line count unchanged

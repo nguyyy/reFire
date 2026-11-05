@@ -49,12 +49,19 @@ def proposal(manifest: dict) -> list[dict]:
     `keep` is what actually reached V1 (build() places one trackItem per kept span);
     `start`/`end` is the clip envelope before dead-air removal.
     """
+    title = {}
+    for sec in manifest.get("sections") or []:
+        for k in sec.get("clip_indices") or []:
+            title[k] = sec.get("title", "")
+    clips = manifest.get("clips") or []
+    idx = {id(c): k for k, c in enumerate(clips)}
     out = []
     for i, c in enumerate(ordered_clips(manifest)):
         a, b = float(c["start"]), float(c["end"])
         keep = [[a + x, a + y] for x, y in (c.get("keep") or [[0.0, b - a]])]
         out.append({"i": i, "start": a, "end": b, "keep": keep,
-                    "role": c.get("role", ""), "src": c.get("src")})
+                    "role": c.get("role", ""), "src": c.get("src"),
+                    "section": title.get(idx.get(id(c)), "")})
     return out
 
 

@@ -188,6 +188,17 @@ def main(argv: list[str] | None = None) -> None:
     mk.add_argument("--no-caption-fix", action="store_true",
                     help="skip the Claude pass that repairs mistranscribed proper nouns "
                          "in the captions (character/place names, the streamer's friends)")
+    mk.add_argument("--boundary", action="store_true", default=None,
+                    help="boundary stage: pull clip starts back to where the thought "
+                         "began, push ends through the reaction tail (caps learned from "
+                         "your past edits). Off by default -- it did not lower fix_cost "
+                         "in `refire eval`")
+    mk.add_argument("--no-markers", action="store_true",
+                    help="skip the review markers (risky cut points, as Premiere sequence "
+                         "markers, AE comp markers and ae/markers.csv)")
+    mk.add_argument("--marker-threshold", type=float, default=0.36,
+                    help="risk (0-1) at or above which a cut point gets a review marker; "
+                         "lower = more markers (default 0.36, ~10 per video)")
     mk.add_argument("--progress-file", default=None,
                     help="write {pct,msg,done} JSON here for a GUI progress bar")
 
@@ -271,7 +282,66 @@ def main(argv: list[str] | None = None) -> None:
     ld.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     ld.add_argument("--compute-type", default="float16")
 
+    ln = sub.add_parser("learn",
+                        help="diff reFire's cut against your finished Premiere edit "
+                             "-> run/<vod>/clip_diff.json + run/clip_lessons_<game>.json")
+    ln.add_argument("vod_id", nargs="?", default=None,
+                    help="VOD number (omit with --all)")
+    ln.add_argument("--all", action="store_true",
+                    help="every run a project references, orphaned runs included")
+    ln.add_argument("--project", default=None,
+                    help=".prproj to read (default: search --projects-dir for the one "
+                         "that imported this run's media)")
+    from .learn.lessons import DEFAULT_PROJECTS
+    ln.add_argument("--projects-dir", default=DEFAULT_PROJECTS,
+                    help="folder of finished Premiere projects, searched recursively "
+                         "(env REFIRE_PROJECTS; default ~/Desktop/iphone). Read-only")
+    ln.add_argument("--run-root", default="run", help="reFire run folder (default run)")
+    ln.add_argument("--cache-dir", default="vods", help="VOD/chat cache (default vods)")
+    ln.add_argument("--motion", action="store_true",
+                    help="also measure on-screen motion over every diff span (decodes "
+                         "the VOD, a few minutes per video)")
+
+    ev = sub.add_parser("eval",
+                        help="score reFire's cut against your finished edits "
+                             "(fix_cost = seconds of human correction, leave-one-out)")
+    ev.add_argument("vod_id", nargs="?", default=None, help="VOD number (omit with --all)")
+    ev.add_argument("--all", action="store_true", help="every VOD with a clip_diff.json")
+    ev.add_argument("--manifest", default=None,
+                    help="score this manifest (a fresh `make` run) instead of replaying "
+                         "the recorded cut; needs a vod_id")
+    for st in ("boundary", "trim", "critics", "markers"):
+        ev.add_argument(f"--{st}", action="store_true",
+                        help=f"replay with the {st} stage switched on")
+    ev.add_argument("--marker-threshold", type=float, default=None,
+                    help="with --markers: risk at or above which an edge is flagged")
+    ev.add_argument("--tag", default="", help="label stored with the result "
+                    "('baseline' = what later evals compare against)")
+    ev.add_argument("--no-save", action="store_true", help="print only")
+    ev.add_argument("--run-root", default="run")
+    ev.add_argument("--cache-dir", default="vods")
+
     args = p.parse_args(argv)
+
+    if args.cmd == "eval":
+        if not args.all and not args.vod_id:
+            p.error("eval needs a vod_id or --all")
+        from .learn.evaluate import STAGES, evaluate
+        evaluate(None if args.all else args.vod_id,
+                 stages=[s for s in STAGES if getattr(args, s)],
+                 run_root=args.run_root, vods_dir=args.cache_dir, tag=args.tag,
+                 manifest_path=args.manifest, save=not args.no_save,
+                 marker_threshold=args.marker_threshold)
+        return
+
+    if args.cmd == "learn":
+        if not args.all and not args.vod_id:
+            p.error("learn needs a vod_id or --all")
+        from .learn.lessons import learn
+        learn(None if args.all else args.vod_id, project=args.project,
+              run_root=args.run_root, projects_dir=args.projects_dir,
+              vods_dir=args.cache_dir, motion=args.motion)
+        return
 
     if args.cmd == "fixcaps":
         from .caption_fix import fix_manifest
@@ -384,6 +454,9 @@ def main(argv: list[str] | None = None) -> None:
                        cards=not args.no_cards and knobs.get("cards", True),
                        proxy=not args.no_proxy,
                        caption_fix=not args.no_caption_fix,
+                       boundary=bool(pick(args.boundary, "boundary", False)),
+                       markers=not args.no_markers,
+                       marker_threshold=args.marker_threshold,
                        transcriber=args.transcriber,
                        whisper_model=args.whisper_model,
                        batch_size=args.batch_size,

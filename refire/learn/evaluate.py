@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import align, diff, lessons
 
-STAGES = ("boundary", "trim", "critics")
+STAGES = ("boundary", "trim", "critics", "markers")
 
 
 def rekeep(clips, words, voiced, changed) -> list[dict]:
@@ -35,7 +35,8 @@ def rekeep(clips, words, voiced, changed) -> list[dict]:
     return out
 
 
-def apply_stages(prop, stages, ctx, cache_dir, loo, words, voiced, log=None):
+def apply_stages(prop, stages, ctx, cache_dir, loo, words, voiced, log=None,
+                 marker_model=None, marker_threshold=None):
     """The replay transform: reFire's recorded cut -> what the switched-on stages make of it.
     Stage modules are imported lazily so a baseline eval never loads them."""
     log = log if log is not None else {}
@@ -50,24 +51,39 @@ def apply_stages(prop, stages, ctx, cache_dir, loo, words, voiced, log=None):
     if "critics" in stages:
         from ..critics import replay_critics
         prop, log["critics"] = replay_critics(prop, ctx, loo, cache_dir)
+    if "markers" in stages:
+        from .. import markers
+        log["markers"] = markers.clip_markers(
+            prop, ctx, marker_model or markers.DEFAULT,
+            markers.THRESHOLD if marker_threshold is None else marker_threshold)
     return prop, log
 
 
 def score_vod(d: dict, stages=(), run_root="run", vods_dir="vods",
-              manifest: dict | None = None) -> dict:
+              manifest: dict | None = None, marker_threshold=None) -> dict:
     cache_dir = Path(run_root) / d["vod"]
     ctx = lessons._context(cache_dir, Path(run_root) / d["vod"] / d["run"], vods_dir)
     words = ctx.words
     loo = lessons.load_lessons(run_root, d["game"], exclude=(d["vod"],)) or {}
     prop = align.proposal(manifest) if manifest else d["proposal"]
-    prop, log = apply_stages(prop, stages, ctx, cache_dir, loo, words, lessons.voiced_of(cache_dir))
+    model = None
+    if "markers" in stages:                    # trained on the OTHER VODs' edits only
+        from .. import markers
+        model = markers.fit(markers.training_rows(lessons.load_diffs(run_root),
+                                                  exclude=(d["vod"],)))
+    prop, log = apply_stages(prop, stages, ctx, cache_dir, loo, words,
+                             lessons.voiced_of(cache_dir), marker_model=model,
+                             marker_threshold=marker_threshold)
     res = diff.diff(prop, d["final"], ctx)
     out = {"vod": d["vod"], "proposal_from": "manifest arg" if manifest
            else d.get("proposal_from", "manifest"), **res["summary"], "stage_log": log}
-    if any(c.get("markers") for c in prop):
+    if "markers" in stages:
         from ..markers import marker_score
         out["markers"] = marker_score([m for c in prop for m in c.get("markers", [])],
                                       res["records"])
+        edges = [{"vod": c["keep"][0][0]} for c in prop] + [{"vod": c["keep"][-1][1]}
+                                                            for c in prop]
+        out["markers"]["base_precision"] = marker_score(edges, res["records"])["precision"]
     return out
 
 
@@ -84,6 +100,12 @@ def overall(per: list[dict]) -> dict:
     out["mean_abs_boundary_err"] = _mean(errs)
     out["unchanged_pct"] = _mean([p["unchanged_pct"] for p in per])
     out["markers_needed"] = sum(p["markers_needed"] for p in per)
+    ms = [p["markers"] for p in per if p.get("markers")]
+    if ms:
+        out["markers"] = {"per_video": _mean([m["n"] for m in ms]),
+                          "precision": _mean([m["precision"] for m in ms]),
+                          "base_precision": _mean([m["base_precision"] for m in ms]),
+                          "recall_s": _mean([m["recall_s"] for m in ms])}
     return out
 
 
@@ -122,11 +144,16 @@ def table(cur: dict, prev: dict | None, base: dict | None) -> str:
             bv = base["overall"]["total"] if base else None
         lines.append(f"{vod:<24}{v:>10}{str(pv if pv is not None else '-'):>10}"
                      f"{str(bv if bv is not None else '-'):>10}{dr:>9}{ad:>7}")
+    mk = cur["overall"].get("markers")
+    if mk:
+        lines.append(f"markers: {mk['per_video']}/video, precision {mk['precision']} "
+                     f"(marking every edge: {mk['base_precision']}), "
+                     f"recall {mk['recall_s']} of fix_cost seconds")
     return "\n".join(lines)
 
 
 def evaluate(vod=None, stages=(), run_root="run", vods_dir="vods", tag="",
-             manifest_path=None, save=True) -> dict:
+             manifest_path=None, save=True, marker_threshold=None) -> dict:
     diffs = [d for d in lessons.load_diffs(run_root)
              if vod is None or d["vod"].split("@")[0] == str(vod) or d["vod"] == str(vod)]
     if not diffs:
@@ -135,7 +162,8 @@ def evaluate(vod=None, stages=(), run_root="run", vods_dir="vods", tag="",
                 if manifest_path else None)
     if manifest and len(diffs) != 1:
         raise SystemExit("--manifest scores one VOD: pass its vod_id too")
-    per = [score_vod(d, stages, run_root, vods_dir, manifest) for d in diffs]
+    per = [score_vod(d, stages, run_root, vods_dir, manifest, marker_threshold)
+           for d in diffs]
     stamp = time.strftime("%Y%m%d-%H%M%S")
     cur = {"stamp": stamp, "tag": tag, "stages": list(stages),
            "loo": True, "per_vod": per, "overall": overall(per)}
