@@ -199,3 +199,25 @@ def test_lessons_aggregate_leave_one_out(tmp_path):
     loo = lessons.load_lessons(tmp_path, "g", exclude=("A",))
     assert loo["labels"]["end_early"]["median_delta"] == 6.0
     assert {e["vod"] for e in loo["labels"]["end_early"]["examples"]} == {"B"}
+
+
+def _diff_file(root, vod, prop, final, game="g"):
+    from refire.learn import diff as D
+    (root / vod).mkdir(parents=True, exist_ok=True)
+    res = D.diff(prop, final)
+    (root / vod / "clip_diff.json").write_text(json.dumps({
+        "vod": vod, "run": "r", "game": game, "project": "p.prproj", "sequence": "s",
+        "proposal": prop, "final": final, **res}))
+
+
+def test_eval_replays_scores_and_compares(tmp_path, capsys):
+    from refire.learn import evaluate
+    _diff_file(tmp_path, "A", [_clip(0, 10, 20)], [_seg(8, 20, 0)])          # start_late 2
+    _diff_file(tmp_path, "B", [_clip(0, 10, 20)], [_seg(10, 20, 0)])         # perfect
+    base = evaluate.evaluate(run_root=tmp_path, tag="baseline")
+    assert base["overall"]["total"] == 2.0
+    assert [p["fix_cost"]["total"] for p in base["per_vod"]] == [2.0, 0.0]
+    again = evaluate.evaluate(vod="A", run_root=tmp_path)
+    out = capsys.readouterr().out
+    assert again["per_vod"][0]["vod"] == "A" and "baseline" in out
+    assert len(list((tmp_path / "eval").glob("*.json"))) >= 1
