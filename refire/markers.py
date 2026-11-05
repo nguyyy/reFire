@@ -67,8 +67,8 @@ DEFAULT: dict = {
         "chat_after_2": (0.059, 0.115),
     }},
 }
-THRESHOLD = 0.36      # --marker-threshold default: LOO eval 2026-11, 9.75/video at 0.60
-                      # precision (marking every edge: 0.32)
+THRESHOLD = 0.33      # --marker-threshold default: LOO eval 2026-11, 9.5/video at 0.57
+                      # precision (marking every edge: 0.30)
 NEAR_S = 3.0          # a marker "hits" an edit within this many VOD seconds
 MIN_ROWS = 60         # fewer training boundaries than this -> DEFAULT
 

@@ -195,7 +195,7 @@ def make(
     caption_fix: bool = True,  # one claude pass over proper nouns in captions
     boundary: bool = False,    # boundary stage (refire/boundary.py), off: raised fix_cost in eval
     markers: bool = True,      # review markers on risky cut points (learned from past edits)
-    marker_threshold: float = 0.36,   # markers.THRESHOLD, literal since it's imported lazily
+    marker_threshold: float = 0.33,   # markers.THRESHOLD, literal since it's imported lazily
 
     transcriber: str = "local",
     whisper_model: str = DEFAULT_WHISPER_MODEL,

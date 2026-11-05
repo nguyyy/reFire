@@ -196,9 +196,9 @@ def main(argv: list[str] | None = None) -> None:
     mk.add_argument("--no-markers", action="store_true",
                     help="skip the review markers (risky cut points, as Premiere sequence "
                          "markers, AE comp markers and ae/markers.csv)")
-    mk.add_argument("--marker-threshold", type=float, default=0.36,
+    mk.add_argument("--marker-threshold", type=float, default=0.33,
                     help="risk (0-1) at or above which a cut point gets a review marker; "
-                         "lower = more markers (default 0.36, ~10 per video)")
+                         "lower = more markers (default 0.33, ~10 per video)")
     mk.add_argument("--progress-file", default=None,
                     help="write {pct,msg,done} JSON here for a GUI progress bar")
 
