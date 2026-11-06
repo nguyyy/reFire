@@ -47,14 +47,21 @@ cut against those finals (`fix_cost`, leave-one-out) into `run/eval/<timestamp>.
 
 Day to day: `refire make` -> edit in Premiere using the markers -> `refire learn <vod>`.
 learn finds the project by the run's proxy paths under `REFIRE_PROJECTS`
-(default `~/Desktop/iphone`), so a finished edit is ingested with no extra input, the
-same way `corrections_<game>.json` grows. Lost run folders are rebuilt from proxy names
-(`p_<profile>_<clip start - 2>-<clip end + 10>.mov`); `voiced` is gated by project date
-(compress_silence only kept Silero audio from 2026-09-13).
+(`;`-separated; default `~/Desktop/iphone` + `~/Documents/Adobe/Premiere Pro`, autosaves
+skipped), so a finished edit is ingested with no extra input, the same way
+`corrections_<game>.json` grows. Lost run folders are rebuilt from proxy names
+(`p_<profile>_<clip start - 2>-<clip end + 10>.mov`) in the bin's document order (= play
+order; exact where a manifest survives); a clip inside a later-playing clip is a
+`Cold Open` teaser. The build's own `ae/captions.srt` survives inside the project
+(`prproj.captions`); `align.use_captions` checks the rebuild against it and, when the
+captions are dense, takes the dead-air keep they support. `voiced` is gated by project
+date (compress_silence only kept Silero audio from 2026-09-13). A rebuild needs the VOD
+re-transcribed into `run/<vod>/` first (new files only).
 
-Data facts that shaped the defaults (2026-11, 4 edits): ~80% of edges are left alone, so
-blanket boundary rules lose; whole-utterance cuts are 3.6%; the editor cannot extend a
-start more than PROXY_PAD (2s) inside a proxy, which caps observed `start_late`.
+Data facts that shaped the defaults (2026-11, 8 edits): ~80% of edges are left alone, so
+blanket boundary rules lose; whole-utterance cuts are rare; the editor cannot extend a
+start more than PROXY_PAD (2s) inside a proxy, which caps observed `start_late`;
+August builds played in story order, not chronologically.
 
 ## Conventions
 

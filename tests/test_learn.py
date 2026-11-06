@@ -130,8 +130,119 @@ def test_rough_mp4_maps_through_keep_spans():
 
 
 def test_proposal_from_proxy_names_undoes_pad_and_tail():
-    prop = align.proposal_from_proxies([_proxy(98, 140), _proxy(0, 15)])
+    prop = align.proposal_from_proxies([_proxy(0, 15), _proxy(98, 140)])
     assert [(p["start"], p["end"]) for p in prop] == [(0.0, 5.0), (100.0, 130.0)]
+
+
+def test_proposal_from_proxies_keeps_bin_order_and_marks_teasers():
+    # bin order is play order (story order, not chronological); a clip inside a
+    # later-playing clip is the cold-open teaser cut from it
+    prop = align.proposal_from_proxies([_proxy(108, 125), _proxy(98, 140), _proxy(0, 15),
+                                        _proxy(98, 140)])
+    assert [(p["start"], p["end"]) for p in prop] == [(110.0, 115.0), (100.0, 130.0), (0.0, 5.0)]
+    assert [p["section"] for p in prop] == ["Cold Open", "", ""]
+    assert [p["i"] for p in prop] == [0, 1, 2]
+
+
+def test_projects_skips_autosaves_and_reads_several_folders(tmp_path):
+    import os
+    a, b = tmp_path / "a", tmp_path / "b"
+    for p in (a / "x.prproj", a / "Adobe Premiere Pro Auto-Save" / "x--1.prproj", b / "y.prproj"):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"")
+    got = lessons.projects(f"{a}{os.pathsep}{b}")
+    assert [p.name for p in got] == ["x.prproj", "y.prproj"]
+
+
+def _blob(*strings):
+    """A FlatBuffer-ish caption block: length-prefixed, NUL-terminated utf-8 strings."""
+    import base64
+    import struct
+    b = b"\x00" * 8
+    for s in strings:
+        e = s.encode("utf-8")
+        b += struct.pack("<I", len(e)) + e + b"\x00" * 4
+    return base64.b64encode(b).decode()
+
+
+def test_captions_read_from_project_with_shared_blobs(tmp_path):
+    srt = r"C:\dev\reFire\run\100@0-500\100-a-b\ae\captions.srt"
+    cues = [(0.0, 0.5, "hello there"), (0.6, 1.0, "general"), (1.2, 1.5, "kenobi"),
+            (2.0, 2.4, "hello there"), (3.0, 3.3, "bold one")]
+    objs = [f'<MasterClip ObjectUID="MC"><Name>captions.srt</Name><Clips><Clip ObjectRef="900"/>'
+            f'</Clips><Transcript ObjectRef="901"/></MasterClip>',
+            '<DataClip ObjectID="900"><Source ObjectRef="902"/></DataClip>',
+            '<DataMediaSource ObjectID="902"><MediaSource><Media ObjectURef="M"/></MediaSource>'
+            '</DataMediaSource>',
+            f'<Media ObjectUID="M"><FilePath>{srt}</FilePath></Media>',
+            '<TranscriptClip ObjectID="901"><Captions ObjectRef="903"/></TranscriptClip>']
+    items, seen = [], set()
+    for n, (a, b, text) in enumerate(cues):
+        items.append(f'<CaptionMapItem Index="{n}"><Second ObjectRef="{910 + n}"/></CaptionMapItem>')
+        objs.append(f'<Caption ObjectID="{910 + n}"><BlockVector><BlockVectorItem Index="0" '
+                    f'ObjectRef="{920 + n}"/></BlockVector><TimeStart>{int(a * T)}</TimeStart>'
+                    f'<TimeEnd>{int(b * T)}</TimeEnd></Caption>')
+        data = "" if text in seen else _blob("AnimationType", "LucidaConsole", text)
+        seen.add(text)                                  # a repeat carries only its hash
+        objs.append(f'<Block ObjectID="{920 + n}"><FormattedTextData Encoding="base64" '
+                    f'BinaryHash="h-{text}">{data}</FormattedTextData></Block>')
+    objs.append('<CaptionCollection ObjectID="903"><CaptionMap>' + "".join(items)
+                + "</CaptionMap></CaptionCollection>")
+    p = tmp_path / "c.prproj"
+    with gzip.open(p, "wb") as f:
+        f.write(("<PremiereData>" + "".join(objs) + "</PremiereData>").encode("utf-8"))
+    got = prproj.captions(prproj.Project(p))
+    assert list(got) == [srt]
+    assert got[srt] == [(a, b, t) for a, b, t in cues]       # style strings dropped
+
+
+def _w(text, a):
+    return {"text": text, "start": a, "end": a + 0.5}
+
+
+# today's transcript: A = 100-130 (two phrases), B = 200-220, C = 300-302 (one stray word
+# the build's transcript never heard), D = 400-410. reFire played B, A, C, D.
+WORDS = ([_w(t, a) for t, a in [("alpha", 101.0), ("beta", 101.6), ("gamma", 102.2),
+                                 ("delta", 120.0), ("epsilon", 120.6), ("zeta", 121.2)]]
+         + [_w(t, a) for t, a in [("eta", 201.0), ("theta", 201.6), ("iota", 202.2)]]
+         + [_w("noise", 301.0)]
+         + [_w(t, a) for t, a in [("kappa", 401.0), ("lambda", 401.6), ("mu", 402.2)]])
+# the build's captions.srt in cut time: B 0-2.3, A 2.3-6.9, C kept whole 6.9-8.9, D 8.9-11.2
+CUES = [(0.3, 1.4, "eta theta"), (1.5, 2.0, "iota"),
+        (2.6, 3.7, "alpha beta"), (3.8, 4.3, "gamma"), (4.9, 5.4, "delta"),
+        (5.5, 6.0, "epsilon"), (6.1, 6.6, "zeta"),
+        (9.2, 10.3, "kappa lambda"), (10.4, 10.9, "mu")]
+
+
+def _rebuilt(order):
+    spans = {"A": (100.0, 130.0), "B": (200.0, 220.0), "C": (300.0, 302.0), "D": (400.0, 410.0)}
+    return align.proposal_from_proxies([_proxy(spans[k][0] - 2, spans[k][1] + 10)
+                                        for k in order], WORDS)
+
+
+def test_locate_cues_continues_runs_and_jumps_on_unique_hits():
+    spans = [(100.0, 130.0), (200.0, 220.0), (300.0, 302.0), (400.0, 410.0)]
+    assert align.locate_cues(CUES, WORDS, spans) == [201.0, 202.2, 101.0, 102.2, 120.0,
+                                                     120.6, 121.2, 401.0, 402.2]
+
+
+def test_use_captions_checks_order_and_takes_the_keep_the_captions_support():
+    prop, chk = align.use_captions(_rebuilt("BACD"), CUES, WORDS)
+    assert chk["order_agree_pct"] == 100.0 and chk["clips_reached"] == 3
+    assert chk["located_pct"] == 100.0
+    # the build heard nothing in C and kept it whole; today's words would cut it to 1.1s
+    assert chk["keep_from"] == "transcript + captions"
+    assert prop[2]["keep"] == [[300.0, 302.0]]
+    assert chk["rebuilt_s"] == pytest.approx(10.3) and chk["with_cues_s"] == pytest.approx(11.2)
+    _p, wrong = align.use_captions(_rebuilt("ABCD"), CUES, WORDS)
+    assert wrong["order_agree_pct"] < 100.0
+
+
+def test_use_captions_leaves_sparse_captions_as_a_check_only():
+    sparse = [CUES[0], CUES[-2]]                  # emphasis-only captions, 2 cues / 10s
+    prop, chk = align.use_captions(_rebuilt("BACD"), sparse, WORDS)
+    assert chk["keep_from"] == "transcript" and "with_cues_s" not in chk
+    assert prop[2]["keep"] == [[300.7, 301.8]]
 
 
 def _clip(i, a, b, keep=None):

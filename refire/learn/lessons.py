@@ -17,8 +17,9 @@ from statistics import median
 
 from . import align, diff, prproj
 
-DEFAULT_PROJECTS = os.environ.get("REFIRE_PROJECTS",
-                                  str(Path.home() / "Desktop" / "iphone"))
+# os.pathsep-separated; Premiere's own default save folder is where the August edits live
+DEFAULT_PROJECTS = os.environ.get("REFIRE_PROJECTS", os.pathsep.join(
+    str(Path.home() / p) for p in ("Desktop/iphone", "Documents/Adobe/Premiere Pro")))
 EXAMPLES_PER_LABEL = 4
 VOICED_SINCE = time.mktime((2026, 9, 13, 0, 0, 0, 0, 0, -1))   # select.compress_silence(voiced=)
 
@@ -35,10 +36,13 @@ def game_of(cache_dir, fallback: str = "") -> str:
 
 
 def projects(projects_dir) -> list[Path]:
-    root = Path(projects_dir)
-    if not root.exists():
-        return []
-    return sorted(p for p in root.rglob("*.prproj") if "Auto-Save" not in p.parts)
+    """Every saved .prproj under one folder or several (os.pathsep-joined), no autosaves.
+
+    Premiere's autosave folder is 'Adobe Premiere Pro Auto-Save'; an autosave newer than
+    the last real save would otherwise win the pairing on mtime."""
+    roots = [Path(p) for p in str(projects_dir).split(os.pathsep) if p.strip()]
+    return sorted(p for root in roots if root.exists() for p in root.rglob("*.prproj")
+                  if not any("Auto-Save" in part for part in p.parts))
 
 
 def project_index(projects_dir) -> dict[str, list[tuple[int, float, Path]]]:
@@ -160,6 +164,7 @@ def learn_run(run_dir, project=None, projects_dir=DEFAULT_PROJECTS, vods_dir="vo
         return None
     items = prproj.flatten(proj, uid)
     manifest = align.load_manifest(run_dir)
+    caption_check = None
     mapped = align.map_items(items, manifest, run_dir, run_key=key)
     words = _words(cache_dir)
     if manifest:
@@ -170,11 +175,19 @@ def learn_run(run_dir, project=None, projects_dir=DEFAULT_PROJECTS, vods_dir="vo
         # ponytail: dated by project mtime, the only date a lost run leaves behind
         voiced = (voiced_of(cache_dir)
                   if Path(project).stat().st_mtime >= VOICED_SINCE else None)
-        media = [i["media"] for s in proj.seqs.values() for i in s["items"]
-                 if i["media"] and in_run in align.norm(i["media"])]
-        media += [p for p in _bin_media(proj) if in_run in align.norm(p)]
+        # bin first: its document order is the play order (see proposal_from_proxies)
+        media = [p for p in _bin_media(proj) if in_run in align.norm(p)]
+        media += [i["media"] for s in proj.seqs.values() for i in s["items"]
+                  if i["media"] and in_run in align.norm(i["media"])]
         prop = align.proposal_from_proxies(media, words, voiced)
-        prop_from = "proxy names" + (" + transcript keep" if words else " (no transcript)")
+        prop_from = ("proxy names, bin order"
+                     + (" + transcript keep" if words else " (no transcript)"))
+        # the build's own captions.srt survives inside the project: check against it
+        cues = next((v for k, v in prproj.captions(proj).items()
+                     if align.norm(k).endswith(f"/run/{key.lower()}/ae/captions.srt")), None)
+        if cues and words:
+            prop, caption_check = align.use_captions(prop, cues, words, voiced)
+            prop_from += f", checked against captions.srt (keep: {caption_check['keep_from']})"
     ctx = _context(cache_dir, run_dir if manifest else None, vods_dir)
     res = diff.diff(prop, mapped["segments"], ctx)
     res["boundaries"] = boundary_rows(prop, res, ctx)
@@ -185,7 +198,8 @@ def learn_run(run_dir, project=None, projects_dir=DEFAULT_PROJECTS, vods_dir="vo
            "window_start": align.window_start(cache_dir),
            "project": str(project), "sequence": proj.seqs[uid]["name"],
            "sequence_reason": why, "align_methods": mapped["methods"],
-           "proposal_from": prop_from, "flags": mapped["flags"][:50],
+           "proposal_from": prop_from, "caption_check": caption_check,
+           "flags": mapped["flags"][:50],
            "n_flags": len(mapped["flags"]),
            "proposal": prop, "final": mapped["segments"],
            "overlays": mapped["overlays"], **res,

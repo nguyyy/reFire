@@ -20,9 +20,12 @@ true or Enabled false.
 """
 from __future__ import annotations
 
+import base64
 import gzip
 import re
+import struct
 import xml.etree.ElementTree as ET
+from collections import Counter
 from pathlib import Path
 
 TICKS = 254016000000          # premiere ticks per second
@@ -195,3 +198,81 @@ def referenced_runs(path) -> dict[str, int]:
             key = f"{r.group(1).decode('utf-8', 'replace')}/{r.group(2).decode('utf-8', 'replace')}"
             out[key] = out.get(key, 0) + 1
     return out
+
+
+# --------------------------------------------------------------------------- captions
+
+def _reach(proj: Project, el, pred, depth: int = 5):
+    """First object reachable from `el` through Object(U)Refs that satisfies pred (BFS)."""
+    seen, layer = {id(el)}, [el]
+    for _ in range(depth):
+        nxt = []
+        for e in layer:
+            for c in e.iter():
+                r = proj.ref(c)
+                if r is not None and id(r) not in seen:
+                    if pred(r):
+                        return r
+                    seen.add(id(r))
+                    nxt.append(r)
+        layer = nxt
+    return None
+
+
+def _strings(b: bytes) -> list[str]:
+    """Length-prefixed, NUL-terminated utf-8 strings in a FlatBuffer blob."""
+    out = []
+    for i in range(len(b) - 4):
+        n = struct.unpack_from("<I", b, i)[0]
+        if 0 < n < 400 and i + 4 + n < len(b) and b[i + 4 + n] == 0:
+            try:
+                s = b[i + 4:i + 4 + n].decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            if all(ch.isprintable() or ch == "\n" for ch in s):
+                out.append(s)
+    return out
+
+
+def captions(proj: Project) -> dict[str, list[tuple[float, float, str]]]:
+    """Caption files imported into the project -> {file path: [(t0, t1, text)]}.
+
+    Premiere copies an imported .srt's cues into the project (MasterClip -> TranscriptClip
+    -> CaptionCollection -> Caption{TimeStart,TimeEnd} -> Block), so reFire's
+    ae/captions.srt -- the speech its cut carried, in cut time -- survives the run folder.
+    Cue text sits in a base64 FlatBuffer next to style keys and the font name; those
+    repeat in nearly every cue, the text doesn't. Sequence caption tracks (owned by the
+    Project, not a MasterClip) are the editor's own captions and are skipped.
+    """
+    # a repeated blob is stored once; later blocks carry only its BinaryHash
+    blobs = {el.get("BinaryHash"): el.text.strip() for el in proj.root.iter("FormattedTextData")
+             if el.get("BinaryHash") and (el.text or "").strip()}
+    raw: dict[str, list] = {}
+    for mc in proj.root:
+        if mc.tag != "MasterClip":
+            continue
+        coll = _reach(proj, mc, lambda r: r.tag == "CaptionCollection")
+        if coll is None:
+            continue
+        media = _reach(proj, mc, lambda r: r.tag == "Media" and bool(r.findtext("FilePath")))
+        key = media.findtext("FilePath") if media is not None else (mc.findtext("Name") or "")
+        cues = []
+        for it in coll.iter("CaptionMapItem"):
+            cap = proj.ref(it.find("Second"))
+            if cap is None:
+                continue
+            ss = []
+            for bi in cap.iter("BlockVectorItem"):
+                ftd = proj.ref(bi).find("FormattedTextData") if proj.ref(bi) is not None else None
+                data = ftd is not None and ((ftd.text or "").strip() or blobs.get(ftd.get("BinaryHash")))
+                if data:
+                    ss += _strings(base64.b64decode(data))
+            cues.append((_sec(cap, "TimeStart"), _sec(cap, "TimeEnd"), ss))
+        raw[key] = cues
+    n = sum(1 for c in raw.values() for _, _, ss in c if ss)   # recut cues carry no strings
+    freq = Counter(s for cues in raw.values() for _, _, ss in cues for s in set(ss))
+    style = {s for s, k in freq.items() if k > max(3, 0.3 * n)}
+    return {key: sorted((round(a, 3), round(b, 3),
+                         " ".join(s for s in ss if s not in style).strip())
+                        for a, b, ss in cues)
+            for key, cues in raw.items()}

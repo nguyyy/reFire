@@ -242,7 +242,8 @@ refire learn <vod_id>          # or --all
 ```
 
 it finds the `.prproj` that imported that run's proxies (searching `--projects-dir`,
-default `~/Desktop/iphone`, or env `REFIRE_PROJECTS`; `--project` to name one), reads it
+default `~/Desktop/iphone` and `~/Documents/Adobe/Premiere Pro`, autosaves skipped, or env
+`REFIRE_PROJECTS` with `;` between folders; `--project` to name one), reads it
 **in memory only** (never re-saved), picks the sequence you exported (top-level, most
 footage; the choice and reason are logged), flattens nested sequences, and maps every
 item back to VOD seconds through the manifest's `sources[]`, the proxy file names, the
@@ -258,7 +259,11 @@ median deltas, examples) and `run/clip_lessons_report.md` (where reFire goes wro
 most). safe to re-run; it never touches its inputs. the review-marker model, the
 boundary caps, and the trim/critic/director few-shots all read these files, so every
 edit you finish and `learn` makes the next run's markers sharper. a run whose `run/`
-folder was deleted is rebuilt from the proxy names the project still references.
+folder was deleted is rebuilt from the proxy names the project still references (bin
+order = play order), then checked against the `captions.srt` that build shipped, which
+premiere keeps inside the project: `caption_check` in `clip_diff.json` says how much of
+it was found and whether the clip order agrees. the vod has to be re-transcribed into
+`run/<vod_id>/` first.
 
 #### scoring reFire against your edits: `refire eval`
 
@@ -454,7 +459,7 @@ python -m refire srt run\<vod>\<run>\ae\manifest.json --offset -0.15
 ## testing
 
 ```bash
-uv run pytest        # 361 tests, ~3s, no network and no gpu
+uv run pytest        # 369 tests, ~3s, no network and no gpu
 ```
 
 ---

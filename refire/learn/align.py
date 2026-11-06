@@ -71,23 +71,172 @@ def proposal_from_proxies(paths, words=None, voiced=None, pad: float = 0.3) -> l
     One proxy per clip, cut at [start - PROXY_PAD, end + PROXY_TAIL], so the clip itself
     is recoverable from the name. `keep` is re-derived with the same compress_silence the
     manifest used when a transcript is available; without one the clip is kept whole.
-    Play order is assumed chronological (the default --order).
+
+    Play order is the order `paths` first names each proxy: pass the project's bin media
+    in document order. The panel imports proxies in manifest order and Premiere keeps
+    it -- on the runs that still have a manifest the bin order is the play order exactly,
+    and August builds played in story order, not chronologically. A clip lying inside a
+    later-playing clip is a teaser: section 'Cold Open', as the manifest would say (the
+    same rule picks exactly the manifests' cold opens).
     """
     from ..select import compress_silence
-    spans = set()
+    spans: dict[tuple[float, float], None] = {}           # insertion-ordered set
     for p in paths:
         m = PROXY_RE.search(Path(str(p).replace("\\", "/")).name)
         if m:
             a, b = float(m.group(1)), float(m.group(2))
-            spans.add((round(a + PROXY_PAD if a > 0 else a, 3), round(b - PROXY_TAIL, 3)))
+            spans.setdefault((round(a + PROXY_PAD if a > 0 else a, 3), round(b - PROXY_TAIL, 3)))
+    order = list(spans)
     out = []
-    for i, (a, b) in enumerate(sorted(spans)):
+    for i, (a, b) in enumerate(order):
         keep = [[a, b]]
         if words:
             k, _r, _d = compress_silence(words, a, b, pad=pad, voiced=voiced)
             keep = [[a + x, a + y] for x, y in k]
-        out.append({"i": i, "start": a, "end": b, "keep": keep, "role": "", "src": None})
+        teaser = any(j > i and x <= a + 0.5 and b <= y + 0.5 for j, (x, y) in enumerate(order))
+        out.append({"i": i, "start": a, "end": b, "keep": keep, "role": "", "src": None,
+                    "section": "Cold Open" if teaser else ""})
     return out
+
+
+_TOK = re.compile(r"[a-z0-9']+")
+CUE_SLACK = 60.0     # most dead air one gap between two cues of a clip can have lost
+
+
+def _toks(s: str) -> list[str]:
+    return _TOK.findall(s.lower())
+
+
+def locate_cues(cues, words, spans) -> list[float | None]:
+    """reFire caption cue [(cut t0, t1, text)] -> VOD time of its first word, or None.
+
+    Text lookup in the transcript, in cut order. A cue that continues the previous
+    located cue (VOD advanced by its cut advance plus at most CUE_SLACK of removed dead
+    air) takes the nearest such hit; otherwise it needs a single hit inside a proxy clip
+    (2+ words) or in the whole VOD (4+ words). A 3+ word cue may drop an end word, since
+    the build's transcript and today's re-transcription differ here and there.
+    """
+    T, TS = [], []
+    for w in words:
+        for t in _toks(w["text"]):
+            T.append(t)
+            TS.append(float(w["start"]))
+    first: dict[str, list[int]] = {}
+    for i, t in enumerate(T):
+        first.setdefault(t, []).append(i)
+
+    def hits(q):
+        return [p for p in first.get(q[0], []) if T[p:p + len(q)] == q]
+
+    out, prev = [], None
+    for a, _b, text in cues:
+        q = _toks(text)
+        if not q:
+            out.append(None)
+            continue
+        ps = hits(q)
+        if not ps and len(q) >= 3:
+            ps = sorted(set(hits(q[1:])) | {p - 1 for p in hits(q[:-1]) if p > 0})
+        vs = [TS[p] for p in ps]
+        pick = None
+        if prev is not None:
+            pa, pv = prev
+            near = [v for v in vs if -0.6 <= (v - pv) - (a - pa) <= CUE_SLACK]
+            if near:
+                pick = min(near, key=lambda v: (v - pv) - (a - pa))
+        if pick is None:
+            inside = [v for v in vs if any(x - 1 <= v <= y + 1 for x, y in spans)]
+            if len(q) >= 2 and len(inside) == 1:
+                pick = inside[0]
+            elif len(q) >= 4 and len(vs) == 1:
+                pick = vs[0]
+        if pick is not None:
+            prev = (a, pick)
+        out.append(pick)
+    return out
+
+
+CUE_DENSITY = 0.5    # cues/s; reFire's full captions run ~1.2/s, the Aug emphasis-only ~0.17
+
+
+def _cue_words(cues, loc, spans) -> list[dict]:
+    """Located cues as word-like spans in VOD time; an unlocated cue borrows the offset
+    of the cue before it (no dead air is cut inside a run of speech)."""
+    out, prev = [], None
+    for (a, b, t), v in zip(cues, loc):
+        if v is None:
+            if prev is None:
+                continue
+            v = a + (prev[1] - prev[0])
+            if not any(x - 1 <= v <= y + 1 for x, y in spans):
+                continue
+        else:
+            prev = (a, v)
+        out.append({"text": t, "start": v, "end": v + (b - a)})
+    return sorted(out, key=lambda w: w["start"])
+
+
+def use_captions(prop: list[dict], cues, words, voiced=None,
+                 pad: float = 0.3) -> tuple[list[dict], dict]:
+    """Check a rebuilt proposal against the captions.srt its build shipped, and take the
+    dead-air keep the captions support.
+
+    The cues are reFire's own cut in cut time (Premiere keeps an imported .srt's cues
+    inside the project, so they outlive the run folder) and they are the build's own
+    transcript. Each located cue goes to the proxy clip holding it -- in an overlap the
+    previous cue's clip wins, so a teaser does not steal its source clip's lines -- and a
+    clip sits at the median cut time of its longest run of cues: `order_agree_pct` is
+    the share of consecutive clips whose caption positions increase in `prop` order.
+
+    Keep: today's re-transcription can hear speech the build's didn't and vice versa
+    (a clip the build heard nothing in was kept whole). With dense captions an
+    alternative keep is cut from today's words plus the cue spans, clips no cue reached
+    kept whole -- on the two runs with a manifest it reproduces the real keep (100%
+    overlap, 2-6s extra) -- and whichever total is closer to the captions' length wins.
+    """
+    from ..select import compress_silence
+    spans = [(c["start"], c["end"]) for c in prop]
+    loc = locate_cues(cues, words, spans)
+    runs: dict[int, list[list[float]]] = {}
+    prev_k = None
+    for (a, _b, _t), v in zip(cues, loc):
+        if v is None:
+            continue
+        ks = [k for k, (x, y) in enumerate(spans) if x - 1 <= v <= y + 1]
+        if not ks:
+            prev_k = None
+            continue
+        k = prev_k if prev_k in ks else min(ks, key=lambda k: spans[k][1] - spans[k][0])
+        if k != prev_k:
+            runs.setdefault(k, []).append([])
+        runs[k][-1].append(a)
+        prev_k = k
+    pos = {k: sorted(max(rs, key=len))[len(max(rs, key=len)) // 2] for k, rs in runs.items()}
+    seq = [pos[k] for k in sorted(pos)]
+    agree = sum(seq[n] < seq[n + 1] for n in range(len(seq) - 1)) / max(1, len(seq) - 1)
+    end = max((b for _a, b, _t in cues), default=0.0)
+    total = lambda p: sum(y - x for c in p for x, y in c["keep"])
+    n_loc = sum(v is not None for v in loc)
+    check = {"cues": len(cues), "located_pct": round(100 * n_loc / max(1, len(cues)), 1),
+             "clips_reached": len(runs), "clips": len(prop),
+             "order_agree_pct": round(100 * agree, 1),
+             "captions_end_s": round(end, 1), "rebuilt_s": round(total(prop), 1),
+             "keep_from": "transcript"}
+    if not end or len(cues) / end < CUE_DENSITY:
+        return prop, check
+    union = sorted(list(words) + _cue_words(cues, loc, spans), key=lambda w: w["start"])
+    alt = []
+    for k, c in enumerate(prop):
+        keep = [[c["start"], c["end"]]]
+        if k in runs:
+            kk, _r, _d = compress_silence(union, c["start"], c["end"], pad=pad, voiced=voiced)
+            keep = [[c["start"] + x, c["start"] + y] for x, y in kk]
+        alt.append(dict(c, keep=keep))
+    check["with_cues_s"] = round(total(alt), 1)
+    if abs(total(alt) - end) < abs(total(prop) - end):
+        check["keep_from"] = "transcript + captions"
+        return alt, check
+    return prop, check
 
 
 def _rough_map(manifest: dict) -> list[tuple[float, float, float]]:

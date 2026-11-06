@@ -317,8 +317,9 @@ def main(argv: list[str] | None = None) -> None:
                          "that imported this run's media)")
     from .learn.lessons import DEFAULT_PROJECTS
     ln.add_argument("--projects-dir", default=DEFAULT_PROJECTS,
-                    help="folder of finished Premiere projects, searched recursively "
-                         "(env REFIRE_PROJECTS; default ~/Desktop/iphone). Read-only")
+                    help="folder(s) of finished Premiere projects, searched recursively, "
+                         "';'-separated (env REFIRE_PROJECTS; default ~/Desktop/iphone + "
+                         "~/Documents/Adobe/Premiere Pro). Read-only")
     ln.add_argument("--run-root", default="run", help="reFire run folder (default run)")
     ln.add_argument("--cache-dir", default="vods", help="VOD/chat cache (default vods)")
     ln.add_argument("--game", default="",
