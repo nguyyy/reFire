@@ -82,6 +82,32 @@ pip install -e ".[dev]"   # unpinned — resolves fresh versions, ignores uv.loc
 
 ## usage
 
+### hands-off: `refire auto`
+one vod number in, a finished base edit out: the cut plus captions, no emotes, sfx, music,
+section cards or zoom punch-ins.
+
+```bash
+refire auto 2924677606                 # -> run/<vod>/<run>/final.mp4 + summary.md
+refire auto 2924677606 --duration 12m --brief "the abyss clear"   # optional overrides
+```
+
+it picks every `make` input itself and writes why next to the video (`summary.md`,
+`auto.json`):
+- **title, game**: the vod's twitch metadata (it rides in the chat download)
+- **brief**: none -- the director's stream-driven mode reads the whole stream and picks
+  its strongest story
+- **duration**: the median runtime of your finished edits (`refire learn`), capped at half
+  the stream; ~15 min with the edits learned so far
+- **stages**: the measured defaults -- boundary, trim, critics and markers stay off (each
+  raised fix_cost in `refire eval`), 15 ms de-pop fades on
+- **render**: 1920x1080, the manifest's caption lines after the proper-noun fix, NVENC
+  when the card has it (else x264)
+
+then it masters the audio to -14 LUFS (one two-pass loudnorm over the whole video, video
+stream copied), checks the file (canvas, audio, runtime vs target) and fails loudly if the canvas
+or audio is wrong. the manifest is still written, so the same run opens in premiere / AE
+when you want to add memes and sfx on top.
+
 ### the main pipeline: `refire make`
 downloads the vod, processes chat logs, transcribes, storyboard and casts the beats, then generates the after effects manifest.
 
@@ -459,7 +485,7 @@ python -m refire srt run\<vod>\<run>\ae\manifest.json --offset -0.15
 ## testing
 
 ```bash
-uv run pytest        # 369 tests, ~3s, no network and no gpu
+uv run pytest        # 379 tests, ~3s, no network and no gpu
 ```
 
 ---

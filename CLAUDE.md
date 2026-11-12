@@ -37,6 +37,13 @@ regress** (fix_cost vs the previous `run/eval/*.json`, leave-one-out).
 
 Other verbs: `srt`, `recap`, `fixcaps`, `loud`. Deep dive: `docs/director-pipeline.md`.
 
+`refire auto <vod>` (`auto.py`) = `make` with every input picked: Twitch title/game from
+the chat download, no brief (stream-driven director), duration = median runtime of the
+learned finals, measured stage defaults, base edit (no emotes/sfx/music/cards/zoom),
+1080p render burning the manifest's fixed captions (`render_clips(captions=)`), NVENC if
+it works, whole-program loudnorm to -14 LUFS. Writes `final.mp4`, `summary.md`, `auto.json`,
+then checks the file. `narrative._drop_repeats` stops two beats replaying shared footage.
+
 ## Learning loop (`refire/learn/`)
 
 `refire learn <vod>` reads the finished Premiere project for a run (read-only, gzip XML

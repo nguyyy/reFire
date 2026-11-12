@@ -62,6 +62,14 @@ def audio_graph(keep, dur: float, fade: float = FADE_S, tails=None,
     return ";".join(parts)
 
 
+def video_quality(encoder: str) -> list[str]:
+    """Quality flags per encoder. NVENC's default bitrate is far too low for a 1080p cut that
+    goes through three encodes (trim, reframe, subs); libx264 keeps its crf 23 default."""
+    if encoder.endswith("_nvenc"):
+        return ["-preset", "p5", "-rc", "vbr", "-cq", "19", "-b:v", "0"]
+    return []
+
+
 def _run(cmd: list[str]) -> None:
     proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
     if proc.returncode != 0:
@@ -88,6 +96,7 @@ def render_clip(
     loudnorm: bool = False,
     fade: float = FADE_S,
     tails=None,
+    size: tuple[int, int] = (W, H),
 ) -> Path:
     """Trim [seg.start, seg.end], dynamic reframe, burn subtitles. Raises on fail.
 
@@ -105,9 +114,11 @@ def render_clip(
     asks for it gets it.
 
     `fade` is the de-pop ramp at every cut (`audio_graph`; 0 = the old hard cuts) and
-    `tails` the per-span L-cut lengths.
+    `tails` the per-span L-cut lengths. `size` is the output canvas (default 1280x720).
     """
     out_path = Path(out_path)
+    w, h = size
+    vq = video_quality(encoder)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     dur = seg["end"] - seg["start"]
     work = out_path.with_name(out_path.stem + "_work.mp4")
@@ -137,23 +148,23 @@ def render_clip(
         if afilters:
             cut += ["-af", ",".join(afilters)]
     _run(["ffmpeg", "-ss", str(seg["start"]), "-t", str(dur), "-i", str(video),
-          *cut, "-r", str(FPS), "-c:v", encoder, "-pix_fmt", "yuv420p",
+          *cut, "-r", str(FPS), "-c:v", encoder, *vq, "-pix_fmt", "yuv420p",
           "-c:a", "aac", "-ar", "48000", "-ac", "2", "-dn", "-y", str(work)])
 
     # B: reframe to the output canvas. motion zoom is optional, it can eat render time on long cuts
     if motion_zoom:
-        reframe_clip(work, reframed, out_w=W, out_h=H, speech=speech, enter=enter, exit=exit)
+        reframe_clip(work, reframed, out_w=w, out_h=h, speech=speech, enter=enter, exit=exit)
     else:
         _run(["ffmpeg", "-i", str(work), "-vf",
-              f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H}:0:ih-{H}",
-              "-an", "-r", str(FPS), "-c:v", encoder, "-pix_fmt", "yuv420p",
+              f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}:0:ih-{h}",
+              "-an", "-r", str(FPS), "-c:v", encoder, *vq, "-pix_fmt", "yuv420p",
               "-dn", "-y", str(reframed)])
 
     # C: burn subs on the reframed video, audio from the work clip
     _run(["ffmpeg", "-i", str(reframed), "-i", str(work),
           "-filter_complex", f"[0:v]subtitles='{_ass_filter_path(Path(ass_path))}'[v]",
           "-map", "[v]", "-map", "1:a", "-r", str(FPS),
-          "-c:v", encoder, "-pix_fmt", "yuv420p", "-c:a", "aac",
+          "-c:v", encoder, *vq, "-pix_fmt", "yuv420p", "-c:a", "aac",
           "-dn", "-shortest", "-y", str(out_path)])
 
     work.unlink(missing_ok=True)

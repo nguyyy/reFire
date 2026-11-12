@@ -8,7 +8,7 @@ from .reframe import ENTER, EXIT
 from .render import FADE_S, render_clip
 from .select import SILENCE_PAD, compress_silence, speech_intervals
 from .style import style_for
-from .subtitles import build_ass
+from .subtitles import build_ass, lines_ass
 
 
 def _run(cmd: list[str]) -> None:
@@ -89,6 +89,8 @@ def render_clips(
     voiced=None,
     fade: float = FADE_S,
     lcut: bool = False,
+    captions: list[list[dict]] | None = None,
+    size: tuple[int, int] | None = None,
 ) -> Path:
     """Render a flat list of {start,end} clips into a watchable rough cut.
 
@@ -98,6 +100,10 @@ def render_clips(
     must already be emphasis-annotated. Reuses the ffmpeg path so a `make` run can be
     eyeballed without After Effects; skips AE-only polish (section cards, emote
     overlays, SFX). Returns run_dir/out_name.
+
+    `captions[i]`, when given, are clip i's finished caption lines (the manifest's, after
+    caption_fix) and are burned instead of lines rebuilt from raw `words`. `size` is the
+    output canvas (render.W x render.H when None).
     """
     run_dir = Path(run_dir)
     clips_dir = run_dir / "clips"
@@ -124,11 +130,13 @@ def render_clips(
             retimed = [{"text": w["text"], "start": w["start"] - seg["start"],
                         "end": w["end"] - seg["start"], "emph": bool(w.get("emph"))}
                        for w in words if seg["start"] <= w["start"] < seg["end"]]
-        ass.write_text(build_ass(retimed, 0.0, cdur, wpl), encoding="utf-8")
+        ass.write_text(lines_ass(captions[i]) if captions is not None
+                       else build_ass(retimed, 0.0, cdur, wpl), encoding="utf-8")
         seg_speech = speech_intervals(retimed)  # phrase runs on the clip timeline
         render_clip(video, seg, ass, out, encoder=encoder, speech=seg_speech, keep=keep,
                     motion_zoom=motion_zoom, enter=c_enter, exit=c_exit,
                     loudnorm=loudnorm, fade=fade,
-                    tails=lcut_tails(words, seg["start"], keep) if lcut and keep else None)
+                    tails=lcut_tails(words, seg["start"], keep) if lcut and keep else None,
+                    **({"size": size} if size else {}))
         rendered.append(out)
     return assemble(rendered, run_dir / out_name, music=music)

@@ -329,6 +329,19 @@ def main(argv: list[str] | None = None) -> None:
                     help="also measure on-screen motion over every diff span (decodes "
                          "the VOD, a few minutes per video)")
 
+    au = sub.add_parser("auto",
+                        help="VOD# -> finished base edit (final.mp4 + summary.md), every "
+                             "setting picked for you")
+    au.add_argument("vod_id", help="Twitch VOD number (auto-downloaded + cached)")
+    au.add_argument("--duration", default=None,
+                    help="override the target runtime (default: median runtime of your "
+                         "finished edits, from refire learn)")
+    au.add_argument("--brief", default=None,
+                    help="what the video is about (default: the director picks the "
+                         "stream's strongest story)")
+    au.add_argument("--cache-dir", default="vods", help="VOD download cache directory")
+    au.add_argument("--run-root", default="run", help="reFire run folder (default run)")
+
     ev = sub.add_parser("eval",
                         help="score reFire's cut against your finished edits "
                              "(fix_cost = seconds of human correction, leave-one-out)")
@@ -359,6 +372,22 @@ def main(argv: list[str] | None = None) -> None:
                  run_root=args.run_root, vods_dir=args.cache_dir, tag=args.tag,
                  manifest_path=args.manifest, save=not args.no_save,
                  marker_threshold=args.marker_threshold)
+        return
+
+    if args.cmd == "auto":
+        from .auto import run as auto_run
+        t0, last = time.monotonic(), {"pct": -1, "msg": ""}
+
+        def aprog(frac, msg):
+            pct = max(0, min(100, int(frac * 100)))
+            if pct != last["pct"] or msg != last["msg"]:
+                last.update(pct=pct, msg=msg)
+                print("[%3d%%] %s  (+%.1fm)" % (pct, msg, (time.monotonic() - t0) / 60),
+                      flush=True)
+
+        auto_run(args.vod_id, duration=parse_duration(args.duration) if args.duration else None,
+                 brief=args.brief, cache_dir=args.cache_dir, run_root=args.run_root,
+                 progress=aprog)
         return
 
     if args.cmd == "learn":

@@ -1473,3 +1473,26 @@ def test_cast_logs_each_beats_source_index(monkeypatch):
         SimpleNamespace(title="First", intent="i", query="q", start_s=0.0, end_s=2.8)])
     _s, log, _w = narrative.cast(ol, [], words, target_s=1000.0, model="m")
     assert [(b["title"], b["src"]) for b in log["beats"]] == [("First", 1), ("Second", 0)]
+
+
+def test_drop_repeats_later_beat_gives_up_footage_an_earlier_beat_played():
+    # vod 2924677606: the climax beat's reaction tail ran 5s into the payoff beat, so
+    # "too easy, and you know what?" played twice in a row
+    from refire.narrative import _drop_repeats
+    climax = {"segments": [[19378.95, 19398.41], [19398.96, 19401.45], [19402.88, 19404.06]]}
+    payoff = {"segments": [[19399.26, 19401.45], [19402.88, 19409.64], [19414.31, 19418.12]]}
+    sliver = {"segments": [[19409.3, 19409.9], [19500.0, 19510.0]]}
+    removed = _drop_repeats([climax, payoff, sliver])
+    assert climax["segments"][-1] == [19402.88, 19404.06]              # first play kept
+    assert payoff["segments"] == [[19404.06, 19409.64], [19414.31, 19418.12]]
+    assert payoff["start"] == 19404.06
+    assert sliver["segments"] == [[19500.0, 19510.0]]                  # 0.34s leftover dropped
+    assert removed == pytest.approx(2.19 + 1.18 + 0.6)
+
+
+def test_drop_repeats_empties_a_beat_that_is_all_repeat():
+    from refire.narrative import _drop_repeats
+    a = {"segments": [[10.0, 30.0]]}
+    b = {"segments": [[12.0, 20.0]]}
+    _drop_repeats([a, b])
+    assert a["segments"] == [[10.0, 30.0]] and b["segments"] == []

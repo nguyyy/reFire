@@ -202,6 +202,9 @@ def make(
     lcut: bool = False,        # rough render: a shouted line's audio runs under the next shot
     markers: bool = False,     # review markers on risky cut points, off: chance-level in eval
     marker_threshold: float = 0.26,   # markers.THRESHOLD, literal since it's imported lazily
+    music: bool = True,        # a music bed (--bgm, else a random assets/bgm track)
+    size: tuple[int, int] | None = None,   # rough render canvas, None = render.W x H
+    out_name: str = "rough.mp4",
 
     transcriber: str = "local",
     whisper_model: str = DEFAULT_WHISPER_MODEL,
@@ -515,7 +518,7 @@ def make(
     report(0.93, "placing overlays + music")
     overlays = (pick_overlays(words, flat_clips, assets_dir, model=model, sfx=sfx)
                 if emotes else [[] for _ in flat_clips])
-    music = pick_bgm(assets_dir, override=bgm)
+    music = pick_bgm(assets_dir, override=bgm) if music else None
     clock.lap("overlays")
 
     report(0.95, "building manifest" + (" (motion scan)" if motion_zoom else ""))
@@ -551,11 +554,16 @@ def make(
         # rough cut without AE: ffmpeg trim+reframe+subs+concat+music
         report(0.97, "rendering rough cut (ffmpeg)")
         from .assemble import render_clips
+        # burn the manifest's captions: same lines the AE/premiere build gets, after the
+        # proper-noun fix and the --captions mode. clips are in flat_clips order there too
+        mclips = json.loads(Path(mp).read_text(encoding="utf-8")).get("clips") or []
+        lines = ([c.get("captions") or [] for c in mclips]
+                 if len(mclips) == len(flat_clips) else None)
         rough = render_clips(video, out_dir, flat_clips, words,
                              music=music, encoder=encoder, silence_pad=silence_pad,
                              motion_zoom=motion_zoom, deadspace=deadspace,
                              loudnorm=loudnorm, voiced=voiced, fade=crossfade,
-                             lcut=lcut)
+                             lcut=lcut, captions=lines, size=size, out_name=out_name)
         clock.lap("render")
         print("Rough cut:", rough)
     release_scorer(model)   # kept resident through the run (score.KEEP_ALIVE), give the card back
