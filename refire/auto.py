@@ -224,7 +224,8 @@ def run(vod_id, duration: float | None = None, brief: str | None = None,
     _video, chat = ensure_vod(vod_id, cache_dir)
     info = vod_info(chat)
     pl = plan(info, run_root, duration, brief)
-    print(f"[auto] {info.get('title', '')[:70]!r} | {info.get('game') or '?'} | "
+    title = info.get("title", "")[:70].encode("ascii", "replace").decode()   # cp1252 console
+    print(f"[auto] {title!r} | {info.get('game') or '?'} | "
           f"target {pl['kwargs']['duration_s']:.0f}s ({pl['why']['duration_s']}) | "
           f"{pl['kwargs']['encoder']}")
     mp = make(vod_id, cache_dir=cache_dir, progress=progress, **pl["kwargs"])

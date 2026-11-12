@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import json
 import os
 import time
@@ -62,6 +63,13 @@ def _progress_writer(path):
 
 def main(argv: list[str] | None = None) -> None:
     _load_dotenv()
+    # the windows console is cp1252: one emoji in a stream title or an llm chapter name
+    # would crash a run hours in. escape what it can't encode instead of raising
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError):
+            pass
     p = argparse.ArgumentParser(prog="refire", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
 
