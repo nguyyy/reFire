@@ -71,21 +71,32 @@ def game_glossary(game: str, model: str = DEFAULT_MODEL,
     if not game:
         return user
 
-    cache = Path(cache_dir) / f"glossary_{_slug(game)}.json"
+    name = f"glossary_{_slug(game)}.json"
+    cache = Path(cache_dir) / name
+    # the list depends on the game alone, so one vod's copy serves every vod of that game:
+    # this vod's, then the shared run/<name>, then the biggest an earlier vod left behind.
+    # the llm call is slow on a busy card and returned nothing on 2 of 4 runs (2026-11)
+    root = Path(cache_dir).parent
+    shared = root / name
+    found = [cache, shared] + sorted(root.glob(f"*/{name}"), key=lambda f: -f.stat().st_size)
     terms: list[str] = []
-    if cache.exists():
+    for f in found:
         try:
-            terms = json.loads(cache.read_text(encoding="utf-8"))
+            terms = json.loads(f.read_text(encoding="utf-8")) if f.exists() else []
         except (json.JSONDecodeError, OSError):
-            pass  # regenerate on a corrupt cache
+            terms = []   # corrupt copy -> try the next one
+        if terms:
+            break
     if not terms:
         terms = _llm_terms(game, model)
-        if terms:
-            try:
-                cache.parent.mkdir(parents=True, exist_ok=True)
-                cache.write_text(json.dumps(terms, indent=2), encoding="utf-8")
-            except OSError:
-                pass
+    if terms:
+        for f in (cache, shared):   # per-vod copy is what learn.game_of reads
+            if not f.exists():
+                try:
+                    f.parent.mkdir(parents=True, exist_ok=True)
+                    f.write_text(json.dumps(terms, indent=2), encoding="utf-8")
+                except OSError:
+                    pass
     return list(dict.fromkeys(user + terms))  # user terms first, dedupe, keep order
 
 

@@ -111,3 +111,28 @@ def test_join_words_glues_split_numbers_only():
     assert join_words(["1", ".5", "seconds"]) == "1.5 seconds"
     assert join_words(["wait", ",", "what", "..."]) == "wait , what ..."   # untouched
     assert join_words([]) == ""
+
+
+def test_glossary_reuses_an_earlier_vods_list_without_the_llm(tmp_path, monkeypatch):
+    from refire import glossary
+    old = tmp_path / "111"
+    old.mkdir()
+    (old / "glossary_genshin-impact.json").write_text(json.dumps(["Mitya", "Nahida"]))
+    monkeypatch.setattr(glossary, "_llm_terms", lambda *a: pytest.fail("llm called"))
+    got = glossary.game_glossary("Genshin Impact", cache_dir=tmp_path / "222", extra="Valeri")
+    assert got == ["Valeri", "Mitya", "Nahida"]
+    assert json.loads((tmp_path / "222" / "glossary_genshin-impact.json").read_text()) == ["Mitya", "Nahida"]
+    assert (tmp_path / "glossary_genshin-impact.json").exists()      # shared copy
+
+
+def test_ticker_reports_elapsed_until_stopped():
+    import time
+    from refire.pipeline import _Ticker
+    seen = []
+    t = _Ticker(seen.append, "finding speech", every=0.05)
+    time.sleep(0.18)
+    t.stop()
+    n = len(seen)
+    time.sleep(0.12)
+    assert seen[0] == "finding speech" and seen[1].startswith("finding speech (0m00s)")
+    assert len(seen) == n >= 3

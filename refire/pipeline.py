@@ -99,27 +99,82 @@ def _resolve_ollama_model(requested: str) -> str:
     return chosen
 
 
+class _Ticker:
+    """Re-report `msg (elapsed)` every `every` s while a step with no progress of its own
+    runs (audio extraction, the glossary call, whisper's load + speech scan before its
+    first segment), so a long quiet stretch reads as working, not hung. `stop()` ends it."""
+
+    def __init__(self, status, msg: str, every: float = 5.0):
+        self._stop = threading.Event()
+        self._t0 = time.monotonic()
+        self.status, self.msg = status, msg
+        status(msg)
+        self._th = threading.Thread(target=self._run, args=(every,), daemon=True)
+        self._th.start()
+
+    def _run(self, every):
+        while not self._stop.wait(every):
+            s = int(time.monotonic() - self._t0)
+            self.status(f"{self.msg} ({s // 60}m{s % 60:02d}s)")
+
+    def stop(self):
+        self._stop.set()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.stop()
+
+
+def _wav_hours(wav) -> float:
+    import wave
+    try:
+        with wave.open(str(wav), "rb") as w:
+            return w.getnframes() / w.getframerate() / 3600
+    except (OSError, EOFError, wave.Error):
+        return 0.0
+
+
 def _detect_core(video, chat, run_dir, model=DEFAULT_MODEL, game="", tx_progress=None,
                  transcriber="local", whisper_model=DEFAULT_WHISPER_MODEL,
                  batch_size=DEFAULT_BATCH_SIZE, compute_type="float16", terms="",
-                 chat_offset=0.0):
+                 chat_offset=0.0, status=None):
     """Brief-agnostic, cached front half: audio -> transcribe -> chat -> chunks.
 
     Returns (words, chunks, chat_z); words is [] when the transcript is empty.
     `tx_progress(frac)` is forwarded to transcription. `transcriber` picks the STT backend
-    plugin; `whisper_model`/`batch_size`/`compute_type` tune the local one.
+    plugin; `whisper_model`/`batch_size`/`compute_type` tune the local one. `status(msg)`
+    gets the steps before transcription reports progress, with elapsed time.
     """
+    status = status or _noop
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     wav = run_dir / "audio.wav"
     if not wav.exists():
-        extract_audio(video, wav)
-    hotwords = ", ".join(game_glossary(game, model=model, cache_dir=run_dir,
-                                       extra=terms))
-    words = transcribe(wav, cache_path=run_dir / "transcript.json",
-                       hotwords=hotwords, progress=tx_progress, backend=transcriber,
-                       model_size=whisper_model, batch_size=batch_size,
-                       compute_type=compute_type)
+        with _Ticker(status, "extracting audio"):
+            extract_audio(video, wav)
+    with _Ticker(status, f"{game or 'game'} glossary"):
+        hotwords = ", ".join(game_glossary(game, model=model, cache_dir=run_dir,
+                                           extra=terms))
+    cached = (run_dir / "transcript.json").exists()
+    tick = None if cached else _Ticker(
+        status, f"loading whisper + finding speech in {_wav_hours(wav):.1f}h of audio")
+
+    def first_progress(frac):   # whisper's first segment ends the quiet stretch
+        if tick:
+            tick.stop()
+        if tx_progress:
+            tx_progress(frac)
+
+    try:
+        words = transcribe(wav, cache_path=run_dir / "transcript.json",
+                           hotwords=hotwords, progress=first_progress, backend=transcriber,
+                           model_size=whisper_model, batch_size=batch_size,
+                           compute_type=compute_type)
+    finally:
+        if tick:
+            tick.stop()
     # nothing after this transcribes, and every later stage loads an ollama model on the same
     # card. whisper left cached there slowed the scout to ~5 tok/s
     release_whisper()
@@ -273,7 +328,8 @@ def make(
         video, chat, run_dir, model=model, game=game, terms=terms,
         transcriber=transcriber, chat_offset=start or 0.0,
         whisper_model=whisper_model, batch_size=batch_size, compute_type=compute_type,
-        tx_progress=lambda f: report(0.10 + 0.45 * f, "transcribing"))
+        tx_progress=lambda f: report(0.10 + 0.45 * f, "transcribing"),
+        status=lambda m: report(0.10, m))
     clock.lap("transcribe")
     if not words:
         raise SystemExit("Empty transcript -- nothing to edit.")
