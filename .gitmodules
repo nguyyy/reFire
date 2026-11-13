@@ -1,0 +1,3 @@
+[submodule "postre"]
+	path = postre
+	url = https://github.com/nguyyy/postre

@@ -560,7 +560,25 @@ var reFire = (function () {
         }
         foot.inPoint = 0;
         foot.outPoint = dur;
+        dipAudio(foot, times, M_FADE);
         return true;
+    }
+
+    // De-pop: a jump cut joins two arbitrary samples, a step in the waveform. Dip the
+    // footage layer's Audio Levels to -40dB across each jump (`audio_fade` seconds either
+    // side), the AE twin of render.audio_graph's fades. times[] are applyKeep's remap
+    // keys in pairs (span head, span tail), so every head after the first is a jump.
+    var M_FADE = 0;
+    function dipAudio(foot, times, f) {
+        if (!(f > 0) || times.length < 4) { return; }
+        try {
+            var lv = foot.property("Audio").property("Audio Levels"), ts = [], vs = [], k;
+            for (k = 2; k < times.length; k += 2) {
+                ts.push(times[k] - f, times[k], times[k] + f);
+                vs.push([0, 0], [-40, -40], [0, 0]);
+            }
+            lv.setValuesAtTimes(ts, vs);
+        } catch (e) { /* no audio on this layer: nothing to de-pop */ }
     }
 
     function buildClip(M, clip, srcs, tmpl, zoomScale, idx, folder, overlayTmpl, ovFolder,
@@ -621,6 +639,18 @@ var reFire = (function () {
         return comp;
     }
 
+    // Review markers (refire/markers.py) as Master comp markers: `at` is seconds into the
+    // clip comp, whose timeline is already dead-air-free, so master time = layer start + at.
+    function addMarkers(master, clip, st, en) {
+        var ms = (clip && clip.markers) || [], k;
+        for (k = 0; k < ms.length; k++) {
+            try {
+                var mv = new MarkerValue((ms[k].name || "reFire") + ": " + (ms[k].comment || ""));
+                master.markerProperty.setValueAtTime(Math.min(st + (ms[k].at || 0), en - 0.04), mv);
+            } catch (e) { /* a marker is a hint, never fail the build over one */ }
+        }
+    }
+
     function buildMaster(M, comps, cardTmpl, folder) {
         // order the comps by section, dropping a title card before each titled
         // section, then lay them out with a short crossfade between neighbours.
@@ -629,19 +659,22 @@ var reFire = (function () {
             sections = [{ title: "", clip_indices: [] }];
             for (s = 0; s < comps.length; s++) { sections[0].clip_indices.push(s); }
         }
-        var seq = [];
+        var seq = [], seqClip = [];     // seqClip[i] = the manifest clip in slot i (null = card)
         for (s = 0; s < sections.length; s++) {
             // style pass: a hook section sets card:false so the cut starts hot (no title card)
             if (sections[s].title && sections[s].card !== false) {
                 seq.push(buildCard(M, sections[s].title, cardTmpl, folder));
+                seqClip.push(null);
             }
             var idxs = sections[s].clip_indices || [];
             for (ci = 0; ci < idxs.length; ci++) {
                 idx = idxs[ci];
-                if (idx >= 0 && idx < comps.length) { seq.push(comps[idx]); }
+                if (idx >= 0 && idx < comps.length) { seq.push(comps[idx]); seqClip.push(M.clips[idx]); }
             }
         }
-        if (!seq.length) { for (var q = 0; q < comps.length; q++) { seq.push(comps[q]); } }
+        if (!seq.length) {
+            for (var q = 0; q < comps.length; q++) { seq.push(comps[q]); seqClip.push(M.clips[q]); }
+        }
 
         var i, xf = XFADE_S, minDur = seq[0].duration;
         for (i = 1; i < seq.length; i++) { if (seq[i].duration < minDur) { minDur = seq[i].duration; } }
@@ -661,6 +694,7 @@ var reFire = (function () {
             var st = lay.startTime, en = st + seq[i].duration;
             if (i > 0 && xf > 0) { op.setValueAtTime(st, 0); op.setValueAtTime(st + xf, 100); }
             if (i < seq.length - 1 && xf > 0) { op.setValueAtTime(en - xf, 100); op.setValueAtTime(en, 0); }
+            addMarkers(master, seqClip[i], st, en);
             t = en - xf;
         }
         // music bed under the whole cut: place once, fade in/out, hold at bgm_db.
@@ -713,6 +747,7 @@ var reFire = (function () {
         var M = readManifest(manifestPath);
         if (!M) { return "Manifest not found:\n" + manifestPath; }
         if (!M.clips || !M.clips.length) { return "Manifest has no clips to build."; }
+        M_FADE = M.audio_fade || 0;
         app.beginUndoGroup("reFire build");
         try {
             var tplF = ensureFolder("reFire templates");   // shared singletons

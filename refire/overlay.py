@@ -108,7 +108,6 @@ def _llm_emotes(moments, pool_names, model):
     if not moments:
         return []
     try:
-        import ollama  # optional heavy dep
         avail = ", ".join(sorted(pool_names)) or "(none)"
         system = (
             "You pick ONE Twitch emote that best fits the vibe of each moment from a "
@@ -119,11 +118,11 @@ def _llm_emotes(moments, pool_names, model):
             "per moment, in order."
         )
         user = json.dumps([{"said": m["word"], "context": m["context"]} for m in moments])
-        resp = ollama.chat(model=model, format="json", messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ])
-        names = json.loads(resp["message"]["content"]).get("emotes", [])
+        from . import local_llm
+        names = json.loads(local_llm.chat(
+            model, [{"role": "system", "content": system},
+                    {"role": "user", "content": user}],
+            num_predict=512, stall_s=120, total_s=300, tag="emotes")).get("emotes", [])
         return [str(names[i]).strip().lower() if i < len(names) and names[i] else fallback[i]
                 for i in range(len(moments))]
     except Exception:           # llm down / bad json -> use the keyword as the emote name

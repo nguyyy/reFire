@@ -121,3 +121,32 @@ def build_ass(
         )
 
     return _HEADER + "\n".join(lines) + ("\n" if lines else "")
+
+
+def lines_ass(lines: list[dict]) -> str:
+    """ASS for ready-made caption lines [{text, start, end}] (clip-relative, e.g. a
+    manifest clip's `captions` after caption_fix). The text is used as-is -- it is already
+    styled and proper-noun-fixed -- with the karaoke sweep spread evenly over its words.
+
+    ponytail: even sweep, the per-word times stayed in the transcript. Good enough for
+    2-3 word lines; carry word times into the manifest if longer lines ever look off.
+    """
+    out = []
+    for ln in lines:
+        toks = ln["text"].split()
+        if not toks or ln["end"] <= ln["start"]:
+            continue
+        kcs = max(1, round((ln["end"] - ln["start"]) * 100 / len(toks)))
+        text = " ".join(f"{{\\k{kcs}}}{t}" for t in toks)
+        out.append(f"Dialogue: 0,{_ts(ln['start'])},{_ts(ln['end'])},Default,,0,0,0,,{text}")
+    return _HEADER + "\n".join(out) + ("\n" if out else "")
+
+
+def join_words(texts) -> str:
+    """Caption words -> one line. Whisper splits some numbers ("5" + ",000!", "1" + ".5"),
+    and a plain space join shows them as "5 ,000!"; a token opening with ,/. then a digit
+    glues onto the word before it."""
+    out = ""
+    for t in texts:
+        out += t if (out and len(t) > 1 and t[0] in ",." and t[1].isdigit()) else (" " + t if out else t)
+    return out

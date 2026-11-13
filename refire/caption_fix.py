@@ -26,7 +26,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .director import CLAUDE_MODEL, _complete, _complete_cli, _JsonModel
+from .director import CLAUDE_MODEL, _api_fallback, _complete, _complete_cli, _JsonModel
 from .glossary import _slug, parse_terms
 
 # caption lines per call. a 20 min cut is ~880 lines so this is 2-3 calls. batching just
@@ -250,7 +250,7 @@ def _ask(system: str, user: str, model: str, backend: str, trace=None,
             return _complete_cli(model, system, content, Fixes, tag=tag, trace=trace,
                                  live=False)
         except (RuntimeError, OSError) as e:
-            print(f"[{tag}] claude CLI unavailable ({e}); using API key")
+            _api_fallback(tag, e)
     import anthropic          # optional heavy dep, no key -> raises and caller degrades
 
     return _complete(anthropic.Anthropic(), model, system, content, Fixes,

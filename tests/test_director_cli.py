@@ -267,3 +267,59 @@ def test_review_runs_at_its_own_effort(monkeypatch):
     cmd = seen["cmd"]
     assert cmd[cmd.index("--effort") + 1] == "high"
     assert '{"keep": <n>}' in seen["stdin"]       # asked for a patch, not a full outline
+
+
+def test_cost_log_accumulates_per_stage(tmp_path, monkeypatch):
+    from refire import director
+    monkeypatch.setattr(director, "COST_LOG", {"path": tmp_path / "cost.json", "run": "r1"})
+    director._log_cost("director", "m", "cli", {"input_tokens": 100, "output_tokens": 7})
+    director._log_cost("captions 2/3", "m", "cli", {"input_tokens": 5})
+    director._log_cost("captions 3/3", "m", "cli", None)
+    import json
+    run = json.loads((tmp_path / "cost.json").read_text())["runs"]["r1"]
+    assert len(run["calls"]) == 3
+    assert run["by_stage"]["captions"]["calls"] == 2
+    assert run["by_stage"]["director"]["input_tokens"] == 100
+    monkeypatch.setattr(director, "COST_LOG", None)
+    director._log_cost("x", "m", "cli", {})            # off: no file, no error
+
+
+def test_lessons_ride_in_the_system_prompt_of_director_and_review(monkeypatch):
+    seen = []
+
+    def capture(model, system, content, cls, **kw):
+        seen.append(system)
+        return cls.model_validate(json.loads(WHOLE if cls is director.Outline else REVIEW_JSON))
+
+    monkeypatch.setattr(director, "_complete_cli", capture)
+    les = {"labels": {"end_early": {"examples": [
+        {"label": "end_early", "delta_s": 3.9, "text": "all me! Ow.", "before": "It's",
+         "after": "", "beat": {"role": "payoff", "energy": 4}}]}}}
+    note = director.lessons_note(les)
+    assert "PAST EDITS" in note and "[[all me! Ow.]]" in note and "{" not in note
+    assert director.lessons_note(None) == ""
+    director.outline("[0s] map", "brief", "title", 600.0, lessons=note)
+    director.review("[0s] map", "brief", "title", _LOG, 600.0, lessons=note)
+    assert all("PAST EDITS" in s for s in seen) and len(seen) == 2
+
+
+def test_few_shot_prefers_the_same_role_then_energy():
+    from refire.learn.lessons import few_shot
+    ex = [{"label": "end_early", "delta_s": 1.0, "text": t, "before": "", "after": "",
+           "beat": {"role": r, "energy": e}}
+          for t, r, e in (("a", "setup", 1), ("b", "payoff", 2), ("c", "payoff", 5))]
+    les = {"labels": {"end_early": {"examples": ex}}}
+    got = few_shot(les, ("end_early",), n=2, role="payoff", energy=5)
+    assert ["[[c]]" in got[0], "[[b]]" in got[1]] == [True, True]
+    assert few_shot(None, ("end_early",)) == []
+
+
+def test_api_fallback_raises_the_cli_error_when_there_is_no_key(monkeypatch, capsys):
+    import pytest
+    from refire import director
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="5-hour limit"):
+        director._api_fallback("director", RuntimeError("You've hit your 5-hour limit"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    director._api_fallback("director", RuntimeError("cli gone"))
+    assert "using API key" in capsys.readouterr().out

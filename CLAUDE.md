@@ -1,0 +1,92 @@
+# reFire -- working notes for agents
+
+reFire turns a multi-hour Twitch VOD into a story-edited cut (AE / Premiere manifest,
+optional ffmpeg rough.mp4). AI supplies editorial judgment; deterministic code owns
+exact cut points, caches, captions and manifests. Know which half a change belongs in.
+
+**Rule: a phase is not done until `uv run pytest` passes and `refire eval --all` didn't
+regress** (fix_cost vs the previous `run/eval/*.json`, leave-one-out).
+
+## Pipeline map (`refire make`, `pipeline.make`)
+
+| Stage | Where | Notes |
+|---|---|---|
+| download VOD + chat | `ingest.ensure_vod` | `vods/<id>[@a-b].mp4`, `.chat.json`. A `--start/--end` window is its own cache key; all run times are 0-based in the window |
+| audio / glossary / transcribe | `pipeline._detect_core` | `run/<vod>/audio.wav`, `transcript.json` (word timings), `speech.json` (Silero) |
+| perception | `perception.loudness_signal`, `chat.chat_signal` | `signals.json` = loudness z (5s buckets). Chat z is computed but not fed to the director |
+| moment map | `perception.moment_map` | `map_v2.txt`, `[Ns] (loud) text` lines |
+| scout | `director.chapterize` (ollama) | `chapters.json`, `map/chapter_NN.txt` |
+| **selection** | `director.outline` (Claude) | beats with `start_s/end_s/segments/setup/payoff/reaction` anchors |
+| **boundaries** | `narrative.cast` -> `_snap` (`select.snap_to_sentences/phrase/transient`), anchor widening (`WIDEN_SLOP`), `SEG_MERGE_GAP`, `_one_moment` | `--snap`, `--truncate` live here |
+| budget | `narrative._trim_to_budget` | drops by role priority |
+| pacing audit | `pacing.audit` | `skipped_build`, `severed_exchange`, ... fed to the critic as facts |
+| **critic loop** | `pipeline.make` loop -> `director.review` -> `Review.apply` -> re-`cast` | `--review-rounds` (2), CLI session resume |
+| boundary stage (off) | `boundary.refine_sections` | `--boundary`: thread-head starts, reaction tails, merges; caps from lessons |
+| trim stage (off) | `trim.trim_sections` (ollama) | `--trim`: writes each clip's `cut`, removed via `compress_silence(exclude=)` |
+| structured critics (off) | `critics.review_sections` (Claude, parallel) | `--critics`: continuity/payoff/filler/dropoff -> arbiter; conflicts -> markers |
+| dead air | `select.compress_silence` (used by cast, `ae_export`, `assemble`) | per-clip `keep` spans |
+| review markers (off) | `markers.annotate_manifest` after `build_manifest` | edge risk = naive Bayes fit on `clip_diff.json` boundaries; `clip.markers`, `ae/markers.csv` |
+| de-pop / L-cuts | `render.audio_graph` (rough), `ae/reFire.jsx dipAudio` | `--crossfade-ms` (15, on), `--lcut` (off) |
+| overlays / bgm | `overlay.pick_overlays`, `pick_bgm` | |
+| **manifest** | `ae_export.build_manifest` | `run/<vod>/<run>/ae/manifest.json`, DNxHR proxies `p_dnxhr_sq_<a>-<b>.mov` (offset `a` = clip start - 2s) |
+| captions | `caption_fix.fix_manifest` | learns into `run/corrections_<game>.json` |
+| rough cut | `assemble.render_clips` -> `render.render_clip` | `--render`, `rough.mp4` |
+| Premiere | `ppro/reFirePpro.jsx` `build()` lays one V1 trackItem per `keep` span; `timeline()` dumps V1 to `timeline.tsv`; `srt.recaption` re-captions it | `ppro/remote.py` drives it over CDP |
+| After Effects | `ae/reFire.jsx` | |
+| `loud` | `loud.py` | several VODs on a virtual timeline (VOD i at `i*100000s`, `sources[]`) |
+
+Other verbs: `srt`, `recap`, `fixcaps`, `loud`. Deep dive: `docs/director-pipeline.md`.
+
+`refire auto <vod>` (`auto.py`) = `make` with every input picked: Twitch title/game from
+the chat download, no brief (stream-driven director), duration = median runtime of the
+learned finals, measured stage defaults, base edit (no emotes/sfx/music/cards/zoom),
+1080p render burning the manifest's fixed captions (`render_clips(captions=)`), NVENC if
+it works, whole-program loudnorm to -14 LUFS. Writes `final.mp4`, `summary.md`, `auto.json`,
+then checks the file. `narrative._drop_repeats` stops two beats replaying shared footage.
+
+## Learning loop (`refire/learn/`)
+
+`refire learn <vod>` reads the finished Premiere project for a run (read-only, gzip XML
+in memory), maps every final V-track item back to run-local VOD seconds (`align.py`),
+diffs it against what reFire proposed (`diff.py`), and writes `run/<vod>/clip_diff.json`
++ `run/clip_lessons_<game>.json` + `run/clip_lessons_report.md`. `refire eval` scores a
+cut against those finals (`fix_cost`, leave-one-out) into `run/eval/<timestamp>.json`.
+
+Day to day: `refire make` -> edit in Premiere using the markers -> `refire learn <vod>`.
+learn finds the project by the run's proxy paths under `REFIRE_PROJECTS`
+(`;`-separated; default `~/Desktop/iphone` + `~/Documents/Adobe/Premiere Pro`, autosaves
+skipped), so a finished edit is ingested with no extra input, the same way
+`corrections_<game>.json` grows. Lost run folders are rebuilt from proxy names
+(`p_<profile>_<clip start - 2>-<clip end + 10>.mov`) in the bin's document order (= play
+order; exact where a manifest survives); a clip inside a later-playing clip is a
+`Cold Open` teaser. The build's own `ae/captions.srt` survives inside the project
+(`prproj.captions`); `align.use_captions` checks the rebuild against it and, when the
+captions are dense, takes the dead-air keep they support. `voiced` is gated by project
+date (compress_silence only kept Silero audio from 2026-09-13). A rebuild needs the VOD
+re-transcribed into `run/<vod>/` first (new files only).
+
+Data facts that shaped the defaults (2026-11, 8 edits): ~80% of edges are left alone, so
+blanket boundary rules lose; whole-utterance cuts are rare; the editor cannot extend a
+start more than PROXY_PAD (2s) inside a proxy, which caps observed `start_late`;
+August builds played in story order, not chronologically.
+
+## Conventions
+
+- **uv only**: `uv run pytest`, `uv run refire ...`. The package dir is `reFire/` but
+  imports as `refire` (`pyproject.toml` package-dir).
+- **Console is cp1252**: anything printed during a run must be ASCII.
+- **Git on this case-insensitive checkout**: the index tracks `refire/...`. Stage edits
+  with `git add -u` and new files as `git add reFire/<file>`, then check
+  `git status --short` is clean -- either spelling alone silently skips the other kind.
+- Tests are pure local (no network/GPU/LLM), whole suite in a few seconds.
+- Every local-model (ollama) call goes through `local_llm.chat`: streamed with a stall
+  timeout (gap between tokens), capped output, unload + one retry when a game or browser
+  takes the VRAM, then `LocalLLMError` for the caller's fallback. Never raw `ollama.chat`.
+- No Claude call inside a per-clip or per-chunk loop. Bulk work -> ollama or
+  deterministic code; Claude only for whole-cut reasoning. Log every Claude call to
+  `cost.json` (`director._log_cost`).
+- New stages go behind a flag / style key and default OFF until `refire eval` shows they
+  lower fix_cost without raising `dropped`/`added`.
+- `run/` and the user's Premiere project folder are read-only inputs: never modify, move
+  or re-save existing files there. New outputs (clip_diff.json, eval/, cost.json) are ok.
+- Comments: lowercase, terse, say why. `ponytail:` marks a deliberate shortcut + ceiling.

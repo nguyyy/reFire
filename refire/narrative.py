@@ -306,6 +306,40 @@ def _score_spans(jobs: list[tuple[dict, dict, str]], model: str, score_chunk,
         row["score"], row["reason"] = res["llm_score"], res.get("reason", "")
 
 
+REPEAT_MIN_S = 0.6   # a leftover sliver shorter than this reads as a glitch, not footage
+
+
+def _drop_repeats(picked: list[dict], min_s: float = REPEAT_MIN_S) -> float:
+    """Remove footage a beat repeats from a beat that plays before it (play order).
+
+    Two beats the director butts together often share a few seconds -- the first one's
+    reaction tail runs past the next one's in-point -- and the viewer hears the same line
+    twice in a row (vod 2924677606: "too easy, and you know what?" played twice at the
+    climax). The later beat gives the overlap up, which also makes the seam continuous;
+    slivers under `min_s` go too. Updates segments/start/end in place, leaves a beat with
+    nothing left with no segments for the caller to drop, returns the seconds removed.
+    Runs before the cold open is added, so the teaser's deliberate repeat stays.
+    """
+    used: list[tuple[float, float]] = []
+    removed = 0.0
+    for p in picked:
+        kept = []
+        for a, b in p["segments"]:
+            pieces = [(float(a), float(b))]
+            for u0, u1 in used:
+                pieces = [q for x, y in pieces
+                          for q in ([(x, y)] if u1 <= x or u0 >= y else
+                                    [(x, u0)] * (x < u0) + [(u1, y)] * (u1 < y))]
+            pieces = [[x, y] for x, y in pieces if y - x >= min_s]
+            removed += (b - a) - sum(y - x for x, y in pieces)
+            kept += pieces
+        used += [(x, y) for x, y in kept]
+        p["segments"] = kept
+        if kept:
+            p["start"], p["end"] = kept[0][0], kept[-1][1]
+    return round(removed, 3)
+
+
 def cast(outline, chunks, words: list[dict], target_s: float,
          model: str, tol: float = 0.35, progress=None,
          deadspace: bool = True, silence_pad: float = SILENCE_PAD,
@@ -469,6 +503,12 @@ def cast(outline, chunks, words: list[dict], target_s: float,
         picked.sort(key=lambda p: p["start"])
     elif order == "whiplash":
         picked = _whiplash(picked)
+    removed = _drop_repeats(picked)
+    if removed:
+        print(f"[cast] removed {removed:.1f}s of footage repeated across beats")
+        for p in picked:
+            p["dur"] = _kept_dur(words, p["segments"], deadspace, silence_pad, voiced)
+        picked = [p for p in picked if p["segments"]]
     # role/energy go with the clip so the style pass can use them (hook punches in, button stays
     # out of the laugh). one clip per kept span, multi-clip sections render as jump cuts
     sections = [{"title": p["title"], "role": p["role"], "energy": p["energy"],

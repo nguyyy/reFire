@@ -710,10 +710,11 @@ def _windows(map_text: str, window_s: float = 1200.0) -> list[tuple[float, float
     return out
 
 
-# ollama.chat has no timeout and can block forever, which would make the stub fallback below
-# dead code. generous on purpose: a 20 min window on a local 20B takes 1.5-5 min and a
-# timeout that trips on a healthy run is worse than none. mostly catches runaway thinking
-SCOUT_TIMEOUT_S = 600.0
+# a window's prompt is ~16k tokens: on a part-offloaded 30B the first token can take a minute
+# or two, so the stall limit (max gap between tokens, see local_llm) is generous. the total
+# cap only catches a runaway generation. a stall reloads the model and retries once
+SCOUT_STALL_S = 300.0
+SCOUT_TIMEOUT_S = 900.0
 
 
 def chapterize(map_text: str, window_s: float = 1200.0, model: str = "llama3.1:8b",
@@ -731,8 +732,7 @@ def chapterize(map_text: str, window_s: float = 1200.0, model: str = "llama3.1:8
             return [Chapter.model_validate(c) for c in data]
         except (ValueError, TypeError):
             pass   # corrupt cache -> rescout
-    import ollama
-    client = ollama.Client(timeout=SCOUT_TIMEOUT_S)
+    from . import local_llm
     wins = _windows(map_text, window_s)
     n = max(1, len(wins))
     chapters: list[Chapter] = []
@@ -745,12 +745,11 @@ def chapterize(map_text: str, window_s: float = 1200.0, model: str = "llama3.1:8
                             f"({a / 3600:.2f}h-{b / 3600:.2f}h, {len(text) // 1000}k chars)")
         t_win = time.monotonic()
         try:
-            resp = client.chat(
-                model=model, format="json",
-                messages=[{"role": "system", "content": _SCOUT_SYSTEM},
-                          {"role": "user", "content": text}],
-                options={"num_ctx": 16384})
-            got = _ChapterOut.model_validate(json.loads(resp["message"]["content"]))
+            got = _ChapterOut.model_validate(json.loads(local_llm.chat(
+                model, [{"role": "system", "content": _SCOUT_SYSTEM},
+                        {"role": "user", "content": text}],
+                options={"num_ctx": 16384}, num_predict=2048, stall_s=SCOUT_STALL_S,
+                total_s=SCOUT_TIMEOUT_S, tag="scout")))
         except Exception as e:   # any window failure (incl timeout) -> stub, keep going
             print(f"[scout] window {k} failed ({e}); using stub chapter", flush=True)
             got = _ChapterOut()
@@ -894,6 +893,59 @@ def _n_beats(target_s: float, pace: float = 1.0) -> int:
     return max(2, min(n, ceiling))
 
 
+# where every Claude call's tokens go: {"path": run/<vod>/cost.json, "run": run name}.
+# pipeline.make sets it; None (tests, one-off verbs) logs nothing
+COST_LOG: dict | None = None
+_COST_LOCK = __import__("threading").Lock()   # caption batches finish in parallel
+
+
+def _log_cost(tag: str, model: str, backend: str, usage: dict | None,
+              cost_usd: float | None = None, secs: float | None = None) -> None:
+    """Append one call to cost.json under this run, keyed by stage (the tag's first word:
+    director / review / captions / critic). Never raises -- accounting is not the job."""
+    if not COST_LOG:
+        return
+    import re
+    from pathlib import Path
+    u = usage or {}
+    row = {"tag": tag, "stage": re.split(r"[^a-z]", tag.lower())[0] or tag, "model": model,
+           "backend": backend, "secs": round(secs, 1) if secs else None,
+           "cost_usd": cost_usd,
+           **{k: int(u.get(k) or 0) for k in ("input_tokens", "output_tokens",
+                                             "cache_read_input_tokens",
+                                             "cache_creation_input_tokens")}}
+    try:
+        with _COST_LOCK:
+            path = Path(COST_LOG["path"])
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            run = data.setdefault("runs", {}).setdefault(COST_LOG["run"], {"calls": []})
+            run["calls"].append(row)
+            by: dict = {}
+            for c in run["calls"]:
+                b = by.setdefault(c["stage"], {"calls": 0, "input_tokens": 0,
+                                               "output_tokens": 0, "cache_read_input_tokens": 0,
+                                               "cache_creation_input_tokens": 0})
+                b["calls"] += 1
+                for k in ("input_tokens", "output_tokens", "cache_read_input_tokens",
+                          "cache_creation_input_tokens"):
+                    b[k] += c[k]
+            run["by_stage"] = by
+            path.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def _api_fallback(tag: str, err: Exception) -> None:
+    """The subscription CLI failed: fall back to the API only when there is a key. Without
+    one the API attempt dies on an auth error that buries the real cause (a 5-hour usage
+    limit, a missing CLI), so raise that instead -- callers handle either the same way."""
+    import os
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise RuntimeError(f"claude CLI unavailable and no ANTHROPIC_API_KEY to fall back "
+                           f"on: {err}") from err
+    print(f"[{tag}] claude CLI unavailable ({err}); using API key")
+
+
 def _extract_json(txt: str) -> str:
     """Slice the JSON object out of a model reply (tolerates prose / ``` fences)."""
     a, b = txt.find("{"), txt.rfind("}")
@@ -971,6 +1023,7 @@ def _complete(client, model, system, user_content, model_cls, tag="claude", trac
         text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
         return text, resp.stop_reason, "".join(thought), getattr(resp, "usage", None)
 
+    t_call = time.monotonic()
     text, stop, thought, usage = _call(effort)
     # max_tokens with text = thinking ate the budget and the json got cut off. no
     # auto-continuation here so do what the empty case does: low effort, budget goes to the
@@ -989,6 +1042,10 @@ def _complete(client, model, system, user_content, model_cls, tag="claude", trac
                  f"out={getattr(usage, 'output_tokens', 0):,}\n")
         print(f"[{tag}] {cache.strip()}")
     print(f"[{tag}] <- stop_reason={stop}, {len(text):,} chars")
+    _log_cost(tag, model, "api", {k: getattr(usage, k, 0) for k in (
+        "input_tokens", "output_tokens", "cache_read_input_tokens",
+        "cache_creation_input_tokens")} if usage is not None else None,
+        secs=time.monotonic() - t_call)
     if trace:
         _trace_write(trace, f"{stamp}-{tag}-response.txt",
                      f"STOP_REASON: {stop}\n{cache}\n=== THINKING (summarized) ===\n{thought}\n\n"
@@ -1115,6 +1172,7 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
     turns: list[str] = []
     stops: list[str] = []
     text, stop, is_err = "", None, False
+    usage, cost_usd = None, None
     for line in proc.stdout:
         try:
             ev = json.loads(line)
@@ -1160,6 +1218,7 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
             text = ev.get("result") or ""
             stop = ev.get("stop_reason") or ev.get("subtype")
             is_err = bool(ev.get("is_error"))
+            usage, cost_usd = ev.get("usage"), ev.get("total_cost_usd")
     proc.wait()
     killer.cancel()
     os.unlink(sp.name)
@@ -1168,6 +1227,7 @@ def _complete_cli(model, system, user_content, model_cls, tag="claude", trace=No
     joined = "".join(turns)
     print(f"[{tag}] <- stop_reason={stop}, {len(text):,} chars "
           f"({len(turns)} turn{'s' * (len(turns) != 1)}, {len(joined):,} chars joined)")
+    _log_cost(tag, model, "cli", usage, cost_usd, time.monotonic() - t_call)
     if trace:
         # turn count + per-turn stop reasons, a fragment that looks like a whole answer is hard to spot
         _trace_write(trace, f"{stamp}-{tag}-response.txt",
@@ -1255,13 +1315,29 @@ def _budget_note(target_s: float, shrink: float = CUT_SHRINK, pace: float = 1.0)
     return out + "\n"
 
 
+def lessons_note(lessons: dict | None, n: int = 2) -> str:
+    """Past finished edits as few-shot pairs for the director/critic system prompts.
+
+    "reFire proposed X -> the editor did Y", for the failure modes the boundaries and the
+    beat selection own. Appended AFTER `.format()` (lesson text can hold braces) and
+    fixed for the whole run, so it never moves the cached prefix between rounds."""
+    from .learn.lessons import few_shot
+    lines = few_shot(lessons, ("start_late", "end_early", "interior_cut", "dropped"), n)
+    if not lines:
+        return ""
+    return ("\n\nPAST EDITS: how this editor corrected earlier reFire cuts of this game "
+            "(reFire's proposal, then what they did). Cut the way they would -- and note "
+            "how rarely they had to act; most proposed boundaries were kept:\n"
+            + "\n".join(lines) + "\n")
+
+
 def outline(stream_map_text: str, brief: str, title: str, target_s: float,
             model: str = CLAUDE_MODEL, examples=None, trace=None,
             backend: str = "cli", run_dir=None,
             shrink: float = CUT_SHRINK, style: str | None = None,
             pace: float = 1.0, stack: int = 0,
             keep_build: bool = True, effort: str = DEFAULT_EFFORT,
-            session_id: str | None = None) -> Outline:
+            session_id: str | None = None, lessons: str = "") -> Outline:
     """One Claude call: stream map + brief -> story outline (central idea + beats).
 
     `examples` is the deferred reference-video few-shot hook (prior edits' beat
@@ -1275,7 +1351,7 @@ def outline(stream_map_text: str, brief: str, title: str, target_s: float,
     # or it breaks the cache prefix
     system = (pick_system(brief, style, stack, keep_build, pace)
               .format(n=_n_beats(target_s, pace), roles=_role_note(CUT_SHRINK, pace))
-              + _OUTLINE_INSTR)
+              + lessons + _OUTLINE_INSTR)
     user_content = [
         {
             "type": "text",
@@ -1297,7 +1373,7 @@ def outline(stream_map_text: str, brief: str, title: str, target_s: float,
                                  cwd=run_dir, effort=effort,
                                  session_id=session_id)
         except (RuntimeError, OSError) as e:
-            print(f"[director] claude CLI unavailable ({e}); using API key")
+            _api_fallback("director", e)
     import anthropic  # optional heavy dep, missing key raises -> caller falls back
 
     client = anthropic.Anthropic()             # reads ANTHROPIC_API_KEY
@@ -1311,7 +1387,7 @@ def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
            shrink: float = CUT_SHRINK, style: str | None = None,
            pace: float = 1.0, stack: int = 0,
            keep_build: bool = True, effort: str = DEFAULT_EFFORT,
-           session_id: str | None = None) -> Review:
+           session_id: str | None = None, lessons: str = "") -> Review:
     """Critic pass: read the realized rough cut + stream map, approve or return a revised
     Outline. One Claude call; same `backend` semantics as `outline()` (CLI-first, API
     fallthrough). Raises on no-backend-available / API error so the caller keeps the
@@ -1350,7 +1426,7 @@ def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
                    "so it escalates, and none of them should be long enough to explain "
                    "itself. Do not collapse it to one clip, and do not ask for context "
                    "inside it; the viewer being half a beat behind is the intent.")
-    system += _REVIEW_INSTR
+    system += lessons + _REVIEW_INSTR
     # the only part that changes between rounds. a resumed cli session sends just this
     tail = {
         "type": "text",
@@ -1387,7 +1463,7 @@ def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
                                  tag="review", trace=trace, tools=tools,
                                  cwd=run_dir, effort=effort)
         except (RuntimeError, OSError) as e:
-            print(f"[review] claude CLI unavailable ({e}); using API key")
+            _api_fallback("review", e)
     import anthropic  # optional heavy dep, missing key raises -> caller keeps the current cut
 
     client = anthropic.Anthropic()
@@ -1403,7 +1479,7 @@ def outline_local(stream_map_text: str, brief: str, title: str, target_s: float,
     """Free local-Ollama director (no API spend). Coarser outlines than Claude; best on
     shorter streams since the whole map must fit the model's context. Same `Outline`.
     """
-    import ollama  # already a project dep
+    from . import local_llm
     # CUT_SHRINK for the same reason as outline(), _budget_note's wording assumes this prior
     system = (pick_system(brief, style, stack, keep_build, pace)
               .format(n=_n_beats(target_s, pace), roles=_role_note(CUT_SHRINK, pace))
@@ -1411,10 +1487,8 @@ def outline_local(stream_map_text: str, brief: str, title: str, target_s: float,
     user = (_header(brief, title, target_s, style)
             + f"STREAM MAP (timestamp -> what was said):\n{stream_map_text}"
             + _budget_note(target_s, shrink, pace))
-    resp = ollama.chat(
-        model=model, format="json",
-        messages=[{"role": "system", "content": system},
-                  {"role": "user", "content": user}],
+    return Outline.model_validate(json.loads(local_llm.chat(
+        model, [{"role": "system", "content": system},
+                {"role": "user", "content": user}],
         options={"num_ctx": 8192},   # bump for long streams if it truncates
-    )
-    return Outline.model_validate(json.loads(resp["message"]["content"]))
+        num_predict=8192, stall_s=600, total_s=3600, tag="local director")))

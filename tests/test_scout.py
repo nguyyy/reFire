@@ -30,7 +30,7 @@ def _fake_client(calls, seen=None):
             if seen is not None:
                 seen.update(k)
 
-        def chat(self, model, format, messages, options):
+        def chat(self, model, format, messages, options, **k):
             calls.append(messages[1]["content"])
             return {"message": {"content": json.dumps({
                 "title": "Boss attempts", "summary": "He tries the boss.",
@@ -79,7 +79,7 @@ def test_the_scout_call_is_given_a_timeout(monkeypatch):
     seen = {}
     monkeypatch.setattr(ollama, "Client", _fake_client([], seen))
     director.chapterize(MAP, window_s=1200.0)
-    assert seen.get("timeout") == director.SCOUT_TIMEOUT_S
+    assert seen.get("timeout") == director.SCOUT_STALL_S   # max gap between tokens
 
 
 def test_chapterize_reports_progress_before_and_after_each_window(monkeypatch):

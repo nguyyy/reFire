@@ -205,9 +205,11 @@ var reFirePpro = (function () {
         // sooner or later lands the next clip 1-2 frames past the last one -- which
         // reads as black flashes between clips. Reading the real end back is exact and
         // needs no fps.
-        var at = seconds(0), playhead = 0.0, spansPlaced = 0, c, s;
+        var at = seconds(0), playhead = 0.0, spansPlaced = 0, nMarkers = 0, c, s;
         for (c = 0; c < clips.length; c++) {
             var clip = clips[c];
+            var clipHead = playhead;           // where this clip actually lands
+
             var part = partFor(M, clip);
             var item = items[Math.min(clip.src || 0, items.length - 1)];
             var base = clip.start - (part.offset || 0);      // source time of the clip head
@@ -231,15 +233,38 @@ var reFirePpro = (function () {
                 if (placed) { at = placed.end; playhead = at.seconds; }
                 spansPlaced++;
             }
+            nMarkers += addMarkers(seq, clip, clipHead, playhead);
         }
 
         var msg = "Built '" + seq.name + "': " + clips.length + " clip(s) in " +
                   spansPlaced + " cut(s), " + playhead.toFixed(1) + "s.";
+        if (nMarkers) { msg += "  " + nMarkers + " review marker(s) on the sequence."; }
         if (seq.audioTracks.numTracks && seq.audioTracks[0].clips.numItems === 0) {
             msg += "  NOTE: no audio landed on A1 -- linked audio did not follow.";
         }
         msg += "  " + attachCaptions(manifestPath, bin);
         return msg;
+    }
+
+    // Review markers (refire/markers.py): each sits `at` seconds into its clip on the
+    // dead-air-free timeline, so it is placed from where the clip REALLY landed
+    // (clipHead), not a python-side running sum that drifts a frame per cut. Clamped to
+    // the clip so a marker can never point into the next one. Sequence.markers and
+    // Marker.name/comments are the documented API; setColorByIndex only exists on newer
+    // Premiere builds, hence its own try.
+    function addMarkers(seq, clip, clipHead, clipEnd) {
+        var ms = clip.markers || [], n = 0, k;
+        for (k = 0; k < ms.length; k++) {
+            var t = Math.min(clipHead + (ms[k].at || 0), Math.max(clipHead, clipEnd - 0.04));
+            try {
+                var mk = seq.markers.createMarker(t);
+                mk.name = ms[k].name || "reFire";
+                mk.comments = ms[k].comment || "";
+                try { mk.setColorByIndex(ms[k].side === "start" ? 3 : 1); } catch (e1) {}
+                n++;
+            } catch (e) {}
+        }
+        return n;
     }
 
     // Premiere has no documented way to put a caption track on a sequence from

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import json
 import os
 import time
@@ -62,6 +63,13 @@ def _progress_writer(path):
 
 def main(argv: list[str] | None = None) -> None:
     _load_dotenv()
+    # the windows console is cp1252: one emoji in a stream title or an llm chapter name
+    # would crash a run hours in. escape what it can't encode instead of raising
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError):
+            pass
     p = argparse.ArgumentParser(prog="refire", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -188,6 +196,40 @@ def main(argv: list[str] | None = None) -> None:
     mk.add_argument("--no-caption-fix", action="store_true",
                     help="skip the Claude pass that repairs mistranscribed proper nouns "
                          "in the captions (character/place names, the streamer's friends)")
+    mk.add_argument("--boundary", action="store_true", default=None,
+                    help="boundary stage: pull clip starts back to where the thought "
+                         "began, push ends through the reaction tail (caps learned from "
+                         "your past edits). Off by default -- it did not lower fix_cost "
+                         "in `refire eval`")
+    mk.add_argument("--trim", action="store_true", default=None,
+                    help="intra-clip trim: cut filler/off-topic lines inside kept clips "
+                         "(local Ollama labels + a no-later-line-depends-on-it test). Off "
+                         "by default until `refire eval --trim` shows it helps")
+    mk.add_argument("--lessons", action="store_true", default=None,
+                    help="show the director and critic a few 'reFire proposed X, the "
+                         "editor did Y' pairs from your past finished edits "
+                         "(run/clip_lessons_<game>.json, built by `refire learn`)")
+    mk.add_argument("--critics", action="store_true", default=None,
+                    help="after the review loop, run four job-specific critics "
+                         "(continuity, payoff, filler, drop-off) on the realized cut; "
+                         "their disagreements become review markers. +4 small Claude "
+                         "calls per round, max 2 rounds")
+    mk.add_argument("--critic-effort", choices=["low", "medium", "high", "xhigh", "max"],
+                    default="low", help="reasoning effort for --critics (default low)")
+    mk.add_argument("--crossfade-ms", type=float, default=15.0,
+                    help="de-pop fade at every cut, in the rough render and the AE build "
+                         "(default 15; 0 = hard cuts as before)")
+    mk.add_argument("--lcut", action="store_true",
+                    help="rough render: where a line ends on a shout, let its audio run "
+                         "up to 0.35s under the next shot instead of chopping it")
+    mk.add_argument("--markers", action="store_true",
+                    help="review markers on the cut points you are most likely to move "
+                         "(Premiere sequence markers, AE comp markers, ae/markers.csv), "
+                         "learned from your past edits. Off by default: no better than "
+                         "chance yet in `refire eval --markers`")
+    mk.add_argument("--marker-threshold", type=float, default=0.26,
+                    help="with --markers: risk (0-1) at or above which a cut point gets "
+                         "a marker; lower = more (default 0.26, ~10 per video)")
     mk.add_argument("--progress-file", default=None,
                     help="write {pct,msg,done} JSON here for a GUI progress bar")
 
@@ -271,7 +313,99 @@ def main(argv: list[str] | None = None) -> None:
     ld.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     ld.add_argument("--compute-type", default="float16")
 
+    ln = sub.add_parser("learn",
+                        help="diff reFire's cut against your finished Premiere edit "
+                             "-> run/<vod>/clip_diff.json + run/clip_lessons_<game>.json")
+    ln.add_argument("vod_id", nargs="?", default=None,
+                    help="VOD number (omit with --all)")
+    ln.add_argument("--all", action="store_true",
+                    help="every run a project references, orphaned runs included")
+    ln.add_argument("--project", default=None,
+                    help=".prproj to read (default: search --projects-dir for the one "
+                         "that imported this run's media)")
+    from .learn.lessons import DEFAULT_PROJECTS
+    ln.add_argument("--projects-dir", default=DEFAULT_PROJECTS,
+                    help="folder(s) of finished Premiere projects, searched recursively, "
+                         "';'-separated (env REFIRE_PROJECTS; default ~/Desktop/iphone + "
+                         "~/Documents/Adobe/Premiere Pro). Read-only")
+    ln.add_argument("--run-root", default="run", help="reFire run folder (default run)")
+    ln.add_argument("--cache-dir", default="vods", help="VOD/chat cache (default vods)")
+    ln.add_argument("--game", default="",
+                    help="game for runs whose cache has no glossary file (lessons are "
+                         "pooled per game), e.g. 'genshin impact'")
+    ln.add_argument("--motion", action="store_true",
+                    help="also measure on-screen motion over every diff span (decodes "
+                         "the VOD, a few minutes per video)")
+
+    au = sub.add_parser("auto",
+                        help="VOD# -> finished base edit (final.mp4 + summary.md), every "
+                             "setting picked for you")
+    au.add_argument("vod_id", help="Twitch VOD number (auto-downloaded + cached)")
+    au.add_argument("--duration", default=None,
+                    help="override the target runtime (default: median runtime of your "
+                         "finished edits, from refire learn)")
+    au.add_argument("--brief", default=None,
+                    help="what the video is about (default: the director picks the "
+                         "stream's strongest story)")
+    au.add_argument("--cache-dir", default="vods", help="VOD download cache directory")
+    au.add_argument("--run-root", default="run", help="reFire run folder (default run)")
+
+    ev = sub.add_parser("eval",
+                        help="score reFire's cut against your finished edits "
+                             "(fix_cost = seconds of human correction, leave-one-out)")
+    ev.add_argument("vod_id", nargs="?", default=None, help="VOD number (omit with --all)")
+    ev.add_argument("--all", action="store_true", help="every VOD with a clip_diff.json")
+    ev.add_argument("--manifest", default=None,
+                    help="score this manifest (a fresh `make` run) instead of replaying "
+                         "the recorded cut; needs a vod_id")
+    for st in ("boundary", "trim", "critics", "markers"):
+        ev.add_argument(f"--{st}", action="store_true",
+                        help=f"replay with the {st} stage switched on")
+    ev.add_argument("--marker-threshold", type=float, default=None,
+                    help="with --markers: risk at or above which an edge is flagged")
+    ev.add_argument("--tag", default="", help="label stored with the result "
+                    "('baseline' = what later evals compare against)")
+    ev.add_argument("--no-save", action="store_true", help="print only")
+    ev.add_argument("--run-root", default="run")
+    ev.add_argument("--cache-dir", default="vods")
+
     args = p.parse_args(argv)
+
+    if args.cmd == "eval":
+        if not args.all and not args.vod_id:
+            p.error("eval needs a vod_id or --all")
+        from .learn.evaluate import STAGES, evaluate
+        evaluate(None if args.all else args.vod_id,
+                 stages=[s for s in STAGES if getattr(args, s)],
+                 run_root=args.run_root, vods_dir=args.cache_dir, tag=args.tag,
+                 manifest_path=args.manifest, save=not args.no_save,
+                 marker_threshold=args.marker_threshold)
+        return
+
+    if args.cmd == "auto":
+        from .auto import run as auto_run
+        t0, last = time.monotonic(), {"pct": -1, "msg": ""}
+
+        def aprog(frac, msg):
+            pct = max(0, min(100, int(frac * 100)))
+            if pct != last["pct"] or msg != last["msg"]:
+                last.update(pct=pct, msg=msg)
+                print("[%3d%%] %s  (+%.1fm)" % (pct, msg, (time.monotonic() - t0) / 60),
+                      flush=True)
+
+        auto_run(args.vod_id, duration=parse_duration(args.duration) if args.duration else None,
+                 brief=args.brief, cache_dir=args.cache_dir, run_root=args.run_root,
+                 progress=aprog)
+        return
+
+    if args.cmd == "learn":
+        if not args.all and not args.vod_id:
+            p.error("learn needs a vod_id or --all")
+        from .learn.lessons import learn
+        learn(None if args.all else args.vod_id, project=args.project,
+              run_root=args.run_root, projects_dir=args.projects_dir,
+              vods_dir=args.cache_dir, motion=args.motion, game=args.game)
+        return
 
     if args.cmd == "fixcaps":
         from .caption_fix import fix_manifest
@@ -384,6 +518,14 @@ def main(argv: list[str] | None = None) -> None:
                        cards=not args.no_cards and knobs.get("cards", True),
                        proxy=not args.no_proxy,
                        caption_fix=not args.no_caption_fix,
+                       boundary=bool(pick(args.boundary, "boundary", False)),
+                       trim=bool(pick(args.trim, "trim", False)),
+                       lessons=bool(pick(args.lessons, "lessons", False)),
+                       critics=bool(pick(args.critics, "critics", False)),
+                       critic_effort=args.critic_effort,
+                       crossfade=max(0.0, args.crossfade_ms) / 1000.0, lcut=args.lcut,
+                       markers=args.markers,
+                       marker_threshold=args.marker_threshold,
                        transcriber=args.transcriber,
                        whisper_model=args.whisper_model,
                        batch_size=args.batch_size,

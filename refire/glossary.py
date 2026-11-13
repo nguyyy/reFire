@@ -12,6 +12,8 @@ from pathlib import Path
 
 from .score import DEFAULT_MODEL
 
+MAX_TERMS = 60   # the prompt asks for 20-60
+
 _SYSTEM = (
     "You list proper nouns for speech-to-text biasing. Given a video game name, "
     "reply with its commonly-spoken proper nouns: character names, locations, "
@@ -43,14 +45,18 @@ def parse_terms(spec: str) -> list[str]:
 def _llm_terms(game: str, model: str) -> list[str]:
     """One local-LLM pass: game name -> proper nouns. [] on any failure."""
     try:
-        import ollama  # optional heavy dep
-        resp = ollama.chat(
-            model=model, format="json",
-            messages=[{"role": "system", "content": _SYSTEM},
-                      {"role": "user", "content": f"Game: {game}"}],
-        )
-        data = json.loads(resp["message"]["content"])
-        return [str(t).strip() for t in data.get("terms", []) if str(t).strip()]
+        from . import local_llm
+        # the local model lists real names first, then loops on filler ("The Will", "The
+        # Aim", ...) until cut off: uncapped that ran 597s and the json never closed. so cap
+        # the output, salvage the names from a cut-off reply, keep the first MAX_TERMS
+        raw = local_llm.chat(model, [{"role": "system", "content": _SYSTEM},
+                                     {"role": "user", "content": f"Game: {game}"}],
+                             num_predict=600, stall_s=120, total_s=300, tag="glossary")
+        try:
+            terms = [str(t) for t in json.loads(raw).get("terms", [])]
+        except (json.JSONDecodeError, AttributeError):
+            terms = re.findall(r'"([^"\n]{1,40})"', raw.split("[", 1)[-1])
+        return list(dict.fromkeys(t.strip() for t in terms if t.strip()))[:MAX_TERMS]
     except Exception:
         # any failure -> no glossary, transcription carries on
         return []
@@ -71,21 +77,32 @@ def game_glossary(game: str, model: str = DEFAULT_MODEL,
     if not game:
         return user
 
-    cache = Path(cache_dir) / f"glossary_{_slug(game)}.json"
+    name = f"glossary_{_slug(game)}.json"
+    cache = Path(cache_dir) / name
+    # the list depends on the game alone, so one vod's copy serves every vod of that game:
+    # this vod's, then the shared run/<name>, then the biggest an earlier vod left behind.
+    # the llm call is slow on a busy card and returned nothing on 2 of 4 runs (2026-11)
+    root = Path(cache_dir).parent
+    shared = root / name
+    found = [cache, shared] + sorted(root.glob(f"*/{name}"), key=lambda f: -f.stat().st_size)
     terms: list[str] = []
-    if cache.exists():
+    for f in found:
         try:
-            terms = json.loads(cache.read_text(encoding="utf-8"))
+            terms = json.loads(f.read_text(encoding="utf-8")) if f.exists() else []
         except (json.JSONDecodeError, OSError):
-            pass  # regenerate on a corrupt cache
+            terms = []   # corrupt copy -> try the next one
+        if terms:
+            break
     if not terms:
         terms = _llm_terms(game, model)
-        if terms:
-            try:
-                cache.parent.mkdir(parents=True, exist_ok=True)
-                cache.write_text(json.dumps(terms, indent=2), encoding="utf-8")
-            except OSError:
-                pass
+    if terms:
+        for f in (cache, shared):   # per-vod copy is what learn.game_of reads
+            if not f.exists():
+                try:
+                    f.parent.mkdir(parents=True, exist_ok=True)
+                    f.write_text(json.dumps(terms, indent=2), encoding="utf-8")
+                except OSError:
+                    pass
     return list(dict.fromkeys(user + terms))  # user terms first, dedupe, keep order
 
 

@@ -33,6 +33,10 @@ KEYS = {
     "words_per_line": int,  # caption pacing
     "captions": str,        # all | emph (emph = only lines with an emphasized word)
     "keep_build": bool,     # enforce the skipped-build / slow-payoff flags
+    "boundary": bool,       # boundary stage: thread-head starts, reaction-tail ends, merges
+    "trim": bool,           # intra-clip trim: drop filler spans the cut doesn't depend on
+    "critics": bool,        # structured continuity/payoff/filler/drop-off critics
+    "lessons": bool,        # past finished edits as few-shot pairs in director prompts
 }
 
 _TRUE = {"true", "yes", "on", "1"}
