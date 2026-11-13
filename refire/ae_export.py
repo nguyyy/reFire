@@ -15,7 +15,7 @@ from .emphasis import style_text
 from .reframe import ENTER, EXIT, motion_intervals
 from .select import SILENCE_PAD, compress_silence, speech_intervals
 from .style import style_for
-from .subtitles import group_words
+from .subtitles import group_words, join_words
 
 FPS = 30
 OUT_W, OUT_H = 1920, 1080
@@ -309,7 +309,7 @@ def build_manifest(video, run_dir, words, sections, words_per_line: int = 3,
             # captions="emph" keeps only lines with an emphasized word (yell, interjection, all caps).
             # full subs fight the cuts in a fast style. emph is already set on every word
             lines = [
-                {"text": " ".join(style_text(w["text"], w["emph"]) for w in g),
+                {"text": join_words(style_text(w["text"], w["emph"]) for w in g),
                  "start": g[0]["start"], "end": g[-1]["end"]}
                 for g in groups
                 if captions != "emph" or any(w.get("emph") for w in g)

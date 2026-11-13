@@ -140,3 +140,13 @@ def lines_ass(lines: list[dict]) -> str:
         text = " ".join(f"{{\\k{kcs}}}{t}" for t in toks)
         out.append(f"Dialogue: 0,{_ts(ln['start'])},{_ts(ln['end'])},Default,,0,0,0,,{text}")
     return _HEADER + "\n".join(out) + ("\n" if out else "")
+
+
+def join_words(texts) -> str:
+    """Caption words -> one line. Whisper splits some numbers ("5" + ",000!", "1" + ".5"),
+    and a plain space join shows them as "5 ,000!"; a token opening with ,/. then a digit
+    glues onto the word before it."""
+    out = ""
+    for t in texts:
+        out += t if (out and len(t) > 1 and t[0] in ",." and t[1].isdigit()) else (" " + t if out else t)
+    return out

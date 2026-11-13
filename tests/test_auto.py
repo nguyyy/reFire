@@ -103,3 +103,11 @@ def test_loudnorm_filter_measures_then_applies_linear():
     f = auto.loudnorm_filter({"input_i": "-19.1", "input_tp": "-3.5", "input_lra": "7.4",
                               "input_thresh": "-29.4", "target_offset": "0.2"})
     assert "I=-14.0" in f and "measured_I=-19.1" in f and "linear=true" in f
+
+
+def test_join_words_glues_split_numbers_only():
+    from refire.subtitles import join_words
+    assert join_words(["i", "spent", "5", ",000!"]) == "i spent 5,000!"
+    assert join_words(["1", ".5", "seconds"]) == "1.5 seconds"
+    assert join_words(["wait", ",", "what", "..."]) == "wait , what ..."   # untouched
+    assert join_words([]) == ""

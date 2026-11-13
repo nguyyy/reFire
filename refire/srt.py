@@ -179,7 +179,7 @@ def recaption(manifest_path, timeline_path=None, offset: float = 0.0,
     Scan `seq.videoTracks` instead if a stacked recut ever becomes normal.
     """
     from .emphasis import annotate_emphasis, style_text
-    from .subtitles import group_words
+    from .subtitles import group_words, join_words
 
     manifest_path = Path(manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -211,7 +211,7 @@ def recaption(manifest_path, timeline_path=None, offset: float = 0.0,
             continue
         rate = src_span / span             # >1 where the clip was sped up
         for g in group_words(words, src_in + src_off, src_out + src_off, words_per_line):
-            text = " ".join(style_text(w["text"], w["emph"]) for w in g).strip()
+            text = join_words(style_text(w["text"], w["emph"]) for w in g).strip()
             a, b = min(g[0]["start"] / rate, span), min(g[-1]["end"] / rate, span)
             if text and b > a:
                 cues.append([at + a + offset, at + b + offset, text])
