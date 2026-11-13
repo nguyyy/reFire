@@ -710,10 +710,11 @@ def _windows(map_text: str, window_s: float = 1200.0) -> list[tuple[float, float
     return out
 
 
-# ollama.chat has no timeout and can block forever, which would make the stub fallback below
-# dead code. generous on purpose: a 20 min window on a local 20B takes 1.5-5 min and a
-# timeout that trips on a healthy run is worse than none. mostly catches runaway thinking
-SCOUT_TIMEOUT_S = 600.0
+# a window's prompt is ~16k tokens: on a part-offloaded 30B the first token can take a minute
+# or two, so the stall limit (max gap between tokens, see local_llm) is generous. the total
+# cap only catches a runaway generation. a stall reloads the model and retries once
+SCOUT_STALL_S = 300.0
+SCOUT_TIMEOUT_S = 900.0
 
 
 def chapterize(map_text: str, window_s: float = 1200.0, model: str = "llama3.1:8b",
@@ -731,8 +732,7 @@ def chapterize(map_text: str, window_s: float = 1200.0, model: str = "llama3.1:8
             return [Chapter.model_validate(c) for c in data]
         except (ValueError, TypeError):
             pass   # corrupt cache -> rescout
-    import ollama
-    client = ollama.Client(timeout=SCOUT_TIMEOUT_S)
+    from . import local_llm
     wins = _windows(map_text, window_s)
     n = max(1, len(wins))
     chapters: list[Chapter] = []
@@ -745,12 +745,11 @@ def chapterize(map_text: str, window_s: float = 1200.0, model: str = "llama3.1:8
                             f"({a / 3600:.2f}h-{b / 3600:.2f}h, {len(text) // 1000}k chars)")
         t_win = time.monotonic()
         try:
-            resp = client.chat(
-                model=model, format="json",
-                messages=[{"role": "system", "content": _SCOUT_SYSTEM},
-                          {"role": "user", "content": text}],
-                options={"num_ctx": 16384})
-            got = _ChapterOut.model_validate(json.loads(resp["message"]["content"]))
+            got = _ChapterOut.model_validate(json.loads(local_llm.chat(
+                model, [{"role": "system", "content": _SCOUT_SYSTEM},
+                        {"role": "user", "content": text}],
+                options={"num_ctx": 16384}, num_predict=2048, stall_s=SCOUT_STALL_S,
+                total_s=SCOUT_TIMEOUT_S, tag="scout")))
         except Exception as e:   # any window failure (incl timeout) -> stub, keep going
             print(f"[scout] window {k} failed ({e}); using stub chapter", flush=True)
             got = _ChapterOut()
@@ -1480,7 +1479,7 @@ def outline_local(stream_map_text: str, brief: str, title: str, target_s: float,
     """Free local-Ollama director (no API spend). Coarser outlines than Claude; best on
     shorter streams since the whole map must fit the model's context. Same `Outline`.
     """
-    import ollama  # already a project dep
+    from . import local_llm
     # CUT_SHRINK for the same reason as outline(), _budget_note's wording assumes this prior
     system = (pick_system(brief, style, stack, keep_build, pace)
               .format(n=_n_beats(target_s, pace), roles=_role_note(CUT_SHRINK, pace))
@@ -1488,10 +1487,8 @@ def outline_local(stream_map_text: str, brief: str, title: str, target_s: float,
     user = (_header(brief, title, target_s, style)
             + f"STREAM MAP (timestamp -> what was said):\n{stream_map_text}"
             + _budget_note(target_s, shrink, pace))
-    resp = ollama.chat(
-        model=model, format="json",
-        messages=[{"role": "system", "content": system},
-                  {"role": "user", "content": user}],
+    return Outline.model_validate(json.loads(local_llm.chat(
+        model, [{"role": "system", "content": system},
+                {"role": "user", "content": user}],
         options={"num_ctx": 8192},   # bump for long streams if it truncates
-    )
-    return Outline.model_validate(json.loads(resp["message"]["content"]))
+        num_predict=8192, stall_s=600, total_s=3600, tag="local director")))

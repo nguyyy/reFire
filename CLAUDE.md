@@ -79,6 +79,9 @@ August builds played in story order, not chronologically.
   with `git add -u` and new files as `git add reFire/<file>`, then check
   `git status --short` is clean -- either spelling alone silently skips the other kind.
 - Tests are pure local (no network/GPU/LLM), whole suite in a few seconds.
+- Every local-model (ollama) call goes through `local_llm.chat`: streamed with a stall
+  timeout (gap between tokens), capped output, unload + one retry when a game or browser
+  takes the VRAM, then `LocalLLMError` for the caller's fallback. Never raw `ollama.chat`.
 - No Claude call inside a per-clip or per-chunk loop. Bulk work -> ollama or
   deterministic code; Claude only for whole-cut reasoning. Log every Claude call to
   `cost.json` (`director._log_cost`).

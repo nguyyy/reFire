@@ -443,8 +443,13 @@ def test_local_director_parses_ollama_json(monkeypatch):
 
     payload = {"central_idea": "x", "beats": [
         {"title": "A", "intent": "i", "query": "q", "start_s": 1.0, "end_s": 2.0}]}
-    monkeypatch.setattr(ollama, "chat",
-                        lambda **kw: {"message": {"content": json.dumps(payload)}})
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def chat(self, **kw):
+            return {"message": {"content": json.dumps(payload)}}
+    monkeypatch.setattr(ollama, "Client", _Client)
     got = director.outline_local("[00:00] hi", "brief", "title", 90.0)
     assert got.central_idea == "x" and got.beats[0].title == "A"
 

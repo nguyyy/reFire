@@ -74,12 +74,12 @@ def _examples(lessons: dict, n: int = 4) -> str:
 def ollama_judge(model: str):
     """`judge(system, user) -> dict` on the local scorer model, JSON mode."""
     def judge(system, user):
-        import ollama
-        resp = ollama.chat(model=model, format="json",
-                           messages=[{"role": "system", "content": system},
-                                     {"role": "user", "content": user}],
-                           options={"num_ctx": 16384, "temperature": 0})
-        return json.loads(resp["message"]["content"])
+        from . import local_llm
+        return json.loads(local_llm.chat(
+            model, [{"role": "system", "content": system},
+                    {"role": "user", "content": user}],
+            options={"num_ctx": 16384, "temperature": 0}, num_predict=2048,
+            stall_s=300, total_s=900, tag="trim"))
     return judge
 
 

@@ -48,7 +48,7 @@ def score_chunk(chunk: Chunk, brief: str = "", model: str = DEFAULT_MODEL) -> di
     detect path); a brief switches to focused relevance+quality scoring. Parse
     failure -> score 0.
     """
-    import ollama  # optional heavy dep
+    from . import local_llm
 
     if brief:
         system, key = _SYSTEM_BRIEF, "score"
@@ -58,22 +58,18 @@ def score_chunk(chunk: Chunk, brief: str = "", model: str = DEFAULT_MODEL) -> di
         user = chunk["text"]
 
     try:
-        resp = ollama.Client(timeout=SCORE_TIMEOUT_S).chat(
-            model=model,
-            format="json",
-            keep_alive=KEEP_ALIVE,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-        )
-    except Exception as e:                      # timeout, dead runner, refused socket
+        content = local_llm.chat(model, [{"role": "system", "content": system},
+                                         {"role": "user", "content": user}],
+                                 keep_alive=KEEP_ALIVE, num_predict=256,
+                                 stall_s=SCORE_TIMEOUT_S, total_s=SCORE_TIMEOUT_S + 60,
+                                 tag="score")
+    except Exception as e:      # stalled twice (busy gpu), dead runner, refused socket
         # never raise, narrative.cast isn't wrapped so it would kill a run that already paid for the
         # director + critic. same as a parse failure, beat scores 0 and the cut survives
         print(f"[score] local scorer unavailable ({type(e).__name__}); scoring 0")
         return {"llm_score": 0.0, "reason": "scorer_unavailable"}
     try:
-        data = json.loads(resp["message"]["content"])
+        data = json.loads(content)
         out = {"llm_score": float(data[key]), "reason": str(data.get("reason", ""))}
         if brief and "relevance" in data:
             out["relevance"] = float(data["relevance"])

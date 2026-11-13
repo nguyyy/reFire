@@ -12,6 +12,8 @@ from pathlib import Path
 
 from .score import DEFAULT_MODEL
 
+MAX_TERMS = 60   # the prompt asks for 20-60
+
 _SYSTEM = (
     "You list proper nouns for speech-to-text biasing. Given a video game name, "
     "reply with its commonly-spoken proper nouns: character names, locations, "
@@ -43,14 +45,18 @@ def parse_terms(spec: str) -> list[str]:
 def _llm_terms(game: str, model: str) -> list[str]:
     """One local-LLM pass: game name -> proper nouns. [] on any failure."""
     try:
-        import ollama  # optional heavy dep
-        resp = ollama.chat(
-            model=model, format="json",
-            messages=[{"role": "system", "content": _SYSTEM},
-                      {"role": "user", "content": f"Game: {game}"}],
-        )
-        data = json.loads(resp["message"]["content"])
-        return [str(t).strip() for t in data.get("terms", []) if str(t).strip()]
+        from . import local_llm
+        # the local model lists real names first, then loops on filler ("The Will", "The
+        # Aim", ...) until cut off: uncapped that ran 597s and the json never closed. so cap
+        # the output, salvage the names from a cut-off reply, keep the first MAX_TERMS
+        raw = local_llm.chat(model, [{"role": "system", "content": _SYSTEM},
+                                     {"role": "user", "content": f"Game: {game}"}],
+                             num_predict=600, stall_s=120, total_s=300, tag="glossary")
+        try:
+            terms = [str(t) for t in json.loads(raw).get("terms", [])]
+        except (json.JSONDecodeError, AttributeError):
+            terms = re.findall(r'"([^"\n]{1,40})"', raw.split("[", 1)[-1])
+        return list(dict.fromkeys(t.strip() for t in terms if t.strip()))[:MAX_TERMS]
     except Exception:
         # any failure -> no glossary, transcription carries on
         return []
