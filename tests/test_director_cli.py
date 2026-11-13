@@ -312,3 +312,14 @@ def test_few_shot_prefers_the_same_role_then_energy():
     got = few_shot(les, ("end_early",), n=2, role="payoff", energy=5)
     assert ["[[c]]" in got[0], "[[b]]" in got[1]] == [True, True]
     assert few_shot(None, ("end_early",)) == []
+
+
+def test_api_fallback_raises_the_cli_error_when_there_is_no_key(monkeypatch, capsys):
+    import pytest
+    from refire import director
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="5-hour limit"):
+        director._api_fallback("director", RuntimeError("You've hit your 5-hour limit"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    director._api_fallback("director", RuntimeError("cli gone"))
+    assert "using API key" in capsys.readouterr().out

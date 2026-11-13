@@ -936,6 +936,17 @@ def _log_cost(tag: str, model: str, backend: str, usage: dict | None,
         pass
 
 
+def _api_fallback(tag: str, err: Exception) -> None:
+    """The subscription CLI failed: fall back to the API only when there is a key. Without
+    one the API attempt dies on an auth error that buries the real cause (a 5-hour usage
+    limit, a missing CLI), so raise that instead -- callers handle either the same way."""
+    import os
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise RuntimeError(f"claude CLI unavailable and no ANTHROPIC_API_KEY to fall back "
+                           f"on: {err}") from err
+    print(f"[{tag}] claude CLI unavailable ({err}); using API key")
+
+
 def _extract_json(txt: str) -> str:
     """Slice the JSON object out of a model reply (tolerates prose / ``` fences)."""
     a, b = txt.find("{"), txt.rfind("}")
@@ -1363,7 +1374,7 @@ def outline(stream_map_text: str, brief: str, title: str, target_s: float,
                                  cwd=run_dir, effort=effort,
                                  session_id=session_id)
         except (RuntimeError, OSError) as e:
-            print(f"[director] claude CLI unavailable ({e}); using API key")
+            _api_fallback("director", e)
     import anthropic  # optional heavy dep, missing key raises -> caller falls back
 
     client = anthropic.Anthropic()             # reads ANTHROPIC_API_KEY
@@ -1453,7 +1464,7 @@ def review(stream_map_text: str, brief: str, title: str, outline_log: dict,
                                  tag="review", trace=trace, tools=tools,
                                  cwd=run_dir, effort=effort)
         except (RuntimeError, OSError) as e:
-            print(f"[review] claude CLI unavailable ({e}); using API key")
+            _api_fallback("review", e)
     import anthropic  # optional heavy dep, missing key raises -> caller keeps the current cut
 
     client = anthropic.Anthropic()

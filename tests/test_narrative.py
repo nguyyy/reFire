@@ -194,9 +194,11 @@ def _fake_anthropic(monkeypatch, responses, output_format=None):
     its `model_dump_json()`.
 
     Also hides the `claude` binary so the default `backend="cli"` takes its real
-    CLI-missing fallthrough to this API stub instead of shelling out for real.
+    CLI-missing fallthrough to this API stub instead of shelling out for real. A stubbed
+    API client stands for a configured key, which that fallthrough requires.
     """
     anthropic = pytest.importorskip("anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     from refire import director  # noqa: F401
 
     monkeypatch.setattr("shutil.which", lambda name: None)

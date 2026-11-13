@@ -133,7 +133,7 @@ def cli_critic(model: str, effort: str = DEFAULT_EFFORT, trace=None):
             return director._complete_cli(model, system, content, Edits, tag=f"critic {job}",
                                           trace=trace, effort=effort, live=False)
         except (RuntimeError, OSError) as e:
-            print(f"[critic {job}] claude CLI unavailable ({e}); using API key")
+            director._api_fallback(f"critic {job}", e)
         import anthropic
         return director._complete(anthropic.Anthropic(), model, system, content, Edits,
                                   tag=f"critic {job}", trace=trace, effort=effort)
