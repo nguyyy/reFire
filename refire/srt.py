@@ -114,10 +114,6 @@ def _demo() -> None:
 
 # --------------------------------------------------------------------------- recut
 
-def _norm(p) -> str:
-    return str(p).replace("\\", "/").lower()
-
-
 def _run_dir(manifest_path: Path) -> Path:
     """Walk up from the manifest to the VOD run dir -- the one holding transcript.json."""
     for d in manifest_path.resolve().parents:
@@ -126,24 +122,6 @@ def _run_dir(manifest_path: Path) -> Path:
     raise FileNotFoundError(
         "No transcript.json above %s -- recaption needs the run that built it."
         % manifest_path)
-
-
-def _rows(timeline_path: Path):
-    """timeline.tsv -> [(media path, src in, src out, timeline at, timeline end)].
-
-    Written by reFirePpro.jsx:timeline(). Tab-separated because ExtendScript is ES3
-    and has no JSON.stringify, and no media path contains a tab or a newline.
-    """
-    out = []
-    for line in timeline_path.read_text(encoding="utf-8").splitlines():
-        cols = line.split("\t")
-        if len(cols) < 5:
-            continue
-        try:
-            out.append((cols[0], *(float(c) for c in cols[1:5])))
-        except ValueError:
-            continue
-    return out
 
 
 def _next_recut(dirpath: Path) -> Path:
@@ -180,21 +158,14 @@ def recaption(manifest_path, timeline_path=None, offset: float = 0.0,
     """
     from .emphasis import annotate_emphasis, style_text
     from .subtitles import group_words, join_words
+    from .timeline_map import TimelineMap
 
     manifest_path = Path(manifest_path)
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    timeline_path = Path(timeline_path or manifest_path.parent / "timeline.tsv")
-    rows = _rows(timeline_path)
-    if not rows:
+    tmap = TimelineMap.load(manifest_path, timeline_path)
+    if not tmap.spans:
         raise ValueError(
             "No clips in %s -- is the recut sequence the active one in Premiere?"
-            % timeline_path)
-
-    # media path -> the absolute VOD time its frame 0 sits at
-    offsets = {_norm(s["path"]): s.get("offset", 0.0)
-               for s in manifest.get("sources") or []}
-    if not offsets and manifest.get("source"):
-        offsets[_norm(manifest["source"])] = 0.0
+            % (timeline_path or manifest_path.parent / "timeline.tsv"))
 
     run = _run_dir(manifest_path)
     words = json.loads((run / "transcript.json").read_text(encoding="utf-8"))
@@ -202,19 +173,13 @@ def recaption(manifest_path, timeline_path=None, offset: float = 0.0,
     annotate_emphasis(words, run / "audio.wav")
 
     cues = []
-    for path, src_in, src_out, at, end in rows:
-        src_off = offsets.get(_norm(path))
-        if src_off is None:
-            continue                       # b-roll the user added, not ours to caption
-        span, src_span = end - at, src_out - src_in
-        if span <= 1e-3 or src_span <= 1e-3:
-            continue
-        rate = src_span / span             # >1 where the clip was sped up
-        for g in group_words(words, src_in + src_off, src_out + src_off, words_per_line):
+    for sp in tmap.ours():                 # foreign media = b-roll the user added, not ours
+        span, rate = sp.tl_out - sp.tl_in, sp.rate
+        for g in group_words(words, sp.src_in, sp.src_out, words_per_line):
             text = join_words(style_text(w["text"], w["emph"]) for w in g).strip()
             a, b = min(g[0]["start"] / rate, span), min(g[-1]["end"] / rate, span)
             if text and b > a:
-                cues.append([at + a + offset, at + b + offset, text])
+                cues.append([sp.tl_in + a + offset, sp.tl_in + b + offset, text])
 
     cues.sort(key=lambda c: c[0])
     if polish and cues:

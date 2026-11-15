@@ -305,7 +305,9 @@ var reFirePpro = (function () {
         if (!seq.videoTracks.numTracks) {
             return "Error: '" + seq.name + "' has no video tracks.";
         }
-        var track = seq.videoTracks[0], rows = [], i;
+        // timebase header: ops need frame-exact ticks and the sequence fps can differ from
+        // the manifest's (refire.timeline_map reads it; old parsers skip short rows)
+        var track = seq.videoTracks[0], rows = ["#timebase\t" + seq.timebase], i;
         for (i = 0; i < track.clips.numItems; i++) {
             var c = track.clips[i], mp = "";
             if (c.disabled) { continue; }      // a muted clip does not play, so no captions
@@ -317,7 +319,7 @@ var reFirePpro = (function () {
                        c.inPoint.seconds.toFixed(6), c.outPoint.seconds.toFixed(6),
                        c.start.seconds.toFixed(6), c.end.seconds.toFixed(6)].join("\t"));
         }
-        if (!rows.length) {
+        if (rows.length < 2) {
             return "Error: nothing on V1 of '" + seq.name + "' to caption.";
         }
 
@@ -326,7 +328,7 @@ var reFirePpro = (function () {
         if (!out.open("w")) { throw new Error("Cannot write " + out.fsName); }
         out.write(rows.join("\n"));
         out.close();
-        return "Timeline: " + rows.length + " clip(s) on V1 of '" + seq.name + "'.";
+        return "Timeline: " + (rows.length - 1) + " clip(s) on V1 of '" + seq.name + "'.";
     }
 
     // Same one-drag hand-off as attachCaptions, for the .srt `recap` just wrote. It is a
