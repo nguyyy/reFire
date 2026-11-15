@@ -371,6 +371,8 @@ fieldset:disabled .chk input:checked+.box{background:var(--mute);border-color:va
       </div></div>
     <div class="row"><span class="k">Recaption</span>
       <button class="btn" id="recap" type="button" data-busy="Recaptioning">Recaption</button></div>
+    <div class="row"><span class="k">Punch-ins</span>
+      <button class="btn" id="punch" type="button" data-busy="Punching" title="Facecam zooms on V2 from the current V1. Needs an adjustment layer named refire_punch_adj.">Punch-ins</button></div>
     <div class="row"><span class="k"></span>
       <label class="chk" title="One Claude call over names this stream hasn't taught reFire yet">
         <input type="checkbox" id="cap_fix" data-k="cap_fix"><i class="box"></i><span>Fix names with Claude</span></label></div>
@@ -470,6 +472,7 @@ function setManifest(p) {
     el.classList.toggle("set", !!manifest);
     $("#build").disabled = !manifest;
     $("#recap").disabled = !manifest;
+    $("#punch").disabled = !manifest;
     save();               // the manifest has to survive a reload -- see restore()
 }
 
@@ -901,11 +904,71 @@ function runRecap(btn) {
     });
 }
 
+// --- punch-ins ----------------------------------------------------------
+// Same handshake as recaption: dump V1, let `refire punch` decide, then apply the ops file
+// it wrote with the thin applyOps.jsx. Re-pressing after a re-cut replaces V2's reFire layers.
+function punchIns() {
+    if (!manifest) { return; }
+    var btn = $("#punch");
+    if (!cp) { return note("err", "Punch-ins need Node, which this panel doesn't have. Rerun install.ps1."); }
+    busy(btn, true); note("run", "Reading the timeline");
+    evalScript(snippet('reFirePpro.timeline("' + esc(manifest) + '")'), function (res) {
+        if (!res || res === "EvalScript error.") { res = "Error: " + NO_REPLY; }
+        log(res);
+        if (/^Error/.test(res)) { return failed(btn, res); }
+        runPunch(btn);
+    });
+}
+
+function runPunch(btn) {
+    var py = pyExe(), runDir = manifest.replace(/[\\/]ae[\\/]manifest\.json$/i, "");
+    var args = ["-m", "refire", "punch", runDir];
+    var d = val("director");
+    if (d === "api" || d === "cli") { args.push("--director-backend", d); }
+    if (d === "local") { args.push("--local-director"); if (val("model")) { args.push("--model", val("model")); } }
+    if (val("claude_model")) { args.push("--claude-model", val("claude_model")); }
+    note("run", "Finding punch-ins");
+    log("> " + py + " " + args.join(" "));
+    var proc;
+    try {
+        proc = cp.spawn(py, args, {
+            cwd: val("repo") || defaultRepo(),
+            env: Object.assign({}, process.env, { PYTHONUNBUFFERED: "1", PYTHONIOENCODING: "utf-8" })
+        });
+    } catch (e) { return failed(btn, String(e)); }
+    var flush = [pipe(proc.stdout, log), pipe(proc.stderr, log)];
+    proc.on("error", function (e) { failed(btn, String(e)); });
+    proc.on("close", function (code) {
+        flush.forEach(function (f) { f(); });
+        if (code !== 0) { return failed(btn, "Punch-ins failed (exit " + code + "). The log has the details."); }
+        applyPunch(btn, runDir + "/ppro/ops_punch.json");
+    });
+}
+
+function applyPunch(btn, ops) {
+    note("run", "Applying punch-ins");
+    var lib = P ? P.join(extDir(), "applyOps.jsx") : extDir() + "\\applyOps.jsx";
+    var src = 'var __r;try{$.evalFile(new File("' + esc(lib) + '"));' +
+              '__r=reFireOps.apply("' + esc(normPath(ops)) + '",0,100000);}' +
+              'catch(e){__r="Error: "+(e.message||e.toString());}String(__r);';
+    setTimeout(function () {
+        evalScript(src, function (res) {
+            log(res);
+            var r;
+            try { r = JSON.parse(res); } catch (e) { r = { error: res || NO_REPLY }; }
+            busy(btn, false);
+            if (r.error) { return note("err", "Punch-ins: " + r.error); }
+            note("ok", "Punch-ins on V2 (" + r.total + " ops). Re-press after a re-cut.");
+        });
+    }, 30);
+}
+
 // --- wiring -------------------------------------------------------------
 $("#make").onclick = make;
 $("#cancel").onclick = function () { if (child) { child.kill(); } };
 $("#build").onclick = build;
 $("#recap").onclick = recaption;
+$("#punch").onclick = punchIns;
 function nudge(step) {
     // round to the step so repeated clicks don't accumulate float dust in the field.
     // The value only takes effect on the next Build -- see the field's title.

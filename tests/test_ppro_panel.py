@@ -20,8 +20,8 @@ CLI = ROOT / "refire" / "cli.py"
 
 # the panel emits flags as bare "--flag" strings, css vars (--bg: ...) aren't quoted so they don't match
 PANEL_FLAGS = set(re.findall(r'"(--[a-z][a-z-]+)"', PANEL.read_text(encoding="utf-8")))
-# mk = make subparser in cli.main(), sr = srt, rc = recap
-CLI_FLAGS = set(re.findall(r'(?:mk|sr|rc)\.add_argument\(\s*"(--[a-z][a-z-]+)"',
+# mk = make subparser in cli.main(), sr = srt, rc = recap, pu = punch
+CLI_FLAGS = set(re.findall(r'(?:mk|sr|rc|pu)\.add_argument\(\s*"(--[a-z][a-z-]+)"',
                            CLI.read_text(encoding="utf-8")))
 
 
@@ -129,3 +129,15 @@ def test_chk_label_is_a_containing_block():
         assert rule, f"{panel.name}: no .chk rule"
         assert "position:relative" in rule.group(1), (
             f"{panel.name}: .chk must be positioned or the checkboxes scroll the panel away")
+
+
+def test_punch_button_is_wired():
+    """panel -> jsx timeline() -> `refire punch <run_dir>` -> applyOps.jsx reFireOps.apply()."""
+    panel = PANEL.read_text(encoding="utf-8")
+    cli = CLI.read_text(encoding="utf-8")
+    ops_jsx = (ROOT / "refire" / "ppro" / "applyOps.jsx").read_text(encoding="utf-8")
+    assert 'id="punch"' in panel and '$("#punch").onclick = punchIns' in panel
+    assert '"refire", "punch", runDir' in panel and 'sub.add_parser("punch"' in cli
+    assert "applyOps.jsx" in panel and "reFireOps.apply(" in panel and "return { apply: apply }" in ops_jsx
+    assert '"/ppro/ops_punch.json"' in panel and '"ops_punch.json"' in (ROOT / "refire" / "punch.py").read_text(
+        encoding="utf-8")
