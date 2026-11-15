@@ -3,6 +3,9 @@
 // python side can assert on it. Not production code: findings go to docs/spikes.md and
 // the real applier is written afterwards in refire/ppro/.
 
+// QE can only add the old Transform by name (AE.ADBE Geometry); the preset uses Geometry2
+var TRANSFORM = "AE.ADBE Geometry";
+
 var spike = (function () {
 
     // --- tiny ES3 json (extendscript has no JSON object) ------------------------
@@ -93,11 +96,12 @@ var spike = (function () {
         }
         return out;
     }
+    // exportFramePNG wants a native path and appends ".png" itself (S-findings)
     function frame(sec, path) {
         var s = seq();
         s.setPlayerPosition(String(snap(sec)));
         var qs = qeSeq();
-        qs.exportFramePNG(qs.CTI.timecode, path);
+        qs.exportFramePNG(qs.CTI.timecode, new File(path.replace(/\.png$/i, "")).fsName);
         return path;
     }
     function ensureVideoTracks(n) {
@@ -156,7 +160,7 @@ var spike = (function () {
         var a = snap(startSec), v2 = seq().videoTracks[1], ti = itemAt(v2, a);
         if (!ti) { throw new Error("no V2 item at " + startSec + "s (run S1 first)"); }
         addEffect(1, a, "Transform");
-        var c = component(ti, "AE.ADBE Geometry2");
+        var c = component(ti, TRANSFORM);
         var before = dumpProps(c);
         // by preset Params Index: 0 anchor, 1 position, 2 uniform(11), 3 h, 4 w, ... 9 use-comp-shutter(9)
         var res = { names: effectNames().length, before: before };
@@ -188,15 +192,21 @@ var spike = (function () {
         if (!ti) { throw new Error("importMGT returned nothing"); }
         var res = { start: Number(ti.start.ticks), end0: Number(ti.end.ticks) };
         res.set_end = safe(function () { ti.end = T(snap(atSec + lenSec)); return Number(ti.end.ticks); });
-        var mgt = ti.getMGTComponent(), p = mgt.properties.getParamForDisplayName("TextLayer");
-        res.params = [];
-        for (var j = 0; j < mgt.properties.numItems; j++) { res.params.push(mgt.properties[j].displayName); }
-        var v = String(p.getValue());
-        res.value_before = v;
-        var nv = v.replace(/"textEditValue":"(?:[^"\\]|\\.)*"/, '"textEditValue":' + textJson);
-        p.setValue(nv, true);
-        res.value_after = String(p.getValue());
-        res.frame = frame(atSec + lenSec / 2, outDir + "/s3_text.png");
+        res.is_mgt = ti.isMGT();
+        res.mgt = !!ti.getMGTComponent();
+        res.frame_before = frame(atSec + lenSec / 2, outDir + "/s3_before.png");
+        var mgt = ti.getMGTComponent();
+        if (mgt) {
+            var p = mgt.properties.getParamForDisplayName("TextLayer");
+            var v = String(p.getValue());
+            p.setValue(v.replace(/"textEditValue":"(?:[^"\\]|\\.)*"/, '"textEditValue":' + textJson), true);
+            res.via = "mgt";
+        } else {   // premiere-made graphic: text lives in AE.ADBE Text > Source Text
+            var st = component(ti, "AE.ADBE Text").properties[0];
+            res.set = safe(function () { return st.setValue('{"textEditValue":' + textJson + '}', true); });
+            res.via = "source_text";
+        }
+        res.frame_after = frame(atSec + lenSec / 2, outDir + "/s3_after.png");
         return J(res);
     }
 
@@ -206,7 +216,7 @@ var spike = (function () {
         var a = snap(atSec), ti = itemAt(seq().videoTracks[vIdx], a);
         if (!ti) { throw new Error("no clip at " + atSec); }
         addEffect(vIdx, a, "Transform");
-        var c = component(ti, "AE.ADBE Geometry2"), res = { keys: [] };
+        var c = component(ti, TRANSFORM), res = { keys: [] };
         var base = ti.inPoint.seconds;            // key times are in the clip's own media time
         function keyed(j, list) {
             var p = c.properties[j], k;
@@ -234,6 +244,7 @@ var spike = (function () {
     // --- S5: the caption nest on V5 + ccStyle effects ------------------------------
     function s5(nestName) {
         var main = seq(), res = { main: main.name };
+        if (main.name === nestName) { throw new Error("activate the main sequence first"); }
         var nest = null, i;
         for (i = 0; i < app.project.sequences.numSequences; i++) {
             if (app.project.sequences[i].name === nestName) { nest = app.project.sequences[i]; }
@@ -250,6 +261,9 @@ var spike = (function () {
             for (i = 0; i < 2; i++) { for (t = 0; t < g[i].numTracks; t++) { clearTrack(g[i][t]); } }
         }
         res.nest = nest.name;
+        // clone() makes the clone active; QE and seq() follow the active sequence
+        res.reactivate = safe(function () { app.project.activeSequence = main; return seq().name; });
+        if (seq().name !== main.name) { app.project.openSequence(main.sequenceID); res.reopened = seq().name; }
         res.vtracks = ensureVideoTracks(5);
         var v5 = main.videoTracks[4];
         clearTrack(v5);
@@ -285,18 +299,31 @@ var spike = (function () {
                    value: safe(function () { return J(c.properties[j].getColorValue()); }) });
     }
 
+    function place(mogrt, atSec, vIdx, lenSec) {
+        var ti = seq().importMGT(mogrt, String(snap(atSec)), vIdx, 0);
+        ti.end = T(snap(atSec + lenSec));
+        return J({ start: Number(ti.start.ticks), end: Number(ti.end.ticks) });
+    }
+
     // --- S6: chunked bulk insert, timed ---------------------------------------------
     function s6(mogrt, blocks, keys) {
-        var s = seq(), t0 = new Date().getTime(), n = 0, i;
+        var s = seq(), t0 = new Date().getTime(), n = 0, i, retries = 0;
         for (i = 0; i < blocks.length; i++) {
             var b = blocks[i], a = snap(b[0]);
-            var ti = s.importMGT(mogrt, String(a), b[2], 0);
+            // importMGT fails ~15% of calls in bursts (returns a start-0 item, places nothing):
+            // verify the placement and retry after a short sleep
+            var ti = null, tr = s.videoTracks[b[2]], k0;
+            for (k0 = 0; k0 < 5; k0++) {
+                var before = tr.clips.numItems;
+                ti = s.importMGT(mogrt, String(a), b[2], 0);
+                if (tr.clips.numItems === before + 1 && ti && Number(ti.start.ticks) === a) { break; }
+                retries++; ti = null; $.sleep(100);
+            }
+            if (!ti) { throw new Error("importMGT kept failing at " + b[0]); }
             ti.end = T(snap(b[1]));
-            var p = ti.getMGTComponent().properties.getParamForDisplayName("TextLayer");
-            var v = String(p.getValue());
-            p.setValue(v.replace(/"textEditValue":"(?:[^"\\]|\\.)*"/, '"textEditValue":"blk ' + i + '"'), true);
+            // text set skipped: getMGTComponent() is null for this premiere-made MOGRT (S3)
             addEffect(b[2], a, "Transform");
-            var c = component(ti, "AE.ADBE Geometry2"), base = ti.inPoint.seconds, k, pr;
+            var c = component(ti, TRANSFORM), base = ti.inPoint.seconds, k, pr;
             var groups = [[1, keys.position], [8, keys.opacity]];
             for (var g = 0; g < groups.length; g++) {
                 pr = c.properties[groups[g][0]];
@@ -311,7 +338,7 @@ var spike = (function () {
             c.properties[9].setValue(false, false);
             n++;
         }
-        return J({ n: n, ms: new Date().getTime() - t0 });
+        return J({ n: n, retries: retries, ms: new Date().getTime() - t0 });
     }
 
     return {
@@ -325,6 +352,7 @@ var spike = (function () {
         setProp: function (v, a, m, j, x) { return safe(function () { return setProp(v, a, m, j, x); }); },
         setColor: function (v, a, m, j, A, r, g, b) { return safe(function () { return setColor(v, a, m, j, A, r, g, b); }); },
         s6: function (m, b, k) { return safe(function () { return s6(m, b, k); }); },
+        place: function (m, a, v, l) { return safe(function () { return place(m, a, v, l); }); },
         effects: function () { return safe(function () { return J(effectNames()); }); }
     };
 }());

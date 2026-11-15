@@ -95,12 +95,16 @@ def main(argv: list[str]) -> int:
         v, sec, match, j, val = args
         show("toggle", run(f"spike.toggle({v}, {sec}, {js(match)}, {j}, {val})"))
     elif cmd == "S3":
-        show("S3", run(f"spike.s3({js(MOGRT.as_posix())}, 80, 2, 2.0, "
+        show("S3", run(f"spike.s3({js(MOGRT.as_posix())}, 20, 2, 2.0, "
                        f"{js(js('spike text'))}, {js(out)})"))
-    elif cmd == "S4":
+    elif cmd == "PLACE":                      # place <sec> <v index> <len>: a fresh caption clip
+        at, v, ln = args
+        show("place", run(f"spike.place({js(MOGRT.as_posix())}, {at}, {v}, {ln})"))
+    elif cmd == "S4":                         # S4 [<sec> <v index>]: keys onto a placed clip
+        at, v = (args + ["40", "2"])[:2] if args else ("40", "2")
         L = 2.0
         frames = [0.03, 0.12, 0.30, L - 0.10]
-        show("S4", run(f"spike.s4(2, 80, {js(caption_keys(L))}, 5, true, {js(out)}, {js(frames)})"))
+        show("S4", run(f"spike.s4({v}, {at}, {js(caption_keys(L))}, 5, true, {js(out)}, {js(frames)})"))
         print("  frames in", OUT, "(mid-slide = index 1; compare with the hand-applied clip)")
     elif cmd == "S5":
         show("S5", run("spike.s5('refire_captions')"))
