@@ -43,7 +43,7 @@ var spike = (function () {
         node = node || app.project.rootItem;
         for (var i = 0; i < node.children.numItems; i++) {
             var it = node.children[i];
-            if (it.name === name) { return it; }
+            if (String(it.name).replace(/^\s+|\s+$/g, "") === name) { return it; }   // renames pick up stray spaces
             if (it.type === ProjectItemType.BIN) {
                 var r = findItem(name, it);
                 if (r) { return r; }
@@ -305,6 +305,66 @@ var spike = (function () {
         return J({ start: Number(ti.start.ticks), end: Number(ti.end.ticks) });
     }
 
+    // --- S3b: Source Text as a raw blob. getValue() is the FlatBuffer as utf-16 code units
+    // (2 bytes per char, little-endian); NULs cut the CEP return, so ship it as hex
+    function hexOf(s) {
+        var out = [], i;
+        for (i = 0; i < s.length; i++) { out.push(("000" + s.charCodeAt(i).toString(16)).slice(-4)); }
+        return out.join("");
+    }
+    function fromHex(h) {
+        var out = [], i;
+        for (i = 0; i < h.length; i += 4) { out.push(String.fromCharCode(parseInt(h.substr(i, 4), 16))); }
+        return out.join("");
+    }
+    function srcText(vIdx, atSec) {
+        var ti = itemAt(seq().videoTracks[vIdx], snap(atSec));
+        if (!ti) { throw new Error("no clip at " + atSec + " on V" + (vIdx + 1)); }
+        return component(ti, "AE.ADBE Text").properties[0];
+    }
+    function blob(vIdx, atSec) {
+        var v = srcText(vIdx, atSec).getValue();
+        return J({ type: typeof v, len: String(v).length, hex: hexOf(String(v)) });
+    }
+    function fromHex2(h) {   // one byte per char
+        var out = [], i;
+        for (i = 0; i < h.length; i += 2) { out.push(String.fromCharCode(parseInt(h.substr(i, 2), 16))); }
+        return out.join("");
+    }
+    function setEnc(vIdx, atSec, enc, payload, outPath) {
+        var v = enc === "bytes" ? fromHex2(payload) : payload;   // "b64" / "raw": as given
+        var p = srcText(vIdx, atSec), r = p.setValue(v, true);
+        return J({ enc: enc, set: r, back_len: String(p.getValue()).length, frame: frame(atSec + 0.5, outPath) });
+    }
+    function setBlob(vIdx, atSec, hex, outPath) {
+        var p = srcText(vIdx, atSec), r = p.setValue(fromHex(hex), true);
+        var back = hexOf(String(p.getValue()));
+        return J({ set: r, same: back === hex, back_len: back.length / 4, frame: frame(atSec + 0.5, outPath) });
+    }
+
+    // import-only timing on the active sequence: paths[i] at t0 + i*step on V(vIdx+1)
+    function importTimed(paths, t0, step, vIdx) {
+        var s = seq(), tr = s.videoTracks[vIdx], ms = new Date().getTime(), retries = 0, i, k, ti;
+        for (i = 0; i < paths.length; i++) {
+            var a = snap(t0 + i * step);
+            for (k = 0; k < 5; k++) {
+                var before = tr.clips.numItems;
+                ti = s.importMGT(paths[i], String(a), vIdx, 0);
+                if (tr.clips.numItems === before + 1 && ti && Number(ti.start.ticks) === a) { break; }
+                retries++; ti = null; $.sleep(100);
+            }
+            if (!ti) { throw new Error("import kept failing at " + i); }
+            ti.end = T(snap(t0 + i * step + 1));
+        }
+        return J({ n: paths.length, retries: retries, ms: new Date().getTime() - ms });
+    }
+    function activate(name) {
+        for (var i = 0; i < app.project.sequences.numSequences; i++) {
+            if (app.project.sequences[i].name === name) { app.project.activeSequence = app.project.sequences[i]; }
+        }
+        return seq().name;
+    }
+
     // --- S6: chunked bulk insert, timed ---------------------------------------------
     function s6(mogrt, blocks, keys) {
         var s = seq(), t0 = new Date().getTime(), n = 0, i, retries = 0;
@@ -353,6 +413,12 @@ var spike = (function () {
         setColor: function (v, a, m, j, A, r, g, b) { return safe(function () { return setColor(v, a, m, j, A, r, g, b); }); },
         s6: function (m, b, k) { return safe(function () { return s6(m, b, k); }); },
         place: function (m, a, v, l) { return safe(function () { return place(m, a, v, l); }); },
+        blob: function (v, a) { return safe(function () { return blob(v, a); }); },
+        setBlob: function (v, a, h, o) { return safe(function () { return setBlob(v, a, h, o); }); },
+        setEnc: function (v, a, e, p, o) { return safe(function () { return setEnc(v, a, e, p, o); }); },
+        frame: function (a, o) { return safe(function () { return frame(a, o); }); },
+        importTimed: function (p, t, s, v) { return safe(function () { return importTimed(p, t, s, v); }); },
+        activate: function (n) { return safe(function () { return activate(n); }); },
         effects: function () { return safe(function () { return J(effectNames()); }); }
     };
 }());

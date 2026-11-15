@@ -8,6 +8,7 @@ docs/spikes.md by hand; this only drives the probes and checks frames.
     uv run python tests/smoke/spikes.py S2                    # Transform zoom + black-bar check
     uv run python tests/smoke/spikes.py toggle <v> <sec> <match> <j> <json value>   # S7
     uv run python tests/smoke/spikes.py S3 | S4 | S5 | S6 [n] | effects
+    uv run python tests/smoke/spikes.py BLOB <sec> <v> | TEXT <sec> <v> <old> <new> | FRAME <sec> <name>
 """
 from __future__ import annotations
 
@@ -67,6 +68,40 @@ def caption_keys(length: float) -> dict:
                         [length - 0.183, 100.0], [length - 0.015, 0.0]]}
 
 
+def blob_bytes(hexs: str) -> bytes:
+    """jsx hex (one utf-16 code unit per 4 hex chars) -> the raw little-endian blob."""
+    return b"".join(int(hexs[i:i + 4], 16).to_bytes(2, "little") for i in range(0, len(hexs), 4))
+
+
+def blob_hex(b: bytes) -> str:
+    b += b"\0" * (len(b) % 2)
+    return "".join(f"{int.from_bytes(b[i:i + 2], 'little'):04x}" for i in range(0, len(b), 2))
+
+
+def patch_text(b: bytes, old: str, new: str, runs: bool) -> bytes:
+    """swap the flatbuffer string `old` for `new`: append the new string at the end and repoint
+    the one uoffset that targeted the old one (offsets only point forward, so nothing else moves).
+    `runs`: also rewrite u32 slots equal to len(old) after the string (style run lengths?)."""
+    import struct
+    raw = old.encode("utf-8")
+    s = b.index(struct.pack("<I", len(raw)) + raw)
+    refs = [u for u in range(12, s, 4) if u + struct.unpack_from("<I", b, u)[0] == s]
+    assert len(refs) == 1, refs
+    out = bytearray(b)
+    if runs:
+        for u in range(s + 4 + len(raw), len(b) - 3, 4):
+            if struct.unpack_from("<I", b, u)[0] == len(old):
+                struct.pack_into("<I", out, u, len(new))
+    pos = len(out) + (-len(out)) % 4
+    out += b"\0" * (pos - len(out))
+    enc = new.encode("utf-8")
+    out += struct.pack("<I", len(enc)) + enc + b"\0"
+    out += b"\0" * ((-len(out)) % 4)
+    struct.pack_into("<I", out, refs[0], pos - refs[0])
+    struct.pack_into("<Q", out, 0, len(out) - 12)
+    return bytes(out)
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         print(__doc__)
@@ -108,6 +143,23 @@ def main(argv: list[str]) -> int:
         print("  frames in", OUT, "(mid-slide = index 1; compare with the hand-applied clip)")
     elif cmd == "S5":
         show("S5", run("spike.s5('refire_captions')"))
+    elif cmd == "BLOB":                       # blob <sec> <v>: dump Source Text to OUT/blob_<v>_<sec>.bin
+        at, v = args
+        res = run(f"spike.blob({v}, {at})")
+        if not isinstance(res, dict):
+            show("blob", res)
+            return 1
+        b = blob_bytes(res["hex"])
+        (OUT / f"blob_{v}_{at}.bin").write_bytes(b)
+        print(f"type {res['type']} chars {res['len']} bytes {len(b)} prefix "
+              f"{int.from_bytes(b[:8], 'little')} magic {b[8:12].hex()}")
+    elif cmd == "TEXT":                       # text <sec> <v> <old> <new> [runs]: patched blob back in
+        at, v, old, new = args[:4]
+        b = patch_text((OUT / f"blob_{v}_{at}.bin").read_bytes(), old, new, "runs" in args[4:])
+        tag = f"text_{v}_{at}_{len(new)}{'_runs' if 'runs' in args[4:] else ''}"
+        show("text", run(f"spike.setBlob({v}, {at}, {js(blob_hex(b))}, {js(out + '/' + tag + '.png')})"))
+    elif cmd == "FRAME":                      # frame <sec> <name>
+        show("frame", run(f"spike.frame({args[0]}, {js(out + '/' + args[1] + '.png')})"))
     elif cmd == "S6":
         n, chunk, L = int(args[0]) if args else 300, 50, 1.5
         blocks = [[200 + i * 1.2, 200 + i * 1.2 + L, 1 + (i % 2)] for i in range(n)]

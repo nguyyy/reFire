@@ -9,11 +9,11 @@ Spec: `docs/specs/00-shared.md` (Phase 0). Driven by `tests/smoke/spikes.py` +
 
 | # | Spike | Result | Notes |
 |---|---|---|---|
-| S1 | Adjustment layer on V2 | **Fallback** (creation); placement pending | No API creates one: neither the DOM `app.project` nor QE `qe.project` has a method (QE has `newTransparentVideo`, `newColorMatte`, `newBlackVideo` only). Fallback per spec: Nguy creates `refire_punch_adj` once. Frame-exact placement + length still to test once it exists. |
-| S2 | QE Transform zoom, no black bars | Pending S1 | Transform itself works (see S4/S7). |
-| S3 | `importMGT` + set `TextLayer` text | **Fail** | `importMGT` accepts the Premiere-made MOGRT (`isMGT()` true) and the clip stretches freely (0.47 s template -> 2 s). But `getMGTComponent()` is **null**, so there is no `TextLayer` param. The text lives in component `AE.ADBE Text` > `Source Text`, whose `getValue()` returns 1 garbage char; `setValue()` with JSON or a plain string returns true but **blanks the text**. Needs a decision (below). |
-| S4 | Transform keys, Bezier, motion blur | **Pass** (approx easing); hand-preset comparison pending | Opacity + Position keys with `setInterpolationTypeAtKey(t, 5)` all return ok; Use Composition's Shutter Angle off + Shutter Angle 360 set. Frames: 0.03 s faded + low, 0.12 s mid-slide visibly motion-blurred (Laplacian var 960 vs 1873 at rest), 0.30 s sharp at rest, L-0.10 s fading out. Key times are `trackItem.inPoint.seconds + offset`. |
-| S5 | Caption nest on V5 + ccStyle effects | **Pass** (order check pending) | See S5 notes. |
+| S1 | Adjustment layer on V2 | **Fallback** (creation) + **Pass** (placement) | No API creates one: neither the DOM `app.project` nor QE `qe.project` has a method (QE has `newTransparentVideo`, `newColorMatte`, `newBlackVideo` only). Fallback per spec: Nguy creates `refire_punch_adj` once (done). Placement: `overwriteClip` + `trackItem.end = Time(ticks)` lands frame-exact for 0.5 s, 3.333 s and 60 s (longer than the sequence); DOM `trackItem.name = 'refire:punch:...'` is writable and reads back. The renamed item came back as `' refire_punch_adj'` (leading space): **match project items by trimmed name**. |
+| S2 | QE Transform zoom, no black bars | **Pass** | Old Transform on the adjustment layer: anchor = position = pin [0, 1], uniform on, scale 210. Zoomed frame shows the facecam corner magnified with all four edge strips well above black (means 83-122); same check on the unzoomed frame 62-90. |
+| S3 | `importMGT` + set `TextLayer` text | **Fail** as specced; **baked MOGRT works** (S3b) | `importMGT` accepts the Premiere-made MOGRT (`isMGT()` true) and the clip stretches freely (0.47 s template -> 2 s). But `getMGTComponent()` is **null**, so there is no `TextLayer` param. The text lives in component `AE.ADBE Text` > `Source Text`, whose `getValue()` returns 1 garbage char; `setValue()` with JSON or a plain string returns true but **blanks the text**. Needs a decision (below). |
+| S4 | Transform keys, Bezier, motion blur | Keys/blur **pass**; `approx` easing **visibly different** -> `exact` (S4b) | Opacity + Position keys with `setInterpolationTypeAtKey(t, 5)` all return ok; Use Composition's Shutter Angle off + Shutter Angle 360 set. Frames: 0.03 s faded + low, 0.12 s mid-slide visibly motion-blurred (Laplacian var 960 vs 1873 at rest), 0.30 s sharp at rest, L-0.10 s fading out. Key times are `trackItem.inPoint.seconds + offset`. |
+| S5 | Caption nest on V5 + ccStyle effects | **Pass** | Nguy confirmed Effect Controls order Camera Shake, Drop Shadow, Edge Glow (DOM component order is not the UI order). The nest clip showed no text because the nest's 0-46 s window held only the anchor; S6's captions sat at 200 s+ and had no text set. |
 | S6 | 300 MOGRT captions in chunks of 50 | **Pass**: 114 s total (budget 300 s) | Each block = import + stretch + Transform + 6 Bezier keys + checkbox. Chunk time grows as the nest fills (11 s -> 21 s per 50). `importMGT` fails ~15% of calls in bursts; verify + retry fixes it (7 retries / 300, 0 failures). Text set not included (S3). |
 | S7 | Transform checkbox params by index | **Pass** | QE adds the old Transform (see below), whose 12 params match the preset's `Params Index` order exactly **and carry display names**: 0 Anchor Point, 1 Position, 2 Uniform Scale, 3 Scale Height, 4 Scale Width, 5 Skew, 6 Skew Axis, 7 Rotation, 8 Opacity, 9 Use Composition's Shutter Angle, 10 Shutter Angle, 11 Sampling. Film Impact effects have unnamed params -> map by preset index (step 2 parser). |
 
@@ -52,12 +52,52 @@ Spec: `docs/specs/00-shared.md` (Phase 0). Driven by `tests/smoke/spikes.py` +
   (`seq.timebase`), not the manifest.
 - `addTracks(n, after, 0)` on the QE sequence adds video tracks without a dialog.
 
+## S3b: setting caption text (2026-11-14, second pass)
+
+The `TextLayer` control exists in `definition.json` (`clientControls[0]`, type 6, value "list, BRO.")
+but Premiere-authored MOGRTs expose it nowhere in the DOM. The text lives in the `Source Text`
+param (`ArbVideoComponentParam`, control type 9) as a binary blob, base64 in the MOGRT's inner
+`.prproj` (`StartKeyframeValue`):
+
+- layout: u64 little-endian payload length (= blob length - 12), magic `44 33 22 11`, then a
+  FlatBuffer. Strings are FlatBuffer strings (u32 length + UTF-8 + NUL): `AnimationType`,
+  `CoolveticaRg-Regular`, the caption text. Exactly one forward `uoffset` points at the text string.
+- `getValue()` returns **1 char** inside ExtendScript itself (U+01D8 = the first two blob bytes; the
+  next u16 is 0x0000), so the live blob can't be read; Premiere truncates at the first NUL.
+- `setValue()` with the full patched blob (as UTF-16 units, as bytes, or as base64): returns true,
+  text **blank** every time. Not usable.
+- **Works: bake the text into a per-caption `.mogrt`.** Python appends the new string at the end of
+  the FlatBuffer, repoints the one `uoffset`, fixes the length prefix, writes it back into the inner
+  `.prproj`, sets `definition.json`'s control value, and zips a new `.mogrt` (~18 KB, 2 ms each).
+  `importMGT` of the baked file renders the new text in Coolvetica with the stroke, any length
+  (tested 10-23 chars), same or new `capsuleID`. Style runs did not need patching.
+- MOGRT clips have **no project item** (`trackItem.projectItem` null; bin unchanged after 450+
+  imports): the graphic is embedded, so baked files are temp files and the bin stays clean.
+- Cost: 50 distinct baked imports 10.8 s vs 9.0 s for 50 imports of one file (import only, in the
+  nest, same retry loop): ~+10 s per 300 captions. S6's 114 s/300 leaves room.
+- Spec impact: `02-caption.md` step 4 sets text through `getMGTComponent()`; this replaces it with
+  "Python writes `<id>.mogrt` per block, the .jsx imports that file". Needs Nguy's OK.
+
+## S4b: easing (hand preset vs script)
+
+Nguy applied captionIn by hand to a 0.45 s caption. Premiere added `AE.ADBE Geometry2` and
+**scaled** the preset's keys by media/preset duration (0.4667/0.45: position 0 -> 0.256 s, opacity
+0/0.060/0.277/0.452 s), left Use Composition's Shutter Angle on (no blur), uniform on. That is the
+behaviour the spec's anchored timing avoids. Sampled with `getValueAtTime` (fixture
+`tests/fixtures/captionIn_curve.json`, 5 ms steps):
+
+| t (s) | 0.02 | 0.04 | 0.08 | 0.12 | 0.16 | 0.20 | 0.24 |
+|---|---|---|---|---|---|---|---|
+| preset y | 0.5197 | 0.5143 | 0.5079 | 0.5041 | 0.5018 | 0.5006 | 0.5000 |
+| script (interp 5) y | 0.5317 | 0.5305 | 0.5271 | 0.5230 | 0.5179 | 0.5117 | 0.5025 |
+
+The preset slide is a hard ease-out (39% of the travel by 0.02 s); default Bezier handles give
+nearly the opposite (slow start, lands hard). Per spec: `approx` is visibly different, so the
+caption ops use `caption.easing: exact` (dense linear keys from the preset's tangents, checked
+against this fixture). Fade-in differs less (opacity 24/84 vs 27/65 at 0.02/0.04 s).
+
 ## Open (needs Nguy)
 
-1. Create the adjustment layer once: File > New > Adjustment Layer, rename it
-   `refire_punch_adj` in the Project panel. Then S1 placement + S2 black-bar check run.
-2. Drag `captionIn` onto the 0.45 s caption clip at 36 s on V3 of `refire_spike` (S4 comparison).
-3. Look at the V5 nest clip in Effect Controls: the order must be Camera Shake, Drop Shadow,
-   Edge Glow (the DOM component list shows them reversed, but it also lists Opacity before
-   Motion, so it is not the UI order). Play it to confirm the shake.
-4. S3 decision: how to set caption text (Premiere-made MOGRT text is not scriptable).
+1. ~~Adjustment layer~~, ~~hand-applied captionIn~~, ~~nest effect order~~: done.
+2. S3: AE-built MOGRT rejected (AE render times). Approve the baked-MOGRT path (S3b) as the
+   change to `02-caption.md` step 4, or pick another angle.
