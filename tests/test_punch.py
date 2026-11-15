@@ -177,3 +177,28 @@ def test_scaled_box_stays_on_screen():
 def test_config_merges_partial_maps():
     c = punch.config({"threshold": 0.7, "weights": {"judge": 0.6}})
     assert c["threshold"] == 0.7 and c["weights"] == {"judge": 0.6, "loud": 0.2, "chat": 0.15, "flags": 0.15}
+
+
+def test_judge_one_call_cached_with_context(tmp_path, monkeypatch):
+    from refire import director
+    calls = []
+
+    def fake_cli(model, system, content, cls, **kw):
+        calls.append(content[0]["text"])
+        return cls.model_validate({"verdicts": [
+            {"id": "c0", "category": "exclamation", "worthy": 1.4, "reason": "loud"},
+            {"id": "c1", "category": "banter", "worthy": 0.2}]})
+
+    monkeypatch.setattr(director, "_complete_cli", fake_cli)
+    words = say("so we go in here and OH SHIT the boss", 10)
+    j = punch.make_judge(tmp_path, words, glossary=["Paimon"])
+    cands = [{"id": "c0", "text": "OH SHIT", "src_t0": OFF + 11.25, "src_t1": OFF + 11.7,
+              "features": {"z_loud_peak": 3.0}}, {"id": "c1", "text": "x", "src_t0": OFF, "src_t1": OFF,
+                                                    "features": {}}]
+    got = j(cands)
+    assert got["c0"] == {"category": "exclamation", "worthy": 1.0, "reason": "loud"}   # clamped
+    assert got["c1"]["category"] == "other"                                           # unknown -> other
+    assert "so we go in here" in calls[0] and "Paimon" in calls[0]                     # +-8 s context
+    assert j(cands) == got and len(calls) == 1                                        # cache hit
+    assert punch.make_judge(tmp_path, words, glossary=["Paimon"])(cands) == got and len(calls) == 1
+    assert j([]) == {}

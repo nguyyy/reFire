@@ -367,7 +367,8 @@ def analyze(phr: list[dict], feats: dict, judge, face, cams: dict, cuts: list[fl
                 survivors.append(p)
 
     verdicts = judge([{"id": p["id"], "text": p["text"], "t0": p["t0"], "t1": p["t1"],
-                       "features": feats[p["id"]]} for p in survivors]) if survivors else {}
+                       "src_t0": p["src_t0"], "src_t1": p["src_t1"], "features": feats[p["id"]]}
+                      for p in survivors]) if survivors else {}
     cands = []
     for p in survivors:
         f, v = feats[p["id"]], verdicts.get(p["id"], {})
@@ -418,3 +419,117 @@ def analyze(phr: list[dict], feats: dict, judge, face, cams: dict, cuts: list[fl
                        "status": f"kept:{owner[p['id']]}" if p["id"] in owner else "dropped",
                        "drop_reason": "" if p["id"] in owner else dropped.get(p["id"], "?")})
     return punches, review
+
+
+# --------------------------------------------------------------------------- judge
+
+JUDGE_SYSTEM = """You judge candidate punch-in moments for a gaming stream edit (streamer: zy0x).
+A punch-in is a hard cut to a 210% zoom on the streamer's facecam while he reacts, then a hard
+cut back. The editor's rules, verbatim:
+
+- Never punch on uninteresting short phrases ("okay i see" is out; "OH SHIT" and real
+  exclamations are in).
+- Never punch too often or stack punches.
+- Never punch on boring dialogue: reading quest dialogue, listing stats, reading in-game text,
+  plain monologue. Exception: a genuinely interesting or dramatic read can qualify.
+- Laughter counts, but only when sustained.
+
+Examples: "okay i see" -> filler, worthy ~0. "OH SHIT" (loud) -> exclamation, worthy ~0.9.
+A flat read of quest dialogue -> reading. Rattling off artifact substats -> stats.
+
+Each candidate has its text, about 8 s of surrounding stream transcript, and measured
+features (z_loud_peak = loudness spike vs the local baseline, z_chat = chat rate spike,
+laugh_dur = sustained laughter seconds, lex/caps = exclamation word / shouted word).
+Use the context and the game glossary to spot reading: NPC names, quest-dialogue register,
+lists of stats or item text. A reading that is genuinely dramatic is `dramatic_read`.
+
+Categories: exclamation, reaction, punchline, roast, laughter, rage, dramatic_read, reading,
+stats, filler, other. `worthy` is 0-1: how much the editor would want this punched.
+Reply with ONLY a JSON object: {"verdicts": [{"id": "...", "category": "...",
+"worthy": 0.0, "reason": "one short line"}, ...]} with one entry per candidate, same ids."""
+
+
+def _verdict_models():
+    from pydantic import BaseModel, field_validator
+
+    class Verdict(BaseModel):
+        id: str
+        category: str
+        worthy: float
+        reason: str = ""
+
+        @field_validator("category")
+        @classmethod
+        def known(cls, v):
+            return v if v in CATEGORIES else "other"
+
+        @field_validator("worthy")
+        @classmethod
+        def clamp(cls, v):
+            return min(1.0, max(0.0, v))
+
+    class Verdicts(BaseModel):
+        verdicts: list[Verdict]
+
+    return Verdicts
+
+
+def context_text(words: list[dict], a: float, b: float, pad: float = 8.0) -> str:
+    """what was said in the stream around [a, b] (transcript clock)."""
+    starts = [w["start"] for w in words]
+    return " ".join(w["text"].strip() for w in words[bisect_left(starts, a - pad):bisect_left(starts, b + pad)])
+
+
+def judge_payload(cands: list[dict], words: list[dict], glossary=()) -> str:
+    keys = ("z_loud_peak", "z_chat", "laugh_dur", "lex", "caps", "dur", "rate")
+    rows = [{"id": c["id"], "text": c["text"], "context": context_text(words, c["src_t0"], c["src_t1"]),
+             "features": {k: c["features"].get(k) for k in keys}} for c in cands]
+    import json
+    return json.dumps({"glossary": list(glossary), "candidates": rows}, ensure_ascii=False)
+
+
+def make_judge(run_dir, words: list[dict], glossary=(), backend: str = "cli",
+               model: str = "claude-opus-5", local_model: str | None = None, effort: str = "medium"):
+    """-> judge(cands) for analyze(): ONE call per video, cached by input hash in
+    <run_dir>/punch_judge.json. backend cli (subscription) -> api fallback; local_model =
+    --local-director (ollama via local_llm)."""
+    import hashlib
+    import json
+
+    cache_path = Path(run_dir) / "punch_judge.json"
+
+    def judge(cands):
+        if not cands:
+            return {}
+        user = judge_payload(cands, words, glossary)
+        who = f"local:{local_model}" if local_model else f"{backend}:{model}"
+        key = hashlib.sha256((who + JUDGE_SYSTEM + user).encode("utf-8")).hexdigest()[:16]
+        cache = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+        if key not in cache:
+            Verdicts = _verdict_models()
+            if local_model:
+                from . import local_llm
+                got = Verdicts.model_validate(json.loads(local_llm.chat(
+                    local_model, [{"role": "system", "content": JUDGE_SYSTEM},
+                                  {"role": "user", "content": user}],
+                    options={"num_ctx": 16384}, num_predict=4096, stall_s=300, total_s=1200,
+                    tag="punch judge")))
+            else:
+                from . import director
+                content = [{"type": "text", "text": user}]
+                got = None
+                if backend == "cli":
+                    try:
+                        got = director._complete_cli(model, JUDGE_SYSTEM, content, Verdicts,
+                                                     tag="punch judge", effort=effort, live=False)
+                    except (RuntimeError, OSError) as e:
+                        director._api_fallback("punch judge", e)
+                if got is None:
+                    import anthropic
+                    got = director._complete(anthropic.Anthropic(), model, JUDGE_SYSTEM, content,
+                                             Verdicts, tag="punch judge", effort=effort)
+            cache[key] = {v.id: v.model_dump(exclude={"id"}) for v in got.verdicts}
+            cache_path.write_text(json.dumps(cache, indent=1), encoding="utf-8")
+        return cache[key]
+
+    return judge
