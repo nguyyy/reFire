@@ -37,6 +37,12 @@ regress** (fix_cost vs the previous `run/eval/*.json`, leave-one-out).
 
 Other verbs: `srt`, `recap`, `fixcaps`, `loud`. Deep dive: `docs/director-pipeline.md`.
 
+**New features (in progress): `refire punch`, `refire caption`, `refire thumb`.** Specs are the
+source of truth: `docs/specs/00-shared.md` (decisions, shared modules, Phase 0 spikes, build
+order) then `01-punch.md`, `02-caption.md`, `03-thumb.md`. Spike results: `docs/spikes.md`.
+Premiere assets in `refire/assets/premiere/`, thumbnail refs in `refire/thumb/refs/`, emotes in
+`refire/assets/emotes/`. Python decides, a thin idempotent .jsx applies `ops_<feature>.json`.
+
 `refire auto <vod>` (`auto.py`) = `make` with every input picked: Twitch title/game from
 the chat download, no brief (stream-driven director), duration = median runtime of the
 learned finals, measured stage defaults, base edit (no emotes/sfx/music/cards/zoom),

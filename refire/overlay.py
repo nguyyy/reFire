@@ -8,7 +8,7 @@ SFX are cycled uniquely. Emote files come from the local pool, else BetterTTV
 (gif/png — the AE importer takes both; 7TV's webp/avif would need conversion).
 
 Asset folders are scanned recursively and by name, so the user's layout works as-is:
-  assets/emotes/**            -> emote images (png/jpg/gif; avif/webp skipped — AE can't import)
+  refire/assets/emotes/**     -> emote images (png/jpg/gif; avif/webp skipped — AE can't import)
   assets/sfx/** (non-music)   -> impact SFX
   assets/bgm/**, assets/sfx/**background|music|song** -> music beds
 """
@@ -62,12 +62,17 @@ def _scan(folder, exts, exclude_hint=(), only_hint=()):
     return out
 
 
+# emotes live in the package (refire/assets/emotes) so thumb shares the pool; a custom
+# --assets-dir's own emotes/ is still scanned on top
+_PKG_EMOTES = Path(__file__).resolve().parent / "assets" / "emotes"
+
+
 def _emote_dirs(assets_dir):
-    return [Path(assets_dir) / "emotes", Path(assets_dir) / "overlays"]
+    return [_PKG_EMOTES, Path(assets_dir) / "emotes", Path(assets_dir) / "overlays"]
 
 
 def _cache_dir(assets_dir):
-    return Path(assets_dir) / "emotes" / "_cache"
+    return _PKG_EMOTES / "_cache"
 
 
 class _Cycler:

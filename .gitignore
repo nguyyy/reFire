@@ -10,7 +10,7 @@ __pycache__/
 # pipeline output and local footage
 run/
 vods/
-assets/**/_cache/
+_cache/
 
 # media (the emotes and sfx in assets/ are the exception)
 *.wav
@@ -19,6 +19,8 @@ assets/**/_cache/
 *.png
 *.jpg
 !assets/**/*.jpg
+!refire/assets/**/*.jpg
+!refire/thumb/refs/*.png
 *.csv
 *.exe
 
@@ -36,3 +38,5 @@ longFormEditor.md
 docs/ai-editor-workflow-memory.md
 
 postre/
+# Playwright CLI output (may contain credentials)
+.playwright-cli/
