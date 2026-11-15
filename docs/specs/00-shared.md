@@ -38,6 +38,10 @@ Settled with Nguy unless marked *assumed* (Claude's call, veto-able).
 | T5 | *Assumed:* the critic's top pick is uploaded first in Test & Compare, because an inconclusive test keeps the first uploaded thumbnail. |
 | A1 | *Assumed:* caption fill is white; the existing lowercase-by-default / CAPS-on-excitement rule stays. |
 | A2 | *Assumed:* one title suggestion per thumbnail concept; thumbnail text never swears. |
+| R1 | Repo mapping (Nov 14): nested config keys are one-line flow maps in the existing flat frontmatter (`facecam: {box: [0, 0.62, 0.27, 1]}`), parsed with `yaml.safe_load`. |
+| R2 | Repo mapping (Nov 14): every `run/<vod_id>/...` output in these specs lives in the **run dir** that holds `ae/manifest.json` (`run/<vod>/<run>/`, or `run/<loud-run>/`). `<run_dir>` CLI args point there. |
+| R3 | Repo mapping (Nov 14): `source_id` = the VOD, not a `sources[]` entry (those are per-clip proxies). `make` runs have one; `loud` runs one per VOD (`int(t // VOD_BASE)`). `source_t` = run-local VOD seconds, the transcript's clock. |
+| R4 | Repo mapping (Nov 14): facecam `confidence` = the facecam cluster's frame coverage. `face_present` decodes 3 frames per call; if that breaks punch's runtime budget, switch to a 2 fps presence track built in `detect`. |
 
 ## Architecture principle: Python decides, .jsx applies
 
