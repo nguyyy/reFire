@@ -533,3 +533,123 @@ def make_judge(run_dir, words: list[dict], glossary=(), backend: str = "cli",
         return cache[key]
 
     return judge
+
+
+# --------------------------------------------------------------------------- run io
+
+TRANSFORM = "AE.ADBE Geometry"       # the only Transform QE can add (spike S7); same params as Geometry2
+UNSHARP = "AE.ADBE Unsharp Mask"     # 0 color mode, 1 amount, 2 radius, 3 threshold (probed live)
+ADJ_ITEM = "refire_punch_adj"
+REVIEW_COLS = ("id", "t0", "t1", "status", "drop_reason", "score", "category", "worthy", "text",
+               "z_loud_peak", "z_loud_mean", "z_chat", "laugh", "laugh_dur", "lex", "caps",
+               "n_words", "dur", "rate", "face", "prefilter", "reason")
+
+
+def _chat(manifest: dict) -> tuple[Path | None, float]:
+    """vods/<id>[@a-b].chat.json beside the source video; chat offsets are absolute.
+    loud runs fetch windows without chat, so their path never exists -> no chat signal."""
+    src = manifest.get("source")
+    if not src:
+        return None, 0.0
+    p = Path(src).with_suffix(".chat.json")
+    m = re.search(r"@(\d+)-", Path(src).stem)
+    return (p if p.exists() else None), float(m.group(1)) if m else 0.0
+
+
+def ops(punches: list[dict], tmap, cfg: dict) -> dict:
+    """the tick-exact ops file the thin .jsx applies (idempotent: clear, then re-create)."""
+    v = int(cfg["track"]) - 1
+    sh = cfg["sharpen"]
+    out = [{"op": "clear_track", "v": v, "item": ADJ_ITEM}]
+    for p in punches:
+        a, b = tmap.ticks(p["t_in"]), tmap.ticks(p["t_out"])
+        s100 = round(p["scale"] * 100, 2)
+        out += [
+            {"op": "insert_adjustment", "id": p["id"], "v": v, "item": ADJ_ITEM, "start": str(a), "end": str(b),
+             "name": f"refire:punch:{p['id']}"},
+            {"op": "add_effect", "v": v, "start": str(a), "effect": "Transform", "match": TRANSFORM,
+             # every param explicit: QE's Transform defaults differ from the preset's (S7)
+             "params": [[0, p["pin"]], [1, p["pin"]], [2, True], [3, s100], [4, s100], [5, 0], [6, 0],
+                        [7, 0], [8, 100], [9, True], [10, 0], [11, 0]]},
+            {"op": "add_effect", "v": v, "start": str(a), "effect": "Unsharp Mask", "match": UNSHARP,
+             "params": [[1, sh["amount"]], [2, sh["radius"]], [3, sh["threshold"]]]},
+        ]
+    return {"version": 1, "feature": "punch", "ticks_per_frame": tmap.ticks_per_frame, "ops": out}
+
+
+def run(run_dir, timeline=None, overrides: dict | None = None, facecam_override: dict | None = None,
+        judge=None, laughs=None, backend: str = "cli", model: str = "claude-opus-5",
+        local_model: str | None = None, dry_run: bool = False, log=print) -> dict:
+    """analyze a run's live timeline and write punch.json, punch_review.tsv, ppro/ops_punch.json
+    (`dry_run`: no ops file)."""
+    import csv
+    import json
+    import time
+
+    from .emphasis import annotate_emphasis
+    from .facecam import Facecams
+    from .srt import _run_dir
+    from .timeline_map import TimelineMap
+
+    t_start = time.monotonic()
+    run_dir = Path(run_dir)
+    mp = run_dir / "ae" / "manifest.json"
+    manifest = json.loads(mp.read_text(encoding="utf-8"))
+    cfg = config(overrides)
+    tmap = TimelineMap.load(mp, timeline)
+    if not tmap.ours():
+        raise ValueError("no reFire footage on V1 -- dump the timeline from the panel first")
+    vod_dir = _run_dir(mp)
+    words = sorted(json.loads((vod_dir / "transcript.json").read_text(encoding="utf-8")),
+                   key=lambda w: w["start"])
+    annotate_emphasis(words, vod_dir / "audio.wav")
+    from .loud import spike_signal
+    loud = Signal(spike_signal(vod_dir / "audio.wav", window=0.5))
+    chat_path, chat_off = _chat(manifest)
+    if chat_path:
+        from .chat import chat_signal
+        chat = Signal(chat_signal(chat_path, words[-1]["end"], window=2.0, offset=chat_off))
+    else:
+        chat = Signal([])
+    glossary = sorted({t for g in vod_dir.glob("glossary_*.json")
+                       for t in json.loads(g.read_text(encoding="utf-8"))})
+
+    phr = phrases(timeline_words(words, tmap), tmap)
+    phr += laugh_candidates(laughs, tmap, phr, len(phr))
+    lex = load_lexicon()
+    feats = {p["id"]: features(p, loud, chat, lex, laughs) for p in phr}
+    cams = Facecams(mp, timeline, override=facecam_override)
+    by_src = {sid: cams.detect(sid) for sid in sorted({s.source_id for s in tmap.ours()})}
+    for sid, cam in by_src.items():
+        log(f"[punch] source {sid}: facecam {cam.region if cam else 'none'} "
+            f"conf {cam.confidence if cam else 0:.2f}")
+    t_judge = [0.0]
+
+    def timed_judge(cands):
+        t = time.monotonic()
+        try:
+            return (judge or make_judge(run_dir, words, glossary, backend, model, local_model))(cands)
+        finally:
+            t_judge[0] = time.monotonic() - t
+
+    total = max(s.tl_out for s in tmap.spans)
+    punches, review = analyze(phr, feats, timed_judge,
+                              lambda p: cams.face_present(p["source"], p["src_t0"], p["src_t1"]),
+                              by_src, tmap.cuts(), tmap, total, cfg, loud)
+
+    params = {k: cfg[k] for k in ("scale", "preroll", "postroll", "merge_gap", "min_gap", "threshold")}
+    (run_dir / "punch.json").write_text(json.dumps({"version": 1, "params": params, "punches": punches},
+                                                   indent=1), encoding="utf-8")
+    with open(run_dir / "punch_review.tsv", "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, REVIEW_COLS, delimiter="\t", extrasaction="ignore")
+        w.writeheader()
+        w.writerows(review)
+    if not dry_run:
+        (run_dir / "ppro").mkdir(exist_ok=True)
+        (run_dir / "ppro" / "ops_punch.json").write_text(json.dumps(ops(punches, tmap, cfg), indent=1),
+                                                         encoding="utf-8")
+    secs = time.monotonic() - t_start
+    covered = sum(p["t_out"] - p["t_in"] for p in punches)
+    log(f"[punch] {len(punches)} punches ({covered:.1f}s, {100 * covered / total:.1f}% of {total:.0f}s) "
+        f"from {len(phr)} phrases; {secs - t_judge[0]:.1f}s + judge {t_judge[0]:.1f}s")
+    return {"punches": punches, "review": review, "seconds": secs, "judge_seconds": t_judge[0]}

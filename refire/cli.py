@@ -233,6 +233,19 @@ def main(argv: list[str] | None = None) -> None:
     mk.add_argument("--progress-file", default=None,
                     help="write {pct,msg,done} JSON here for a GUI progress bar")
 
+    pu = sub.add_parser("punch", help="facecam punch-ins on the live Premiere timeline (V2)")
+    pu.add_argument("run_dir", help="the run dir holding ae/manifest.json")
+    pu.add_argument("--timeline", default=None,
+                    help="timeline.tsv dumped by the panel (default: beside the manifest)")
+    pu.add_argument("--dry-run", action="store_true", help="write punch.json + review only, no ops")
+    pu.add_argument("--apply", action="store_true", help="apply ops_punch.json in Premiere (remote.py)")
+    pu.add_argument("--style", default=None, help="style doc; its punch:/facecam: maps override defaults")
+    pu.add_argument("--claude-model", default="claude-opus-5")
+    pu.add_argument("--director-backend", choices=["cli", "api"], default="cli")
+    pu.add_argument("--local-director", action="store_true",
+                    help="run the judge on local Ollama (--model), no API spend")
+    pu.add_argument("--model", default=DEFAULT_MODEL, help="Ollama model for --local-director")
+
     sr = sub.add_parser("srt", help="manifest.json -> captions.srt (the Premiere path)")
     sr.add_argument("manifest", help="path to a run's ae/manifest.json")
     sr.add_argument("--offset", type=float, default=0.0,
@@ -433,6 +446,18 @@ def main(argv: list[str] | None = None) -> None:
         # pure json -> text so the premiere panel can rerun it on every caption nudge
         from .srt import write_srt
         print(f"Captions: {write_srt(args.manifest, args.offset).resolve()}")
+        return
+
+    if args.cmd == "punch":
+        from . import punch
+        _direction, knobs = _resolve_style(args.style)
+        punch.run(args.run_dir, args.timeline, overrides=knobs.get("punch"),
+                  facecam_override=knobs.get("facecam"), backend=args.director_backend,
+                  model=args.claude_model, local_model=args.model if args.local_director else None,
+                  dry_run=args.dry_run)
+        if args.apply and not args.dry_run:
+            from .ppro import remote
+            print(remote.apply_ops(Path(args.run_dir) / "ppro" / "ops_punch.json"))
         return
 
     if args.cmd == "recap":

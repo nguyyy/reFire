@@ -202,3 +202,35 @@ def test_judge_one_call_cached_with_context(tmp_path, monkeypatch):
     assert j(cands) == got and len(calls) == 1                                        # cache hit
     assert punch.make_judge(tmp_path, words, glossary=["Paimon"])(cands) == got and len(calls) == 1
     assert j([]) == {}
+
+
+def test_run_writes_outputs_and_tick_exact_ops(tmp_path, monkeypatch):
+    import json
+
+    from refire import facecam
+    vod = tmp_path / "run" / "123"
+    ae = vod / "cut" / "ae"
+    ae.mkdir(parents=True)
+    words = say("so yeah", 3, emph=False) + say("OH SHIT", 10) + say("okay i see", 20, emph=False)
+    (vod / "transcript.json").write_text(json.dumps(words), encoding="utf-8")
+    (ae / "manifest.json").write_text(json.dumps({"fps": 30, "sources": [{"path": "C:/p/A.mov", "offset": OFF}],
+                                                  "clips": [{"start": OFF, "end": OFF + 30, "src": 0}]}))
+    (ae / "timeline.tsv").write_text("#timebase\t4233600000\nC:/p/A.mov\t0\t30\t0\t30\n", encoding="utf-8")
+    monkeypatch.setattr(facecam.Facecams, "face_present", lambda self, *a, **k: 1.0)
+    res = punch.run(vod / "cut", facecam_override={"box": CAM.box}, judge=judge, log=lambda *a: None)
+    assert [p["text"] for p in res["punches"]] == ["OH SHIT"]
+    assert json.loads((vod / "cut" / "punch.json").read_text())["punches"][0]["id"] == "p01"
+    rows = (vod / "cut" / "punch_review.tsv").read_text(encoding="utf-8").splitlines()
+    assert rows[0].startswith("id\tt0\tt1\tstatus\tdrop_reason") and len(rows) == 4
+    o = json.loads((vod / "cut" / "ppro" / "ops_punch.json").read_text())
+    assert [x["op"] for x in o["ops"]] == ["clear_track", "insert_adjustment", "add_effect", "add_effect"]
+    ins = o["ops"][1]
+    assert ins["v"] == 1 and int(ins["start"]) % 4233600000 == 0 and int(ins["end"]) % 4233600000 == 0
+    assert int(ins["start"]) == round(9.9 * 60) * 4233600000                     # 60 fps frame grid
+    tr = o["ops"][2]
+    assert tr["match"] == "AE.ADBE Geometry" and [0, [0.0, 1.0]] in tr["params"] and [3, 210.0] in tr["params"]
+    assert o["ops"][3]["params"] == [[1, 50], [2, 1.0], [3, 0]]
+    # dry run: no ops file
+    (vod / "cut" / "ppro" / "ops_punch.json").unlink()
+    punch.run(vod / "cut", facecam_override={"box": CAM.box}, judge=judge, dry_run=True, log=lambda *a: None)
+    assert not (vod / "cut" / "ppro" / "ops_punch.json").exists()

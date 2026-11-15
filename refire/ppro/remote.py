@@ -111,6 +111,26 @@ def call(code, panel=False, port=PORT, timeout=600.0, logs=None, jsx=JSX):
     return _evaluate(bridge % json.dumps(_snippet(code, jsx)), port, timeout, logs)
 
 
+OPS_JSX = Path(__file__).with_name("applyOps.jsx")
+
+
+def apply_ops(ops_path, chunk: int = 150, port: int = PORT) -> str:
+    """apply an ops_<feature>.json in Premiere, `chunk` ops per jsx call (S6: big batches
+    freeze the panel). Raises on the first failing op with its index and message."""
+    path = Path(ops_path).resolve().as_posix()
+    start, total = 0, None
+    while total is None or start < total:
+        out = call("reFireOps.apply(%s, %d, %d)" % (json.dumps(path), start, chunk), port=port, jsx=OPS_JSX)
+        try:
+            res = json.loads(out)
+        except (TypeError, ValueError):
+            raise RuntimeError("apply %s: %s" % (Path(ops_path).name, out)) from None
+        if "error" in res:
+            raise RuntimeError("apply %s: %s" % (Path(ops_path).name, res["error"]))
+        start, total = res["next"], res["total"]
+    return "applied %d ops from %s" % (total, Path(ops_path).name)
+
+
 def smoke(manifest: str, port: int = PORT) -> int:
     """End-to-end check: the jsx loads, a build lands, and the sequence has clips."""
     logs: list = []
