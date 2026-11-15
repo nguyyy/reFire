@@ -1,0 +1,25 @@
+# exclamations that make a phrase a punch candidate (prefilter only; the judge decides).
+# one per line, matched as whole words, case/punctuation-insensitive. edit freely.
+oh my god
+omg
+oh no
+no way
+what
+bro
+let's go
+lets go
+are you kidding
+holy
+wtf
+# profanity
+fuck
+fucking
+fucked
+what the fuck
+shit
+holy shit
+bullshit
+damn
+goddamn
+motherfucker
+bitch
