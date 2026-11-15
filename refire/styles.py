@@ -37,6 +37,11 @@ KEYS = {
     "trim": bool,           # intra-clip trim: drop filler spans the cut doesn't depend on
     "critics": bool,        # structured continuity/payoff/filler/drop-off critics
     "lessons": bool,        # past finished edits as few-shot pairs in director prompts
+    # feature maps (docs/specs, R1): one-line yaml flow maps, e.g. facecam: {box: [0, 0.62, 0.27, 1]}
+    "punch": dict,
+    "caption": dict,
+    "thumb": dict,
+    "facecam": dict,
 }
 
 _TRUE = {"true", "yes", "on", "1"}
@@ -66,6 +71,15 @@ def _coerce(key: str, raw: str):
     """One frontmatter value -> its typed form. Raises ValueError on a bad literal."""
     val = _strip_comment(raw).strip()
     kind = KEYS[key]
+    if kind is dict:
+        import yaml
+        try:
+            v = yaml.safe_load(val)
+        except yaml.YAMLError as e:
+            raise ValueError(f"{key}: bad flow map {val!r} ({e.__class__.__name__})") from None
+        if not isinstance(v, dict):
+            raise ValueError(f"{key}: expected a {{...}} map, got {val!r}")
+        return v
     if kind is bool:
         low = val.lower()
         if low in _TRUE:
@@ -84,8 +98,8 @@ def _coerce(key: str, raw: str):
 def parse_frontmatter(text: str) -> tuple[str, dict]:
     """`text` -> (body, knobs). No leading `---` fence -> (text, {}) unchanged.
 
-    Flat `key: value` lines only -- no nesting, no lists, no YAML dependency. That is the
-    whole format, and it is the same shape the project's memory files already use. Blank
+    Flat `key: value` lines; the feature keys (punch/caption/thumb/facecam) take a one-line
+    yaml flow map as their value, nothing spans lines. Blank
     lines and `#` comments are skipped; an unknown or unparseable key WARNS and is
     dropped rather than raising, because this is read at the top of a run that goes on to
     spend real director calls and a typo must not be what kills it.
@@ -167,6 +181,10 @@ def _demo() -> None:
     # bool spellings
     _b, k = parse_frontmatter("---\ncards: NO\nloudnorm: on\n---\nx")
     assert k == {"cards": False, "loudnorm": True}, k
+    # feature flow maps; a non-map or broken map is dropped like any bad value
+    _b, k = parse_frontmatter("---\nfacecam: {box: [0, 0.62, 0.27, 1]}  # zy0x cam\n"
+                              "punch: {scale: 2.1, 0: {x: 1}}\ncaption: 3\nthumb: {a: [1\n---\nx")
+    assert k == {"facecam": {"box": [0, 0.62, 0.27, 1]}, "punch": {"scale": 2.1, 0: {"x": 1}}}, k
 
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False,
                                      encoding="utf-8") as f:

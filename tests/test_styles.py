@@ -49,6 +49,8 @@ def test_document_without_frontmatter_is_all_prose(tmp_path):
     ("---\n# a comment\n\nstack: 4\n---\nx", {"stack": 4}),     # comments + blanks
     ("---\nmotion-zoom: false\n---\nx", {"motion_zoom": False}),  # dashes normalize
     ("---\ncards: NO\nloudnorm: on\n---\nx", {"cards": False, "loudnorm": True}),
+    ("---\ncaption: 3\nstack: 4\n---\nx", {"stack": 4}),         # feature key needs a map
+    ("---\nthumb: {a: [1\nstack: 4\n---\nx", {"stack": 4}),      # broken flow map dropped
 ])
 def test_bad_frontmatter_never_kills_the_run(block, want):
     body, knobs = styles.parse_frontmatter(block)
@@ -142,3 +144,12 @@ def test_no_style_is_the_identity_run(monkeypatch):
     assert (kw["order"], kw["snap"], kw["stack"]) == ("chrono", "sentence", 0)
     assert kw["keep_build"] is True and kw["loudnorm"] is False
     assert kw["cards"] is True and kw["motion_zoom"] is True
+
+
+def test_feature_keys_take_one_line_flow_maps():
+    """R1: nested config for punch/caption/thumb/facecam, comments still stripped."""
+    _b, knobs = styles.parse_frontmatter(
+        "---\nfacecam: {box: [0, 0.62, 0.27, 1]}   # zy0x cam\n"
+        "punch: {scale: 2.1, 1: {box: [0.7, 0, 1, 0.3]}}\npace: 0.5\n---\nx")
+    assert knobs == {"facecam": {"box": [0, 0.62, 0.27, 1]},
+                     "punch": {"scale": 2.1, 1: {"box": [0.7, 0, 1, 0.3]}}, "pace": 0.5}
