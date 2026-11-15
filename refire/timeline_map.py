@@ -30,6 +30,7 @@ class Span:
     media: str
     src_in: float | None = None     # transcript clock; None = foreign media
     src_out: float | None = None
+    offset: float = 0.0             # transcript time of the media's frame 0 (media t = src t - offset)
 
     @property
     def rate(self) -> float:
@@ -84,7 +85,7 @@ class TimelineMap:
             if off is None or src_out - src_in <= 1e-3:
                 spans.append(Span(at, end, path))
             else:
-                spans.append(Span(at, end, path, src_in + off, src_out + off))
+                spans.append(Span(at, end, path, src_in + off, src_out + off, off))
         return cls(spans, tpf)
 
     def ours(self) -> list[Span]:
