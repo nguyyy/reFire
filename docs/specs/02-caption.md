@@ -115,7 +115,7 @@ Inside `refire_captions`, use tracks V1–V4. In time order:
 1. `ensure_nest`: create `refire_captions` if missing, with the main sequence's settings (clone main and clear it, or create from a preset with no dialog; spike S5). Ensure exactly one V5 item on main referencing it, spanning the whole main sequence; extend its end if the main sequence grew.
 2. `style_nest`: only when the nest clip is newly created or `--restyle` is passed. QE-add Camera Shake, Drop Shadow, Edge Glow to the V5 nest clip in that order; set every named param from `ccStyle.prfpset`.
 3. `clear_nest`: remove all track items inside `refire_captions`.
-4. Per block: `insert_caption` (`importMGT` at `t_in` on its track, set end to `t_out`, set text through `getMGTComponent()` → `getParamForDisplayName("TextLayer")`), then `add_transform` (QE-add Transform; static params from the preset; Use Composition's Shutter Angle **off**; Shutter Angle 360; Opacity and Position keys from step 2).
+4. Per block: `insert_caption` (`importMGT` of that block's baked MOGRT at `t_in` on its track, set end to `t_out`; the text is already in the file, decision R5), then `add_transform` (QE-add Transform; static params from the preset; Use Composition's Shutter Angle **off**; Shutter Angle 360; Opacity and Position keys from step 2).
 
 ### 6. Review file
 
@@ -137,7 +137,7 @@ Inside `refire_captions`, use tracks V1–V4. In time order:
 | `preset_style` | `refire/assets/premiere/ccStyle.prfpset` |
 
 Paths are repo-relative by default and resolved to absolute paths before they go into the ops file (`importMGT` needs absolute paths). A style document can point them anywhere else. Parser and lint tests read the same files, so updating a preset in the repo updates both the output and the fixtures (re-baseline the expected values when that happens).
-| `easing` | `approx` |
+| `easing` | `exact` (spike S4: `approx` looked visibly different) |
 | `motion_blur` | `true` (forces Use Composition's Shutter Angle off) |
 | `shutter_angle` | 360 |
 | `tail` | 0.0 s |

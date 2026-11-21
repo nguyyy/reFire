@@ -42,6 +42,7 @@ Settled with Nguy unless marked *assumed* (Claude's call, veto-able).
 | R2 | Repo mapping (Nov 14): every `run/<vod_id>/...` output in these specs lives in the **run dir** that holds `ae/manifest.json` (`run/<vod>/<run>/`, or `run/<loud-run>/`). `<run_dir>` CLI args point there. |
 | R3 | Repo mapping (Nov 14): `source_id` = the VOD, not a `sources[]` entry (those are per-clip proxies). `make` runs have one; `loud` runs one per VOD (`int(t // VOD_BASE)`). `source_t` = run-local VOD seconds, the transcript's clock. |
 | R4 | Repo mapping (Nov 14): facecam `confidence` = the facecam cluster's frame coverage. `face_present` decodes 3 frames per call; if that breaks punch's runtime budget, switch to a 2 fps presence track built in `detect`. |
+| R5 | Nguy (Nov 21), after spike S3: each caption block is its own copy of the caption MOGRT with the text already written into it (Python bakes `<run_dir>/ppro/captions/<id>.mogrt`, the .jsx imports it), all nested in `refire_captions`. Premiere-made MOGRT text can't be set after import (S3/S3b), so this replaces `getMGTComponent()`. Same result in Premiere: one editable MOGRT clip per caption. |
 
 ## Architecture principle: Python decides, .jsx applies
 
