@@ -70,3 +70,15 @@ def test_bad_rows_are_skipped(tmp_path):
     m = _load(tmp_path, [("C:/p/A.mov", "nan?", 4, 0, 4), ("C:/p/A.mov", 0, 4, 4, 4),
                          ("C:/p/A.mov", 0, 4, 4, 8)])
     assert [(s.tl_in, s.tl_out) for s in m.spans] == [(4.0, 8.0)]
+
+
+def test_manifest_fallback_lays_keep_spans_in_section_order(tmp_path):
+    ae = tmp_path / "ae"
+    ae.mkdir()
+    (ae / "manifest.json").write_text(json.dumps({"fps": 30, "sources": [{"path": "A.mov", "offset": 98.0}],
+        "sections": [{"clip_indices": [1, 0]}],
+        "clips": [{"start": 100.0, "end": 110.0, "src": 0, "keep": [[0, 2], [5, 8]]},
+                  {"start": 200.0, "end": 204.0, "src": 0}]}), encoding="utf-8")
+    m = TimelineMap.from_manifest(ae / "manifest.json")               # never dumped from premiere
+    assert [(s.tl_in, s.tl_out, s.src_in) for s in m.spans] == [(0.0, 4.0, 200.0), (4.0, 6.0, 100.0), (6.0, 9.0, 105.0)]
+    assert m.timeline_to_source(7.0) == (0, 106.0) and m.ticks_per_frame == TICKS // 30

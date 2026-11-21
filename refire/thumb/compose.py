@@ -93,7 +93,9 @@ class RunFrames:
         from ..facecam import Facecams
         from ..timeline_map import TimelineMap
         mp = Path(run_dir) / "ae" / "manifest.json"
-        self.tmap = TimelineMap.load(mp, timeline)
+        dumped = timeline or (mp.parent / "timeline.tsv").exists()
+        # thumbnails also run on a cut never opened in premiere: then V1 is the cut as built
+        self.tmap = TimelineMap.load(mp, timeline) if dumped else TimelineMap.from_manifest(mp)
         self.cams = Facecams(mp, timeline)
 
     def frame(self, t: float) -> np.ndarray:

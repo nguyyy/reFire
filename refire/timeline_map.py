@@ -65,6 +65,23 @@ class TimelineMap:
         self.ticks_per_frame = ticks_per_frame
 
     @classmethod
+    def from_manifest(cls, manifest_path) -> TimelineMap:
+        """V1 as the panel's build() lays it (sections in order, one item per keep span), for a
+        run that was never dumped from Premiere. keep spans are clip-relative."""
+        m = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        srcs = m.get("sources") or [{"path": m.get("source", ""), "offset": 0.0}]
+        order = [i for s in m.get("sections", []) for i in s.get("clip_indices", [])] or range(len(m["clips"]))
+        spans, t = [], 0.0
+        for i in order:
+            c = m["clips"][i]
+            src = srcs[c.get("src", 0)]
+            for x, y in c.get("keep") or [[0.0, c["end"] - c["start"]]]:
+                a, b = c["start"] + x, c["start"] + y
+                spans.append(Span(t, t + b - a, src["path"], a, b, src.get("offset", 0.0)))
+                t += b - a
+        return cls(spans, round(TICKS / m["fps"]) if m.get("fps") else None)
+
+    @classmethod
     def load(cls, manifest_path, timeline_path=None) -> TimelineMap:
         manifest_path = Path(manifest_path)
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

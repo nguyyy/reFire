@@ -71,6 +71,13 @@ class YuNet:
         import cv2
         self._net = cv2.FaceDetectorYN.create(str(_model()), "", (320, 320), score)
 
+    def raw(self, img) -> np.ndarray:
+        """yunet rows in pixels: x, y, w, h, 5 landmarks (r eye, l eye, nose, r mouth, l mouth), score."""
+        h, w = img.shape[:2]
+        self._net.setInputSize((w, h))
+        _, faces = self._net.detect(img)
+        return faces if faces is not None else np.zeros((0, 15), np.float32)
+
     def __call__(self, img) -> list[tuple[float, float, float, float, float]]:
         h, w = img.shape[:2]
         self._net.setInputSize((w, h))

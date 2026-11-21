@@ -259,8 +259,11 @@ def main(argv: list[str] | None = None) -> None:
     ca.add_argument("--corrections-dir", default="run", help="where corrections_<game>.json lives")
 
     th = sub.add_parser("thumb", help="thumbnail candidates: `thumb render <run_dir> <A|B|C>` re-renders one")
-    th.add_argument("args", nargs="+", help="render <run_dir> <A|B|C> | report <run_dir>  (full `thumb <run_dir>` run: coming)")
+    th.add_argument("args", nargs="+", help="<run_dir> (full run) | render <run_dir> <A|B|C> | report <run_dir>")
     th.add_argument("--hires", action="store_true", help="render 2x and downsample (crisper text)")
+    th.add_argument("--runs", type=int, default=1, help="full runs side by side in thumb/v1.. (each bets differently)")
+    th.add_argument("--claude-model", default="claude-opus-5")
+    th.add_argument("--director-backend", choices=["cli", "api"], default="cli")
 
     sr = sub.add_parser("srt", help="manifest.json -> captions.srt (the Premiere path)")
     sr.add_argument("manifest", help="path to a run's ae/manifest.json")
@@ -470,6 +473,15 @@ def main(argv: list[str] | None = None) -> None:
             from .thumb import render
             out = render.render(Path(a[1]) / "thumb" / a[2].upper() / "spec.json", hires=args.hires or None)
             print(f"Thumbnail: {out.resolve()}")
+            return
+        if len(a) == 1:                                   # the full run, --runs times
+            from .thumb import pipeline
+            hooks = []
+            for k in range(1, args.runs + 1):
+                rep = pipeline.run(a[0], k, hooks, backend=args.director_backend, model=args.claude_model)
+                cj = json.loads((rep.parent / "concepts.json").read_text(encoding="utf-8"))
+                hooks += [" / ".join(c["hook"]["lines"]) for c in cj["concepts"]]
+                print(f"Report: {rep.resolve()}")
             return
         if a[0] == "report" and len(a) == 2:
             from .thumb import report

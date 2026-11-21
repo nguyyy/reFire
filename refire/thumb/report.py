@@ -28,9 +28,9 @@ def _warnings(d: Path, spec: dict) -> list[str]:
     return out
 
 
-def build(run_dir, ocr=None) -> Path:
-    """score every rendered candidate under <run_dir>/thumb and write report.md."""
-    root = Path(run_dir) / "thumb"
+def build(run_dir, ocr=None, root=None) -> Path:
+    """score every rendered candidate under <run_dir>/thumb (or `root`) and write report.md there."""
+    root = Path(root) if root else Path(run_dir) / "thumb"
     concepts = {}
     if (root / "concepts.json").exists():
         for c in json.loads((root / "concepts.json").read_text(encoding="utf-8")).get("concepts", []):
