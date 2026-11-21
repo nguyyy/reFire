@@ -369,6 +369,11 @@ fieldset:disabled .chk input:checked+.box{background:var(--mute);border-color:va
         <input type="text" id="cap_off" data-k="cap_off" placeholder="0.00 s" title="Seconds. Applies on the next Build.">
         <button class="btn" id="off_fwd" type="button" title="Captions later" aria-label="Captions later">+</button>
       </div></div>
+    <div class="row"><label for="cap_mode">Caption style</label>
+      <select id="cap_mode" data-k="cap_mode" title="Styled: one caption MOGRT per line in the refire_captions nest on V5. Plain: an SRT caption track.">
+        <option value="styled">Styled (nest on V5)</option>
+        <option value="srt">Plain SRT track</option>
+      </select></div>
     <div class="row"><span class="k">Recaption</span>
       <button class="btn" id="recap" type="button" data-busy="Recaptioning">Recaption</button></div>
     <div class="row"><span class="k">Punch-ins</span>
@@ -855,7 +860,7 @@ function recaption() {
         if (!res || res === "EvalScript error.") { res = "Error: " + NO_REPLY; }
         log(res);
         if (/^Error/.test(res)) { return failed(btn, res); }
-        runRecap(btn);
+        if (val("cap_mode") === "srt") { runRecap(btn); } else { runCaption(btn); }
     });
 }
 
@@ -945,22 +950,58 @@ function runPunch(btn) {
     });
 }
 
-function applyPunch(btn, ops) {
-    note("run", "Applying punch-ins");
+// Apply an ops_<feature>.json with the thin applyOps.jsx, `chunk` ops per evalScript so a
+// few hundred captions don't freeze the panel (spike S6), with progress in the note.
+function applyOps(btn, ops, chunk, label, doneText) {
     var lib = P ? P.join(extDir(), "applyOps.jsx") : extDir() + "\\applyOps.jsx";
-    var src = 'var __r;try{$.evalFile(new File("' + esc(lib) + '"));' +
-              '__r=reFireOps.apply("' + esc(normPath(ops)) + '",0,100000);}' +
-              'catch(e){__r="Error: "+(e.message||e.toString());}String(__r);';
-    setTimeout(function () {
-        evalScript(src, function (res) {
-            log(res);
-            var r;
-            try { r = JSON.parse(res); } catch (e) { r = { error: res || NO_REPLY }; }
-            busy(btn, false);
-            if (r.error) { return note("err", "Punch-ins: " + r.error); }
-            note("ok", "Punch-ins on V2 (" + r.total + " ops). Re-press after a re-cut.");
+    function step(from) {
+        var src = 'var __r;try{$.evalFile(new File("' + esc(lib) + '"));' +
+                  '__r=reFireOps.apply("' + esc(normPath(ops)) + '",' + from + ',' + chunk + ');}' +
+                  'catch(e){__r="Error: "+(e.message||e.toString());}String(__r);';
+        setTimeout(function () {
+            evalScript(src, function (res) {
+                var r;
+                try { r = JSON.parse(res); } catch (e) { r = { error: res || NO_REPLY }; }
+                if (r.error) { log(res); busy(btn, false); return note("err", label + ": " + r.error); }
+                if (r.next < r.total) { note("run", label + " " + r.next + "/" + r.total); return step(r.next); }
+                log(label + ": applied " + r.total + " ops");
+                busy(btn, false);
+                note("ok", doneText);
+            });
+        }, 30);
+    }
+    note("run", label);
+    step(0);
+}
+
+function applyPunch(btn, ops) {
+    applyOps(btn, ops, 150, "Applying punch-ins", "Punch-ins on V2. Re-press after a re-cut.");
+}
+
+// Styled recaption: `refire caption` bakes one MOGRT per line and writes ops_caption.json;
+// the applier rebuilds the refire_captions nest (its V5 clip and ccStyle stay).
+function runCaption(btn) {
+    var py = pyExe(), runDir = manifest.replace(/[\\/]ae[\\/]manifest\.json$/i, "");
+    var args = ["-m", "refire", "caption", runDir, "--words-per-line", val("wpl") || "3"];
+    if (val("game")) { args.push("--game", val("game")); }
+    note("run", "Laying out captions");
+    log("> " + py + " " + args.join(" "));
+    var proc;
+    try {
+        proc = cp.spawn(py, args, {
+            cwd: val("repo") || defaultRepo(),
+            env: Object.assign({}, process.env, { PYTHONUNBUFFERED: "1", PYTHONIOENCODING: "utf-8" })
         });
-    }, 30);
+    } catch (e) { return failed(btn, String(e)); }
+    var flush = [pipe(proc.stdout, log), pipe(proc.stderr, log)];
+    proc.on("error", function (e) { failed(btn, String(e)); });
+    proc.on("close", function (code) {
+        flush.forEach(function (f) { f(); });
+        if (code !== 0) { return failed(btn, "Captions failed (exit " + code + "). The log has the details."); }
+        // 50 captions (2 ops each) per call, +3 so the nest setup shares the first call
+        applyOps(btn, runDir + "/ppro/ops_caption.json", 103, "Captions",
+                 "Captions rebuilt in refire_captions (V5). Re-press after a re-cut.");
+    });
 }
 
 // --- wiring -------------------------------------------------------------

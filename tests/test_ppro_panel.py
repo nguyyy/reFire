@@ -153,3 +153,14 @@ def test_apply_ops_never_throws(tmp_path):
              "console.log(c.reFireOps.apply('x.json',0,10));")
     out = subprocess.run(["node", "-e", probe, str(js)], capture_output=True, text=True, check=True).stdout
     assert "error" in json.loads(out)
+
+
+def test_styled_recaption_is_wired():
+    """Recaption -> timeline() -> `refire caption <run_dir>` -> chunked reFireOps.apply()."""
+    panel = PANEL.read_text(encoding="utf-8")
+    cli = CLI.read_text(encoding="utf-8")
+    assert 'id="cap_mode"' in panel and 'value="styled"' in panel and 'value="srt"' in panel
+    assert 'if (val("cap_mode") === "srt") { runRecap(btn); } else { runCaption(btn); }' in panel
+    assert '"refire", "caption", runDir' in panel and 'sub.add_parser("caption"' in cli
+    assert '"/ppro/ops_caption.json"' in panel and '"ops_caption.json"' in (ROOT / "refire" / "caption.py").read_text(
+        encoding="utf-8")
