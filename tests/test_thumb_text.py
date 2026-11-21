@@ -59,7 +59,11 @@ def test_svg_shine_runs_across_and_slab_connects(m):
     assert len(rects) == 2 and rects[0][1] + rects[0][3] == pytest.approx(rects[1][1], abs=0.02)   # slabs touch
     assert rects[1][3] == pytest.approx(st.rect * lines[1].cap(m), abs=0.02)
     assert rects[1][0] > lines[1].x                                  # tucked behind the first glyph
-    assert '<tspan x="' in s and 'paint-order="stroke"' in s and 'vector-effect="non-scaling-stroke"' in s
+    assert '<tspan x="' in s and 'vector-effect="non-scaling-stroke"' in s
+    # every stroke sits under every fill: one stroke layer for all lines, one fill layer above it
+    st_i, fi_i = s.index('<g class="strokes"'), s.index('<g class="fills" stroke="none">')
+    assert st_i < fi_i and s.count("<text", st_i, fi_i) == 2 and s.count("<text", fi_i) == 2
+    assert "url(#g" not in s[st_i:fi_i] and "stroke-width" not in s[fi_i:]
 
 
 def test_skew_and_page_faces(m):
@@ -68,3 +72,13 @@ def test_skew_and_page_faces(m):
     html = T.page(hook, (1280, 720))
     assert "skewX(-12" in html and "@font-face { font-family: F0" in html
     assert "http" not in re.sub(r'xmlns="http[^"]+"', "", html)
+
+
+def test_slab_stops_before_trailing_dots(m):
+    st = T.Style()
+    (ln,) = T.layout(["STALLING..."], m, (1280, 720), st)
+    s = T.svg([ln], m, (1280, 720), st)
+    x, w = map(float, re.search(r'<rect x="([\d.]+)" y="[\d.]+" width="([\d.]+)"', s).groups())
+    adv = m.advances_px("STALLING...", ln.size, st.tracking)
+    g_end = ln.x + sum(adv[:8]) * ln.sx                               # right edge of the G
+    assert x + w < g_end                                               # tucked inside the G, not over the dots

@@ -161,7 +161,7 @@ def svg(lines: list[Line], m: Metrics, canvas: tuple[int, int], st: Style, accen
     """the hook as one canvas-sized <svg> (transparent)."""
     W, H = canvas
     acc = {**PALETTE, **st.palette}.get(accent, PALETTE["gold"])
-    defs, rects, texts = [], [], []
+    defs, strokes, fills = [], [], []
     boxes = []
     fams = families(lines)
     for i, ln in enumerate(lines):
@@ -170,34 +170,43 @@ def svg(lines: list[Line], m: Metrics, canvas: tuple[int, int], st: Style, accen
         rh = st.rect * cap
         adv0 = m.advances_px(ln.text, ln.size, st.tracking)
         a = st.end_inset * adv0[0] * ln.sx                     # tuck the slab ends behind the end glyphs
-        z = st.end_inset * m.advances.get(ln.text[-1], m.fallback) * ln.size / m.upm * ln.sx
+        # trailing dots/commas sit below the slab's band: end it inside the last tall glyph instead
+        body = ln.text.rstrip(".,…")
+        tail = len(ln.text) - len(body)
+        last = body[-1] if body else ln.text[-1]
+        z = (sum(adv0[len(ln.text) - tail:]) + (st.tracking * ln.size if tail else 0)) * ln.sx             + st.end_inset * m.advances.get(last, m.fallback) * ln.size / m.upm * ln.sx
         boxes.append([ln.x + a, ln.baseline - cap / 2 - rh / 2, ln.width - a - z, rh])
         nat = ln.width / ln.sx                      # gradient lives in the unsqueezed space
         for name, (base, light) in (("w", WHITE), ("a", acc)):
             stops = "".join(f'<stop offset="{o}" stop-color="{c}"/>' for o, c in zip(st.shine, (base, light, base)))
             defs.append(f'<linearGradient id="g{name}{i}" gradientUnits="userSpaceOnUse" x1="{ln.x:.2f}" y1="0" '
                         f'x2="{ln.x + nat:.2f}" y2="0">{stops}</linearGradient>')
-        xs, spans, k = [], [], 0
+        spans, k = [], 0
         adv = m.advances_px(ln.text, ln.size, st.tracking)
         pos = [ln.x + sum(adv[:j]) for j in range(len(ln.text))]
         for chunk, is_acc in _split_accent(ln.text, accent_phrase):
             px = " ".join(f"{p:.2f}" for p in pos[k:k + len(chunk)])
-            spans.append(f'<tspan x="{px}" fill="url(#g{"a" if is_acc else "w"}{i})">{escape(chunk)}</tspan>')
+            spans.append((px, f"url(#g{'a' if is_acc else 'w'}{i})", escape(chunk)))
             k += len(chunk)
         sq = (f' transform="translate({ln.x:.2f} 0) scale({ln.sx} 1) translate({-ln.x:.2f} 0)"'
               if ln.sx != 1 else "")
-        texts.append(f'<text y="{ln.baseline:.2f}" font-family="{fams[ln.font]}" font-size="{ln.size:.2f}" '
-                     f'stroke-width="{sw:.2f}"{sq} vector-effect="non-scaling-stroke">{"".join(spans)}</text>')
+        head = f'<text y="{ln.baseline:.2f}" font-family="{fams[ln.font]}" font-size="{ln.size:.2f}"{sq}'
+        # two copies of every line: the outline goes in the stroke layer, the gradient fill in the
+        # fill layer above it, so no line's stroke can ever cover another line's (or its own) fill
+        strokes.append(f'{head} stroke-width="{sw:.2f}" vector-effect="non-scaling-stroke">'
+                       + "".join(f'<tspan x="{px}">{t}</tspan>' for px, _, t in spans) + "</text>")
+        fills.append(f'{head}>' + "".join(f'<tspan x="{px}" fill="{f}">{t}</tspan>' for px, f, t in spans) + "</text>")
     for i in range(len(boxes) - 1):                 # each slab reaches down to the next line's
         boxes[i][3] = boxes[i + 1][1] - boxes[i][1]
     rects = [f'<rect x="{x:.2f}" y="{y:.2f}" width="{w:.2f}" height="{h:.2f}" fill="#000"/>' for x, y, w, h in boxes]
-    ann = ""
     if annotation and len(lines) > 1:
         ln = lines[0]
         s = ln.size * st.ann_size
         m0 = metrics(str(font_path(ln.font)))
-        ann = (f'<text class="ann" x="{ln.x + ln.width * 0.30:.2f}" y="{ln.baseline - ln.cap(m0) - s * 0.15:.2f}" '
-               f'font-size="{s:.2f}" stroke-width="{s * 0.18:.2f}">{escape(annotation)}</text>')
+        head = (f'<text class="ann" x="{ln.x + ln.width * 0.30:.2f}" y="{ln.baseline - ln.cap(m0) - s * 0.15:.2f}" '
+                f'font-size="{s:.2f}"')
+        strokes.append(f'{head} stroke-width="{s * 0.18:.2f}">{escape(annotation)}</text>')
+        fills.append(f'{head} fill="#fff">{escape(annotation)}</text>')
     # skew about the block's bottom-left so the anchor corner stays put
     bx, by = min(b[0] for b in boxes), max(ln.baseline for ln in lines)
     tf = f' transform="translate({bx:.2f} {by:.2f}) skewX({st.skew}) translate({-bx:.2f} {-by:.2f})"' if st.skew else ""
@@ -212,15 +221,15 @@ def svg(lines: list[Line], m: Metrics, canvas: tuple[int, int], st: Style, accen
             f'</filter>')
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">'
             f'<defs>{filt}{"".join(defs)}</defs><g filter="url(#sh)"{tf}>{"".join(rects)}'
-            f'<g stroke="#000" stroke-linejoin="round" paint-order="stroke">'
-            f'{"".join(texts)}</g>{ann}</g></svg>')
+            f'<g class="strokes" fill="#000" stroke="#000" stroke-linejoin="round">{"".join(strokes)}</g>'
+            f'<g class="fills" stroke="none">{"".join(fills)}</g></g></svg>')
 
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>
 {faces}
 html, body {{ margin: 0; background: transparent; }}
 text {{ font-kerning: none; text-rendering: geometricPrecision; }}
-.ann {{ fill: #fff; stroke: #000; paint-order: stroke; font-family: AnnFont, "Segoe UI", sans-serif; }}
+.ann {{ font-family: AnnFont, "Segoe UI", sans-serif; }}
 </style></head><body>{svg}</body></html>"""
 
 
