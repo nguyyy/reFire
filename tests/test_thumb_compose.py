@@ -63,3 +63,31 @@ def test_render_page_puts_the_hook_raster_on_top():
     h = render.html(spec, spec["layers"] + [{"kind": "hook", "src": "assets/hook.png", "x": 30, "y": 500, "w": 800}])
     assert "blur(12px) brightness(0.62) saturate(1.15)" in h and "drop-shadow(0 0 3px #fff)" in h
     assert h.index('class="layer face"') < h.index('class="layer hook"')
+
+
+def test_scene_page_wires_three_and_the_spec():
+    import json as _json
+    import re
+
+    from refire.thumb import render
+    spec = {"canvas": [1280, 720], "background": {"vignette": 0.5},
+            "scene": {"seed": 1, "cards": [{"src": "assets/s.png", "x": 10, "y": 10, "w": 300, "rot": [0, 20, 0]}]},
+            "layers": []}
+    h = render.html(spec, [], dpr=2)
+    imp = _json.loads(re.search(r'<script type="importmap">(.*?)</script>', h).group(1))
+    assert imp["imports"]["three"] == "/vendor/three/three.module.min.js"
+    sc = _json.loads(re.search(r'<script id="scene-spec" type="application/json">(.*?)</script>', h).group(1))
+    assert sc["w"] == 1280 and sc["dpr"] == 2 and sc["cards"][0]["rot"] == [0, 20, 0]
+    assert 'src="/scene.js"' in h and "background-image" not in h       # the scene owns the background
+    assert (render.VENDOR / "three" / "three.module.min.js").exists()
+    assert (render.TEMPLATES / "scene.js").exists()
+
+
+def test_bake_plate_grades_like_css(tmp_path):
+    from PIL import Image
+
+    from refire.thumb import render
+    Image.new("RGB", (64, 36), (200, 100, 50)).save(tmp_path / "f.png")
+    out = render.bake_plate(tmp_path / "f.png", tmp_path / "p.jpg", blur=4, brightness=0.5, saturate=1.0)
+    r, g, b = Image.open(out).getpixel((32, 18))
+    assert abs(r - 100) <= 3 and abs(g - 50) <= 3 and abs(b - 25) <= 3

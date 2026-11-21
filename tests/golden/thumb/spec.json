@@ -1,10 +1,79 @@
 {
- "version": 1, "layout": "reaction", "canvas": [1280, 720],
- "background": {"src": "assets/bg.png", "blur": 12, "brightness": 0.62, "saturate": 1.15, "scale": 1.08, "vignette": 0.55},
- "layers": [
-  {"kind": "subject", "src": "assets/subject.png", "x": 70, "y": 50, "w": 360, "rotate": -3, "shadow": 0.6},
-  {"kind": "face", "src": "assets/face.png", "x": 760, "y": 170, "w": 480, "glow": "#ffffff"}
+ "version": 1,
+ "layout": "reaction",
+ "canvas": [
+  1280,
+  720
  ],
- "text": {"lines": ["ARTIFACTS", "& STALLING..."], "accent_phrase": "ARTIFACTS", "accent": "gold",
-          "annotation": "(birthday)"}
+ "background": {
+  "vignette": 0.55
+ },
+ "layers": [
+  {
+   "kind": "face",
+   "src": "assets/face.png",
+   "x": 760,
+   "y": 170,
+   "w": 480,
+   "glow": "#ffffff"
+  }
+ ],
+ "text": {
+  "lines": [
+   "ARTIFACTS",
+   "& STALLING..."
+  ],
+  "accent_phrase": "ARTIFACTS",
+  "accent": "gold",
+  "annotation": "(birthday)"
+ },
+ "scene": {
+  "seed": 3,
+  "fov": 30,
+  "bg": {
+   "raw": "assets/bg.png",
+   "blur": 12,
+   "brightness": 0.62,
+   "saturate": 1.15,
+   "z": -400
+  },
+  "rays": {
+   "x": 1000,
+   "y": 300,
+   "color": "#fff3d6",
+   "strength": 0.25,
+   "count": 20,
+   "z": -120
+  },
+  "cards": [
+   {
+    "src": "assets/subject.png",
+    "x": 70,
+    "y": 50,
+    "w": 360,
+    "z": 10,
+    "rot": [
+     4,
+     20,
+     -4
+    ],
+    "shadow": 0.7,
+    "glow": "#ffffff",
+    "glow_alpha": 0.4
+   }
+  ],
+  "sparkles": {
+   "count": 24,
+   "x0": 0,
+   "x1": 700,
+   "y0": 0,
+   "y1": 400,
+   "size": 9
+  },
+  "bloom": {
+   "strength": 0.5,
+   "radius": 0.4,
+   "threshold": 0.82
+  }
+ }
 }
