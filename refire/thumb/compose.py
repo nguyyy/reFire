@@ -144,3 +144,35 @@ def draft_reaction(run_dir, letter: str, face_t: float, hook: dict, subject_t: f
     spec = reaction_spec(d / "assets" / "face.png", box, sub, bg, hook)
     (d / "spec.json").write_text(json.dumps(spec, indent=1), encoding="utf-8")
     return d / "spec.json"
+
+
+def reveal(spec: dict, d: Path, boxes: list | None = None, bubble_at: tuple | None = None,
+           glyphs: list | None = None, card: int = 0) -> dict:
+    """the signature move: mosaic `boxes` (0-1 of the subject image) on the subject card or
+    layer, add a pixel "???" bubble at bubble_at (x, y px) and big pixel glyphs
+    [(ch, x, y, cell), ...]. edits spec in place and writes the assets; returns spec."""
+    from PIL import Image
+
+    from . import fx
+    a = d / "assets"
+    targets = [c for c in (spec.get("scene") or {}).get("cards", [])] or \
+              [L for L in spec.get("layers", []) if L.get("kind") == "subject"]
+    if boxes and targets:
+        t = targets[card]
+        im = Image.open(d / t["src"])
+        for b in boxes:
+            im = fx.pixelate(im, b)
+        out = a / (Path(t["src"]).stem + "_px.png")
+        im.save(out)
+        t["src"] = f"assets/{out.name}"
+    if bubble_at:
+        b = fx.bubble("???")
+        b.save(a / "bubble.png")
+        spec.setdefault("layers", []).append({"kind": "bubble", "src": "assets/bubble.png",
+                                              "x": bubble_at[0], "y": bubble_at[1], "w": b.width})
+    for i, (ch, x, y, cell) in enumerate(glyphs or []):
+        g = fx.glyph(ch, cell=cell)
+        g.save(a / f"glyph{i}.png")
+        spec.setdefault("layers", []).append({"kind": "glyph", "src": f"assets/glyph{i}.png", "x": x, "y": y,
+                                              "w": g.width})
+    return spec
