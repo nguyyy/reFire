@@ -130,6 +130,7 @@ def _render(browser, spec: dict, d: Path, hires: bool) -> Path:
     (d / "assets").mkdir(exist_ok=True)
     if t.get("lines"):
         info = T.raster(t, d / "assets" / "hook.png", (W, H), font=spec.get("font"), browser=browser, scale=dpr)
+        (d / "assets" / "hook.json").write_text(json.dumps(info), encoding="utf-8")   # exact box, for checks
         layers.append({"kind": "hook", "src": "assets/hook.png", "x": info["x"], "y": info["y"], "w": info["w"]})
     sc = spec.get("scene")
     if sc and sc.get("bg", {}).get("raw"):          # grade the plate once, deterministically, in python

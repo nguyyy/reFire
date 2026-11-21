@@ -259,7 +259,7 @@ def main(argv: list[str] | None = None) -> None:
     ca.add_argument("--corrections-dir", default="run", help="where corrections_<game>.json lives")
 
     th = sub.add_parser("thumb", help="thumbnail candidates: `thumb render <run_dir> <A|B|C>` re-renders one")
-    th.add_argument("args", nargs="+", help="render <run_dir> <A|B|C>  (full `thumb <run_dir>` run: coming)")
+    th.add_argument("args", nargs="+", help="render <run_dir> <A|B|C> | report <run_dir>  (full `thumb <run_dir>` run: coming)")
     th.add_argument("--hires", action="store_true", help="render 2x and downsample (crisper text)")
 
     sr = sub.add_parser("srt", help="manifest.json -> captions.srt (the Premiere path)")
@@ -471,7 +471,11 @@ def main(argv: list[str] | None = None) -> None:
             out = render.render(Path(a[1]) / "thumb" / a[2].upper() / "spec.json", hires=args.hires or None)
             print(f"Thumbnail: {out.resolve()}")
             return
-        p.error("thumb: only `thumb render <run_dir> <A|B|C>` exists so far")
+        if a[0] == "report" and len(a) == 2:
+            from .thumb import report
+            print(f"Report: {report.build(a[1]).resolve()}")
+            return
+        p.error("thumb: `thumb render <run_dir> <A|B|C>` or `thumb report <run_dir>` (full run: coming)")
 
     if args.cmd == "caption":
         from . import caption
