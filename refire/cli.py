@@ -258,6 +258,10 @@ def main(argv: list[str] | None = None) -> None:
     ca.add_argument("--words-per-line", type=int, default=None, help="caption length (default: style, else 3)")
     ca.add_argument("--corrections-dir", default="run", help="where corrections_<game>.json lives")
 
+    th = sub.add_parser("thumb", help="thumbnail candidates: `thumb render <run_dir> <A|B|C>` re-renders one")
+    th.add_argument("args", nargs="+", help="render <run_dir> <A|B|C>  (full `thumb <run_dir>` run: coming)")
+    th.add_argument("--hires", action="store_true", help="render 2x and downsample (crisper text)")
+
     sr = sub.add_parser("srt", help="manifest.json -> captions.srt (the Premiere path)")
     sr.add_argument("manifest", help="path to a run's ae/manifest.json")
     sr.add_argument("--offset", type=float, default=0.0,
@@ -459,6 +463,15 @@ def main(argv: list[str] | None = None) -> None:
         from .srt import write_srt
         print(f"Captions: {write_srt(args.manifest, args.offset).resolve()}")
         return
+
+    if args.cmd == "thumb":
+        a = args.args
+        if a[0] == "render" and len(a) == 3:
+            from .thumb import render
+            out = render.render(Path(a[1]) / "thumb" / a[2].upper() / "spec.json", hires=args.hires or None)
+            print(f"Thumbnail: {out.resolve()}")
+            return
+        p.error("thumb: only `thumb render <run_dir> <A|B|C>` exists so far")
 
     if args.cmd == "caption":
         from . import caption
