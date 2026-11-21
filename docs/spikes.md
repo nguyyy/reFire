@@ -99,5 +99,7 @@ against this fixture). Fade-in differs less (opacity 24/84 vs 27/65 at 0.02/0.04
 ## Open (needs Nguy)
 
 1. ~~Adjustment layer~~, ~~hand-applied captionIn~~, ~~nest effect order~~: done.
-2. S3: AE-built MOGRT rejected (AE render times). Approve the baked-MOGRT path (S3b) as the
-   change to `02-caption.md` step 4, or pick another angle.
+2. ~~S3~~: AE-built MOGRT rejected (AE render times); baked per-caption MOGRTs approved
+   (decision R5, Nov 21).
+3. Run `tests/smoke/caption.py` in Premiere (ensure/style/clear nest, insert, keyed Transform
+   untested live) and time a real-size apply: exact easing is ~22 keys/block vs S6's 6.
