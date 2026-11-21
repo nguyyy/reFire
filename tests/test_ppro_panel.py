@@ -20,8 +20,8 @@ CLI = ROOT / "refire" / "cli.py"
 
 # the panel emits flags as bare "--flag" strings, css vars (--bg: ...) aren't quoted so they don't match
 PANEL_FLAGS = set(re.findall(r'"(--[a-z][a-z-]+)"', PANEL.read_text(encoding="utf-8")))
-# mk = make subparser in cli.main(), sr = srt, rc = recap, pu = punch
-CLI_FLAGS = set(re.findall(r'(?:mk|sr|rc|pu)\.add_argument\(\s*"(--[a-z][a-z-]+)"',
+# mk = make subparser in cli.main(), sr = srt, rc = recap, pu = punch, ca = caption
+CLI_FLAGS = set(re.findall(r'(?:mk|sr|rc|pu|ca)\.add_argument\(\s*"(--[a-z][a-z-]+)"',
                            CLI.read_text(encoding="utf-8")))
 
 
@@ -138,6 +138,18 @@ def test_punch_button_is_wired():
     ops_jsx = (ROOT / "refire" / "ppro" / "applyOps.jsx").read_text(encoding="utf-8")
     assert 'id="punch"' in panel and '$("#punch").onclick = punchIns' in panel
     assert '"refire", "punch", runDir' in panel and 'sub.add_parser("punch"' in cli
-    assert "applyOps.jsx" in panel and "reFireOps.apply(" in panel and "return { apply: apply }" in ops_jsx
+    assert "applyOps.jsx" in panel and "reFireOps.apply(" in panel and "return { apply: function" in ops_jsx
     assert '"/ppro/ops_punch.json"' in panel and '"ops_punch.json"' in (ROOT / "refire" / "punch.py").read_text(
         encoding="utf-8")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node to run ExtendScript")
+def test_apply_ops_never_throws(tmp_path):
+    """applyOps.jsx outside Premiere (no globals): still a json string with an error, no throw."""
+    js = tmp_path / "apply_ops.js"
+    js.write_text((ROOT / "refire" / "ppro" / "applyOps.jsx").read_text(encoding="utf-8"), encoding="utf-8")
+    probe = ("const vm=require('vm'),fs=require('fs');const c={};vm.createContext(c);"
+             "vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),c);"
+             "console.log(c.reFireOps.apply('x.json',0,10));")
+    out = subprocess.run(["node", "-e", probe, str(js)], capture_output=True, text=True, check=True).stdout
+    assert "error" in json.loads(out)

@@ -137,25 +137,10 @@ def _next_recut(dirpath: Path) -> Path:
     return dirpath / f"captions.recut{n}.srt"
 
 
-def recaption(manifest_path, timeline_path=None, offset: float = 0.0,
-              words_per_line: int = 3, polish=None) -> Path:
-    """Re-caption a hand-recut Premiere timeline. Returns the new .srt path.
-
-    `build_srt` above walks the MANIFEST, so the moment clips are moved, trimmed or
-    dropped in Premiere every cue after the first drifts. This walks the TIMELINE
-    instead: each trackItem's source in/out plus its `sources[].offset` gives an
-    absolute VOD range, and the words in that range are re-grouped from the run's
-    transcript. Reorders, trims, deletes, splits and handles pulled wider than reFire's
-    original cut all fall out of that for free -- the captions follow the footage.
-
-    `polish` is an optional `lines -> lines` hook (the proper-noun pass); it is injected
-    so this module stays pure JSON -> text, which is what makes it instant enough for
-    the panel to re-run on every press.
-
-    ponytail: V1 only, and no dedup if two reFire proxies are stacked -- V1 is where
-    the panel's build() lays the spine down and anything above it reads as b-roll.
-    Scan `seq.videoTracks` instead if a stacked recut ever becomes normal.
-    """
+def timeline_cues(manifest_path, timeline_path=None, offset: float = 0.0,
+                  words_per_line: int = 3) -> list[list]:
+    """[[timeline in, timeline out, styled text], ...] for what V1 shows now, time order.
+    Shared by recaption (-> .srt) and `refire caption` (-> styled blocks)."""
     from .emphasis import annotate_emphasis, style_text
     from .subtitles import group_words, join_words
     from .timeline_map import TimelineMap
@@ -180,8 +165,31 @@ def recaption(manifest_path, timeline_path=None, offset: float = 0.0,
             a, b = min(g[0]["start"] / rate, span), min(g[-1]["end"] / rate, span)
             if text and b > a:
                 cues.append([sp.tl_in + a + offset, sp.tl_in + b + offset, text])
-
     cues.sort(key=lambda c: c[0])
+    return cues
+
+
+def recaption(manifest_path, timeline_path=None, offset: float = 0.0,
+              words_per_line: int = 3, polish=None) -> Path:
+    """Re-caption a hand-recut Premiere timeline. Returns the new .srt path.
+
+    `build_srt` above walks the MANIFEST, so the moment clips are moved, trimmed or
+    dropped in Premiere every cue after the first drifts. This walks the TIMELINE
+    instead: each trackItem's source in/out plus its `sources[].offset` gives an
+    absolute VOD range, and the words in that range are re-grouped from the run's
+    transcript. Reorders, trims, deletes, splits and handles pulled wider than reFire's
+    original cut all fall out of that for free -- the captions follow the footage.
+
+    `polish` is an optional `lines -> lines` hook (the proper-noun pass); it is injected
+    so this module stays pure JSON -> text, which is what makes it instant enough for
+    the panel to re-run on every press.
+
+    ponytail: V1 only, and no dedup if two reFire proxies are stacked -- V1 is where
+    the panel's build() lays the spine down and anything above it reads as b-roll.
+    Scan `seq.videoTracks` instead if a stacked recut ever becomes normal.
+    """
+    manifest_path = Path(manifest_path)
+    cues = timeline_cues(manifest_path, timeline_path, offset, words_per_line)
     if polish and cues:
         for cue, text in zip(cues, polish([c[2] for c in cues])):
             cue[2] = text

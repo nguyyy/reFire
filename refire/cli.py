@@ -246,6 +246,18 @@ def main(argv: list[str] | None = None) -> None:
                     help="run the judge on local Ollama (--model), no API spend")
     pu.add_argument("--model", default=DEFAULT_MODEL, help="Ollama model for --local-director")
 
+    ca = sub.add_parser("caption", help="styled captions: one MOGRT per block in the refire_captions nest (V5)")
+    ca.add_argument("run_dir", help="the run dir holding ae/manifest.json")
+    ca.add_argument("--timeline", default=None,
+                    help="timeline.tsv dumped by the panel (default: beside the manifest)")
+    ca.add_argument("--dry-run", action="store_true", help="bake + review only, no ops file")
+    ca.add_argument("--apply", action="store_true", help="apply ops_caption.json in Premiere (remote.py)")
+    ca.add_argument("--restyle", action="store_true", help="re-place the nest clip and re-apply ccStyle")
+    ca.add_argument("--style", default=None, help="style doc; its caption: map and words_per_line apply")
+    ca.add_argument("--game", default="", help="game name: applies learned corrections_<game>.json")
+    ca.add_argument("--words-per-line", type=int, default=None, help="caption length (default: style, else 3)")
+    ca.add_argument("--corrections-dir", default="run", help="where corrections_<game>.json lives")
+
     sr = sub.add_parser("srt", help="manifest.json -> captions.srt (the Premiere path)")
     sr.add_argument("manifest", help="path to a run's ae/manifest.json")
     sr.add_argument("--offset", type=float, default=0.0,
@@ -446,6 +458,21 @@ def main(argv: list[str] | None = None) -> None:
         # pure json -> text so the premiere panel can rerun it on every caption nudge
         from .srt import write_srt
         print(f"Captions: {write_srt(args.manifest, args.offset).resolve()}")
+        return
+
+    if args.cmd == "caption":
+        from . import caption
+        _direction, knobs = _resolve_style(args.style)
+        cfg = caption.config(knobs.get("caption"))
+        caption.run(args.run_dir, args.timeline, overrides=knobs.get("caption"),
+                    words_per_line=args.words_per_line or knobs.get("words_per_line", 3),
+                    game=args.game, corrections_dir=args.corrections_dir,
+                    dry_run=args.dry_run, restyle=args.restyle)
+        if args.apply and not args.dry_run:
+            from .ppro import remote
+            # 2 ops per block; chunk blocks per jsx call (S6), +3 so the nest ops share chunk 1
+            print(remote.apply_ops(Path(args.run_dir) / "ppro" / "ops_caption.json",
+                                   chunk=2 * int(cfg["chunk"]) + 3))
         return
 
     if args.cmd == "punch":
