@@ -1,9 +1,9 @@
-"""thumbnail hook text: metrics, equal-width fit, layout, svg (refire.thumb.text / render)."""
+"""thumbnail hook text v2 (refire.thumb.text): matched to the refs."""
 import re
 
 import pytest
 
-from refire.thumb import render, text as T
+from refire.thumb import text as T
 
 pytestmark = pytest.mark.skipif(not T.DEFAULT_FONT.exists(), reason="Conneqt font not installed")
 
@@ -13,60 +13,58 @@ def m():
     return T.metrics(str(T.DEFAULT_FONT))
 
 
-def test_metrics_read_from_the_font(m):
+def test_metrics_and_tracking(m):
     assert m.upm == 1000 and m.cap == 699
-    assert m.width("WW", 100) == pytest.approx(2 * m.width("W", 100))
+    assert m.width("WW", 100, -0.05) == pytest.approx(2 * m.width("W", 100) - 5)   # one gap, not two
     assert m.width("", 50) == 0
 
 
-def test_lines_fit_to_equal_stroked_width(m):
-    lines = T.layout(["ARTIFACTS", "& STALLING..."], m, (1280, 720), width_frac=0.62, stroke_ratio=0.11)
-    stroked = [ln.width + 0.11 * ln.size for ln in lines]
-    assert stroked == pytest.approx([0.62 * 1280] * 2, rel=1e-3)
-    assert lines[0].size > lines[1].size                       # shorter line gets the bigger font
+def test_lines_share_a_size_and_center(m):
+    st = T.Style(width_frac=0.7)
+    a, b = T.layout(["ARTIFACTS", "& STALLING..."], m, (1280, 720), st)
+    assert a.size == b.size                                         # same font size, not equal width
+    assert a.x + a.width / 2 == pytest.approx(b.x + b.width / 2, abs=0.02)   # centered on each other
+    assert b.width + st.stroke * b.size == pytest.approx(0.7 * 1280, abs=0.05)
+    assert b.width == pytest.approx(m.width("& STALLING...", b.size, st.tracking) * st.squeeze, abs=0.05)
 
 
-def test_block_sits_in_the_bottom_corner_margins(m):
-    lines = T.layout(["EASIEST", "ABYSS?"], m, (1280, 720), margin=40, stroke_ratio=0.11)
-    last = lines[-1]
-    assert last.baseline + 0.11 * last.size / 2 == pytest.approx(720 - 40, abs=0.05)
-    assert min(ln.x - 0.11 * ln.size / 2 for ln in lines) == pytest.approx(40, abs=0.05)
-    assert lines[0].baseline < lines[1].baseline - lines[1].cap(m) + 1      # stacked, upper above
-    right = T.layout(["EASIEST", "ABYSS?"], m, (1280, 720), anchor="bottom-right", margin=40)
-    assert max(ln.x + ln.width + 0.11 * ln.size / 2 for ln in right) == pytest.approx(1240, abs=0.05)
+def test_block_corner_margins_and_stacking(m):
+    st = T.Style()
+    a, b = T.layout(["EASIEST", "ABYSS?"], m, (1280, 720), st)
+    assert b.baseline + st.stroke * b.size / 2 == pytest.approx(720 - st.margin[1], abs=0.05)
+    assert min(a.x, b.x) - st.stroke * a.size / 2 == pytest.approx(st.margin[0], abs=0.05)
+    assert b.baseline - a.baseline == pytest.approx(b.cap(m) * st.leading, abs=0.05)
+    r = T.layout(["EASIEST", "ABYSS?"], m, (1280, 720), st, anchor="bottom-right")
+    assert max(ln.x + ln.width for ln in r) + st.stroke * r[0].size / 2 == pytest.approx(1280 - st.margin[0], abs=0.05)
 
 
-def test_one_word_line_is_capped(m):
-    (ln,) = T.layout(["HI"], m, (1280, 720), max_size_frac=0.24)
-    assert ln.size == pytest.approx(0.24 * 720)
+def test_line_options_squeeze_scale_font(m):
+    st = T.Style()
+    a, b = T.layout(["SNEZHNAYA", {"text": "DAY TWO...", "scale_x": 0.9, "scale": 1.15}], m, (1280, 720), st)
+    assert b.size == pytest.approx(a.size * 1.15, abs=0.02) and b.sx == pytest.approx(0.9 * st.squeeze)
+    assert b.baseline - a.baseline == pytest.approx(b.cap(m) * st.leading, abs=0.05)   # spaced by the lower line
+    if T.font_path("coolvetica").exists():
+        (c,) = T.layout([{"text": "GONE RIGHT?", "font": "coolvetica"}], m, (1280, 720), st)
+        assert c.font == "coolvetica"
 
 
-def test_svg_has_gradients_backing_rects_and_accent(m):
-    lines = T.layout(["MORE", "TIER LISTS"], m, (1280, 720))
-    s = T.svg(lines, m, (1280, 720), accent_phrase="more", accent="blue", rect_ratio=0.62)
-    assert s.count("<rect") == 2 and s.count("<linearGradient") == 4
-    assert 'stop-color="#2C66F3"' in s and 'stop-color="#64A1FF"' in s       # blue accent ramp
-    assert 'paint-order="stroke"' in s and 'stroke-linejoin="round"' in s
-    assert re.search(r'<tspan fill="url\(#ga0\)">MORE</tspan>', s)          # accent only on MORE
-    assert '<tspan fill="url(#gw1)">TIER LISTS</tspan>' in s
-    h = [float(x) for x in re.findall(r'<rect [^>]*height="([\d.]+)"', s)]
-    assert h[1] == pytest.approx(0.62 * lines[1].cap(m), abs=0.01)           # shorter than the caps
+def test_svg_shine_runs_across_and_slab_connects(m):
+    st = T.Style()
+    lines = T.layout(["MORE", "TIER LISTS"], m, (1280, 720), st)
+    s = T.svg(lines, m, (1280, 720), st, accent_phrase="more", accent="blue")
+    g = re.search(r'<linearGradient id="ga0"[^>]*x1="([\d.]+)" y1="0" x2="([\d.]+)" y2="0"', s)
+    assert g and float(g.group(2)) > float(g.group(1))              # horizontal: left -> right
+    assert 'stop-color="#2C66F3"' in s and 'stop-color="#64A1FF"' in s
+    rects = [tuple(map(float, r)) for r in re.findall(r'<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"', s)]
+    assert len(rects) == 2 and rects[0][1] + rects[0][3] == pytest.approx(rects[1][1], abs=0.02)   # slabs touch
+    assert rects[1][3] == pytest.approx(st.rect * lines[1].cap(m), abs=0.02)
+    assert rects[1][0] > lines[1].x                                  # tucked behind the first glyph
+    assert '<tspan x="' in s and 'paint-order="stroke"' in s and 'vector-effect="non-scaling-stroke"' in s
 
 
-def test_accent_split_and_escaping():
-    assert T._split_accent("GONE RIGHT?", "right?") == [("GONE ", False), ("RIGHT?", True)]
-    assert T._split_accent("A & B", None) == [("A & B", False)]
-    assert "&amp;" in T.svg([T.Line("A & B", 50, 40, 600, 100)], T.Metrics(1000, 700, {}, 500), (1280, 720))
-
-
-def test_html_is_self_contained_and_spec_driven(tmp_path):
-    spec = {"canvas": [1280, 720], "background": {"src": "assets/bg.png"},
-            "layers": [{"kind": "face", "src": "assets/f.png", "x": 700, "y": 100, "w": 500, "glow": "#fff"},
-                       {"kind": "subject", "src": "assets/s.png", "x": 60, "y": 40, "w": 400, "rotate": -3,
-                        "shadow": 0.6}],
-            "text": {"lines": ["EASIEST", "ABYSS?"], "accent_phrase": "EASIEST", "accent": "green"}}
-    h = render.html(spec)
-    assert "data:font/ttf;base64," in h and not re.search(r"""(src="|url\(')https?:""", h)   # nothing fetched
-    assert "blur(12px) brightness(0.62) saturate(1.15)" in h and "scale(1.08)" in h
-    assert "rotate(-3deg)" in h and "drop-shadow(0 0 3px #fff) drop-shadow(0 0 22px #fff)" in h
-    assert h.index('class="layer face"') < h.index('class="hook"')            # text on top
+def test_skew_and_page_faces(m):
+    hook = {"lines": ["THE BEST", "TIER LIST?"], "accent_phrase": "TIER LIST?", "accent": "mint", "skew": -12,
+            "annotation": "(birthday)"}
+    html = T.page(hook, (1280, 720))
+    assert "skewX(-12" in html and "@font-face { font-family: F0" in html
+    assert "http" not in re.sub(r'xmlns="http[^"]+"', "", html)

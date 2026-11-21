@@ -7,7 +7,6 @@ One-time setup: `uv run playwright install chromium` (the version pinned by uv.l
 """
 from __future__ import annotations
 
-import base64
 import json
 from html import escape
 from pathlib import Path
@@ -17,11 +16,6 @@ from . import text as T
 
 TEMPLATES = Path(__file__).with_name("templates")
 MAX_BYTES = 2 * 1024 * 1024          # youtube custom thumbnail limit (historically 2 MB)
-# width/leading tuned against the refs: ~62% wide, strokes of stacked lines touching
-DEFAULT_TEXT = {"anchor": "bottom-left", "width_frac": 0.62, "margin": 40, "stroke_ratio": 0.11,
-                "rect_ratio": 0.62, "max_size_frac": 0.24, "leading": 1.0, "accent": "gold",
-                "accent_phrase": None, "annotation": None}
-TEXT_SHADOW = "drop-shadow(6px 8px 0 rgba(0,0,0,0.55)) drop-shadow(0 0 18px rgba(0,0,0,0.7))"
 
 
 def _style(d: dict) -> str:
@@ -66,22 +60,12 @@ def _background(bg: dict) -> str:
     return f'<div class="bg" style="{_style(st)}"></div>{vig}'
 
 
-def html(spec: dict) -> str:
+def html(spec: dict, layers: list | None = None) -> str:
     W, H = spec.get("canvas", [1280, 720])
-    font = Path(spec.get("font") or T.DEFAULT_FONT)
-    m = T.metrics(str(font))
-    t = {**DEFAULT_TEXT, **(spec.get("text") or {})}
-    hook = ""
-    if t.get("lines"):
-        lines = T.layout(t["lines"], m, (W, H), t["anchor"], t["width_frac"], t["margin"], t["max_size_frac"],
-                         t["stroke_ratio"], t["leading"])
-        hook = T.svg(lines, m, (W, H), t["accent_phrase"], t["accent"], t["stroke_ratio"], t["rect_ratio"],
-                     t["annotation"])
-    font_url = "data:font/ttf;base64," + base64.b64encode(font.read_bytes()).decode()
     return Template((TEMPLATES / "stage.html").read_text(encoding="utf-8")).substitute(
-        font_url=font_url, house_css=(TEMPLATES / "house.css").read_text(encoding="utf-8"), w=W, h=H,
-        text_shadow=TEXT_SHADOW, background=_background(spec.get("background")),
-        layers="\n".join(_layer(L) for L in spec.get("layers", [])), text=hook)
+        house_css=(TEMPLATES / "house.css").read_text(encoding="utf-8"), w=W, h=H,
+        background=_background(spec.get("background")),
+        layers="\n".join(_layer(L) for L in (spec.get("layers", []) if layers is None else layers)))
 
 
 def render(spec_path, hires: bool | None = None, browser=None) -> Path:
@@ -92,17 +76,29 @@ def render(spec_path, hires: bool | None = None, browser=None) -> Path:
     d = spec_path.parent
     W, H = spec.get("canvas", [1280, 720])
     hires = spec.get("hires", False) if hires is None else hires
-    page_path = d / "index.html"
-    page_path.write_text(html(spec), encoding="utf-8")
     out = d / "thumb.png"
     if browser is None:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
             b = p.chromium.launch()
             try:
-                return _shoot(b, page_path, out, W, H, hires)
+                return _render(b, spec, d, out, W, H, hires)
             finally:
                 b.close()
+    return _render(browser, spec, d, out, W, H, hires)
+
+
+def _render(browser, spec: dict, d: Path, out: Path, W: int, H: int, hires: bool) -> Path:
+    """hook text first (its own raster, refire.thumb.text), then the page with it on top."""
+    layers = list(spec.get("layers", []))
+    t = spec.get("text") or {}
+    if t.get("lines"):
+        (d / "assets").mkdir(exist_ok=True)
+        info = T.raster(t, d / "assets" / "hook.png", (W, H), font=spec.get("font"), browser=browser,
+                        scale=2 if hires else 1)
+        layers.append({"kind": "hook", "src": "assets/hook.png", "x": info["x"], "y": info["y"], "w": info["w"]})
+    page_path = d / "index.html"
+    page_path.write_text(html(spec, layers), encoding="utf-8")
     return _shoot(browser, page_path, out, W, H, hires)
 
 

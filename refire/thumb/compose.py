@@ -11,8 +11,9 @@ from pathlib import Path
 import numpy as np
 
 CANVAS = (1280, 720)
-FACE_H = (0.30, 0.45)           # face box height / canvas height
-FACE_TARGET = 0.38
+FIGURE = (0.80, 0.90)           # head top -> frame bottom / canvas height (Nguy, T6)
+FIGURE_TARGET = 0.88
+FACE_MAX = 0.62                 # never let a tight cam crop blow the face past this
 BADGE = (0.16, 0.12)            # youtube duration badge: bottom-right width x height
 
 
@@ -28,24 +29,23 @@ def face_box(img_bgr: np.ndarray, detector=None) -> list[float] | None:
     return [float(x * w), float(y * h), float(fw * w), float(fh * h)]
 
 
-def place_face(cut_wh: tuple[int, int], box: list[float], canvas=CANVAS, side: str = "right",
-               target: float = FACE_TARGET, center_y: float = 0.45) -> dict:
-    """scale the cutout so the face is `target` of the canvas height, face centered on the
-    right (or left) third; the cutout's bottom edge must leave the frame (refs: zy0x runs off
-    the bottom), so grow toward FACE_H max, then push down if it still shows."""
+def head_top(cut_bgra: np.ndarray, frac: float = 0.02) -> int:
+    """first row of the cutout with real figure in it (alpha > 50% across >= frac of the width)."""
+    a = cut_bgra[:, :, 3] > 128
+    rows = np.flatnonzero(a.sum(axis=1) >= frac * a.shape[1])
+    return int(rows[0]) if rows.size else 0
+
+
+def place_face(cut_wh: tuple[int, int], box: list[float], top: float, canvas=CANVAS, side: str = "right",
+               target: float = FIGURE_TARGET) -> dict:
+    """zy0x fills `target` of the frame from the top of his head down, running off the bottom
+    (refs, Nguy: ~80-90%); face centered on the right (or left) third."""
     W, H = canvas
     cw, ch = cut_wh
     fx, fy, fw, fh = box
-    s = target * H / fh
-    y = center_y * H - (fy + fh / 2) * s
-    if y + ch * s < H:                                       # bottom edge would show
-        s_max = FACE_H[1] * H / fh
-        # grow about the face center until the bottom reaches the frame edge (or max size)
-        s_need = (H - center_y * H) / (ch - (fy + fh / 2)) if ch > fy + fh / 2 else s_max
-        s = min(max(s, s_need), s_max)
-        y = center_y * H - (fy + fh / 2) * s
-        if y + ch * s < H:
-            y = H - ch * s
+    s = target * H / max(1.0, ch - top)
+    s = min(s, FACE_MAX * H / fh)
+    y = H - ch * s                                           # the cam crop's cut edge sits on the frame bottom
     cx = (0.74 if side == "right" else 0.26) * W
     x = cx - (fx + fw / 2) * s
     return {"x": round(x, 1), "y": round(y, 1), "w": round(cw * s, 1),
@@ -72,8 +72,8 @@ def reaction_spec(face_cut: Path, box: list[float], subject: Path | None, bg: Pa
                   canvas=CANVAS, glow: str = "#ffffff") -> dict:
     """the `reaction` layout: face large right, subject small left, hook bottom-left."""
     from PIL import Image
-    fw = Image.open(face_cut).size
-    f = place_face(fw, box, canvas)
+    im = Image.open(face_cut)
+    f = place_face(im.size, box, head_top(np.asarray(im.convert("RGBA"))[:, :, [2, 1, 0, 3]]), canvas)
     layers = []
     if subject:
         s = place_subject(Image.open(subject).size, canvas)

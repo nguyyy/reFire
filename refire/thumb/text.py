@@ -1,33 +1,86 @@
-"""House-style hook text as SVG (docs/specs/03-thumb.md "House style > Text").
+"""House-style hook text, rendered on its own to a transparent PNG and placed on the thumbnail.
 
-Metallic three-stop gradient fill, heavy black stroke painted under it, a black backing
-rectangle per line (shorter than the caps, so letters rise above and below it) that fuses
-the outlines into one shape, lines fitted to equal width. Widths come from the font file
-(fontTools); the SVG turns kerning off so Chromium draws exactly what Python measured.
+Matched to Nguy's thumbnails (refire/thumb/refs): Conneqt Black caps, tight tracking, every
+line the same font size and centered on the others, the block anchored to a bottom corner.
+Fill = metallic shine running ACROSS each line (base -> light -> base, left to right), white
+or a palette accent on the accent phrase. Heavy black stroke painted under the fill; one
+continuous black slab behind the lines (a rect per line at most of the cap height, each
+reaching down to the next) so the outlines read as one shape; hard drop + soft dark haze.
+Glyph x positions are computed here from the font's advances (fontTools) and written per
+character, so the browser draws exactly what was measured (no kerning, no css spacing).
 """
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from html import escape
 from pathlib import Path
 
-DEFAULT_FONT = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Windows" / "Fonts" / "Conneqt-Black.ttf"
-WHITE = ("#D6D6D6", "#FFFFFF")                      # metallic white: base, light
+_USER_FONTS = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Windows" / "Fonts"
+_SYS_FONTS = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+DEFAULT_FONT = _USER_FONTS / "Conneqt-Black.ttf"
+# the refs use two faces: Conneqt Black (wide, geometric) and Coolvetica (rounded, condensed:
+# STRONGBOX..., DAY TWO..., the "(birthday)" aside). a hook or line picks one by name or path
+def _installed(name: str) -> Path:
+    """a font file from the user's or the system font folder (user wins)."""
+    return next((d / name for d in (_USER_FONTS, _SYS_FONTS) if (d / name).exists()), _USER_FONTS / name)
+
+
+FONTS = {"conneqt": DEFAULT_FONT, "coolvetica": _installed("coolvetica rg.otf")}
+
+
+def font_path(name_or_path) -> Path:
+    return Path(FONTS.get(str(name_or_path).lower(), name_or_path)) if name_or_path else DEFAULT_FONT
+WHITE = ("#BDBDBD", "#FFFFFF")                      # metallic white: base, light
 PALETTE = {"blue": ("#2C66F3", "#64A1FF"), "sky": ("#0884F2", "#58D3F3"), "green": ("#26CE27", "#52F753"),
            "mint": ("#26C075", "#53DA8E"), "gold": ("#D2A51B", "#F8CE4F"), "cyan": ("#1FFFF8", "#65FFFB")}
+
+
+@dataclass
+class Style:
+    """every knob of the hook look; spec.json `text` keys override these."""
+    width_frac: float = 0.62        # widest line's stroked width / canvas width
+    max_size_frac: float = 0.24     # font size cap / canvas height (refs: caps ~0.16 H)
+    margin: tuple = (34, 44)        # x, y px from the anchored corner
+    tracking: float = -0.035        # em added between glyphs (negative = tighter)
+    squeeze: float = 0.88           # every line drawn at this width (refs measure 0.85-0.93)
+    font: str = "conneqt"           # face for every line (a line can override)
+    end_inset: float = 0.28         # slab starts/stops this far into the end glyphs (hidden behind them)
+    stroke: float = 0.14            # stroke width, em (half of it shows outside the glyph)
+    leading: float = 1.02           # baseline gap / cap height (refs: strokes just touch)
+    rect: float = 0.86              # backing slab height / cap height, per line
+    shine: tuple = (0.0, 0.42, 1.0)  # gradient stops across the line: base, light, base
+    skew: float = 0.0               # deg, negative leans right (italic look)
+    shadow: tuple = (6, 8, 0.55)    # hard drop: dx, dy, alpha
+    haze: tuple = (22, 0.75)        # soft dark glow: blur px, alpha
+    ann_size: float = 0.30          # annotation size / line size
+    palette: dict = field(default_factory=dict)
+
+    @classmethod
+    def from_spec(cls, d: dict | None) -> "Style":
+        d = dict(d or {})
+        known = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
+        for k in ("margin", "shine", "shadow", "haze"):
+            if k in known:
+                known[k] = tuple(known[k])
+        return cls(**known)
 
 
 @dataclass(frozen=True)
 class Metrics:
     upm: int
-    cap: int                    # cap height, font units
-    advances: dict              # char -> advance, font units
+    cap: int
+    advances: dict
     fallback: int
 
-    def width(self, text: str, size: float) -> float:
-        return sum(self.advances.get(c, self.fallback) for c in text) * size / self.upm
+    def advances_px(self, text: str, size: float, tracking: float) -> list[float]:
+        """advance of each glyph incl. tracking (none after the last)."""
+        out = [self.advances.get(c, self.fallback) * size / self.upm for c in text]
+        return [a + (tracking * size if i < len(out) - 1 else 0.0) for i, a in enumerate(out)]
+
+    def width(self, text: str, size: float, tracking: float = 0.0) -> float:
+        return sum(self.advances_px(text, size, tracking))
 
 
 @lru_cache(maxsize=4)
@@ -43,47 +96,49 @@ def metrics(font_path: str) -> Metrics:
 @dataclass
 class Line:
     text: str
-    size: float                 # font size px
-    x: float                    # left of the glyphs
+    size: float
+    x: float                # left of the first glyph
     baseline: float
-    width: float                # glyph advance width, px
+    width: float            # drawn width (after scale_x)
+    sx: float = 1.0         # horizontal squeeze, like a free-transform in photoshop (stroke unscaled)
+    font: str = "conneqt"
 
     def cap(self, m: Metrics) -> float:
         return m.cap * self.size / m.upm
 
 
-def fit(lines: list[str], m: Metrics, width: float, max_size: float, stroke_ratio: float) -> list[float]:
-    """font size per line so every line's stroked width is `width` (equal-width lines),
-    capped at max_size so a one-word line doesn't explode."""
-    out = []
-    for t in lines:
-        unit = m.width(t, 1.0) + stroke_ratio        # stroke adds ratio*size across both ends
-        out.append(min(max_size, width / unit if unit else max_size))
-    return out
+def _line(t, default_font: str) -> tuple[str, float, str, float]:
+    """a hook line is "TEXT" or {"text", "scale_x" (squeeze), "font", "scale" (size vs the others)}."""
+    if isinstance(t, str):
+        return t, 1.0, default_font, 1.0
+    return t["text"], float(t.get("scale_x", 1.0)), t.get("font", default_font), float(t.get("scale", 1.0))
 
 
-def layout(lines: list[str], m: Metrics, canvas: tuple[int, int], anchor: str = "bottom-left",
-           width_frac: float = 0.57, margin: float = 40.0, max_size_frac: float = 0.24,
-           stroke_ratio: float = 0.11, leading: float = 1.06) -> list[Line]:
-    """place the block: lines fitted to width_frac of the canvas, stacked tight, anchored to
-    a bottom corner `margin` px in (the stroke stays inside the margin)."""
+def layout(lines: list, m, canvas: tuple[int, int], st: Style, anchor: str = "bottom-left") -> list[Line]:
+    """one font size for every line (the widest drawn line fills width_frac, capped), each line
+    optionally squeezed by scale_x and set in its own face, lines centered on each other,
+    stacked so the strokes touch, block in a bottom corner. `m` is unused (kept for callers);
+    metrics come from each line's font."""
     W, H = canvas
-    sizes = fit(lines, m, width_frac * W, max_size_frac * H, stroke_ratio)
-    out, base = [], None
-    for t, s in reversed(list(zip(lines, sizes))):           # build bottom-up
-        cap = m.cap * s / m.upm
-        # upper line's baseline sits a hair above the lower line's caps (leading - 1 of a cap)
-        base = H - margin - stroke_ratio * s / 2 if base is None else base - prev_cap * leading
-        w = m.width(t, s)
-        stroked = w + stroke_ratio * s
-        x = margin + stroke_ratio * s / 2 if anchor.endswith("left") else W - margin - stroked + stroke_ratio * s / 2
-        out.append(Line(t, round(s, 2), round(x, 2), round(base, 2), round(w, 2)))
-        prev_cap = cap
+    items = [(t, sx * st.squeeze, f, k) for t, sx, f, k in (_line(t, st.font) for t in lines)]
+    mets = [metrics(str(font_path(f))) for _, _, f, _ in items]
+    unit = max((mm.width(t, k, st.tracking) * sx + st.stroke * k) for (t, sx, _, k), mm in zip(items, mets))
+    size = min(st.max_size_frac * H / max(k for *_, k in items), st.width_frac * W / unit if unit else H)
+    widths = [mm.width(t, size * k, st.tracking) * sx for (t, sx, _, k), mm in zip(items, mets)]
+    block_w = max(w + st.stroke * size * k for w, (*_, k) in zip(widths, items))
+    left = st.margin[0] if anchor.endswith("left") else W - st.margin[0] - block_w
+    out, base, below_cap = [], None, 0.0
+    for (t, sx, f, k), w, mm in reversed(list(zip(items, widths, mets))):
+        s_ = size * k
+        # bottom-up: a line's baseline sits one (leading x) cap of the line BELOW above that line's
+        base = H - st.margin[1] - st.stroke * s_ / 2 if base is None else base - below_cap * st.leading
+        below_cap = mm.cap * s_ / mm.upm
+        x = left + (block_w - w) / 2
+        out.append(Line(t, round(s_, 2), round(x, 2), round(base, 2), round(w, 2), sx, f))
     return list(reversed(out))
 
 
 def _split_accent(text: str, accent: str | None) -> list[tuple[str, bool]]:
-    """line -> [(chunk, is_accent)] for the first case-insensitive match of the accent phrase."""
     if not accent:
         return [(text, False)]
     i = text.upper().find(accent.upper())
@@ -93,36 +148,132 @@ def _split_accent(text: str, accent: str | None) -> list[tuple[str, bool]]:
     return [p for p in parts if p[0]]
 
 
-def svg(lines: list[Line], m: Metrics, canvas: tuple[int, int], accent_phrase: str | None = None,
-        accent: str = "gold", stroke_ratio: float = 0.11, rect_ratio: float = 0.62,
-        annotation: str | None = None, family: str = "HookFont", palette: dict | None = None) -> str:
-    """the text block as one <svg> layer (canvas-sized, transparent)."""
+def families(lines: list[Line]) -> dict:
+    """font name -> css family (F0, F1, ...) in line order; svg() and page() agree on it."""
+    out = {}
+    for ln in lines:
+        out.setdefault(ln.font, f"F{len(out)}")
+    return out
+
+
+def svg(lines: list[Line], m: Metrics, canvas: tuple[int, int], st: Style, accent_phrase: str | None = None,
+        accent: str = "gold", annotation: str | None = None, family: str = "HookFont") -> str:
+    """the hook as one canvas-sized <svg> (transparent)."""
     W, H = canvas
-    pal = {**PALETTE, **(palette or {})}
-    acc = pal.get(accent, PALETTE["gold"])
+    acc = {**PALETTE, **st.palette}.get(accent, PALETTE["gold"])
     defs, rects, texts = [], [], []
+    boxes = []
+    fams = families(lines)
     for i, ln in enumerate(lines):
-        cap, sw = ln.cap(m), stroke_ratio * ln.size
-        top = ln.baseline - cap
+        m = metrics(str(font_path(ln.font)))
+        cap, sw = ln.cap(m), st.stroke * ln.size
+        rh = st.rect * cap
+        adv0 = m.advances_px(ln.text, ln.size, st.tracking)
+        a = st.end_inset * adv0[0] * ln.sx                     # tuck the slab ends behind the end glyphs
+        z = st.end_inset * m.advances.get(ln.text[-1], m.fallback) * ln.size / m.upm * ln.sx
+        boxes.append([ln.x + a, ln.baseline - cap / 2 - rh / 2, ln.width - a - z, rh])
+        nat = ln.width / ln.sx                      # gradient lives in the unsqueezed space
         for name, (base, light) in (("w", WHITE), ("a", acc)):
-            defs.append(f'<linearGradient id="g{name}{i}" gradientUnits="userSpaceOnUse" x1="0" y1="{top:.2f}" '
-                        f'x2="0" y2="{ln.baseline:.2f}"><stop offset="0" stop-color="{base}"/>'
-                        f'<stop offset="0.5" stop-color="{light}"/><stop offset="1" stop-color="{base}"/>'
-                        f'</linearGradient>')
-        rh = rect_ratio * cap
-        rects.append(f'<rect x="{ln.x - sw / 2:.2f}" y="{ln.baseline - cap / 2 - rh / 2:.2f}" '
-                     f'width="{ln.width + sw:.2f}" height="{rh:.2f}" fill="#000"/>')
-        spans = "".join(f'<tspan fill="url(#g{"a" if a else "w"}{i})">{escape(t)}</tspan>'
-                        for t, a in _split_accent(ln.text, accent_phrase))
-        texts.append(f'<text x="{ln.x:.2f}" y="{ln.baseline:.2f}" font-size="{ln.size:.2f}" '
-                     f'stroke-width="{sw:.2f}">{spans}</text>')
+            stops = "".join(f'<stop offset="{o}" stop-color="{c}"/>' for o, c in zip(st.shine, (base, light, base)))
+            defs.append(f'<linearGradient id="g{name}{i}" gradientUnits="userSpaceOnUse" x1="{ln.x:.2f}" y1="0" '
+                        f'x2="{ln.x + nat:.2f}" y2="0">{stops}</linearGradient>')
+        xs, spans, k = [], [], 0
+        adv = m.advances_px(ln.text, ln.size, st.tracking)
+        pos = [ln.x + sum(adv[:j]) for j in range(len(ln.text))]
+        for chunk, is_acc in _split_accent(ln.text, accent_phrase):
+            px = " ".join(f"{p:.2f}" for p in pos[k:k + len(chunk)])
+            spans.append(f'<tspan x="{px}" fill="url(#g{"a" if is_acc else "w"}{i})">{escape(chunk)}</tspan>')
+            k += len(chunk)
+        sq = (f' transform="translate({ln.x:.2f} 0) scale({ln.sx} 1) translate({-ln.x:.2f} 0)"'
+              if ln.sx != 1 else "")
+        texts.append(f'<text y="{ln.baseline:.2f}" font-family="{fams[ln.font]}" font-size="{ln.size:.2f}" '
+                     f'stroke-width="{sw:.2f}"{sq} vector-effect="non-scaling-stroke">{"".join(spans)}</text>')
+    for i in range(len(boxes) - 1):                 # each slab reaches down to the next line's
+        boxes[i][3] = boxes[i + 1][1] - boxes[i][1]
+    rects = [f'<rect x="{x:.2f}" y="{y:.2f}" width="{w:.2f}" height="{h:.2f}" fill="#000"/>' for x, y, w, h in boxes]
     ann = ""
     if annotation and len(lines) > 1:
-        ln = lines[-1]
-        s = ln.size * 0.28
-        ann = (f'<text class="ann" x="{ln.x + ln.width * 0.55:.2f}" y="{ln.baseline - ln.cap(m) - s * 0.25:.2f}" '
-               f'font-size="{s:.2f}" stroke-width="{s * 0.16:.2f}">{escape(annotation)}</text>')
-    return (f'<svg class="hook" xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">'
-            f'<defs>{"".join(defs)}</defs><g class="block">{"".join(rects)}'
-            f'<g class="lines" font-family="{family}" stroke="#000" stroke-linejoin="round" paint-order="stroke">'
+        ln = lines[0]
+        s = ln.size * st.ann_size
+        m0 = metrics(str(font_path(ln.font)))
+        ann = (f'<text class="ann" x="{ln.x + ln.width * 0.30:.2f}" y="{ln.baseline - ln.cap(m0) - s * 0.15:.2f}" '
+               f'font-size="{s:.2f}" stroke-width="{s * 0.18:.2f}">{escape(annotation)}</text>')
+    # skew about the block's bottom-left so the anchor corner stays put
+    bx, by = min(b[0] for b in boxes), max(ln.baseline for ln in lines)
+    tf = f' transform="translate({bx:.2f} {by:.2f}) skewX({st.skew}) translate({-bx:.2f} {-by:.2f})"' if st.skew else ""
+    dx, dy, a = st.shadow
+    blur, ha = st.haze
+    filt = (f'<filter id="sh" x="-20%" y="-40%" width="140%" height="180%">'
+            f'<feGaussianBlur in="SourceAlpha" stdDeviation="{blur / 2:.1f}" result="b"/>'
+            f'<feFlood flood-color="#000" flood-opacity="{ha}"/><feComposite in2="b" operator="in" result="haze"/>'
+            f'<feOffset in="SourceAlpha" dx="{dx}" dy="{dy}" result="o"/>'
+            f'<feFlood flood-color="#000" flood-opacity="{a}"/><feComposite in2="o" operator="in" result="drop"/>'
+            f'<feMerge><feMergeNode in="haze"/><feMergeNode in="drop"/><feMergeNode in="SourceGraphic"/></feMerge>'
+            f'</filter>')
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">'
+            f'<defs>{filt}{"".join(defs)}</defs><g filter="url(#sh)"{tf}>{"".join(rects)}'
+            f'<g stroke="#000" stroke-linejoin="round" paint-order="stroke">'
             f'{"".join(texts)}</g>{ann}</g></svg>')
+
+
+PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>
+{faces}
+html, body {{ margin: 0; background: transparent; }}
+text {{ font-kerning: none; text-rendering: geometricPrecision; }}
+.ann {{ fill: #fff; stroke: #000; paint-order: stroke; font-family: AnnFont, "Segoe UI", sans-serif; }}
+</style></head><body>{svg}</body></html>"""
+
+
+def _face(family: str, path: Path) -> str:
+    import base64
+    fmt = "opentype" if path.suffix.lower() == ".otf" else "truetype"
+    mime = "font/otf" if fmt == "opentype" else "font/ttf"
+    return (f'@font-face {{ font-family: {family}; src: url(data:{mime};base64,'
+            f'{base64.b64encode(path.read_bytes()).decode()}) format("{fmt}"); }}')
+
+
+def page(hook: dict, canvas: tuple[int, int], font: Path | None = None) -> str:
+    """a standalone page holding just the hook (for the raster pass)."""
+    st = Style.from_spec(hook)
+    if font:
+        st.font = str(font)
+    lines = layout(hook["lines"], None, canvas, st, hook.get("anchor", "bottom-left"))
+    body = svg(lines, None, canvas, st, hook.get("accent_phrase"), hook.get("accent", "gold"), hook.get("annotation"))
+    faces = [_face(fam, font_path(f)) for f, fam in families(lines).items()]
+    if hook.get("annotation") and font_path("coolvetica").exists():
+        faces.append(_face("AnnFont", font_path("coolvetica")))
+    return PAGE.format(faces="\n".join(faces), svg=body)
+
+
+def raster(hook: dict, out_png: Path, canvas: tuple[int, int] = (1280, 720), font: Path | None = None,
+           browser=None, scale: int = 1) -> dict:
+    """render the hook alone to a transparent PNG cropped to its pixels -> {src, x, y, w, h}
+    for placing it on the thumbnail. Same hook -> same bytes."""
+    import io
+
+    from PIL import Image
+    html = page(hook, canvas, font)
+
+    def shoot(b):
+        pg = b.new_page(viewport={"width": canvas[0], "height": canvas[1]}, device_scale_factor=scale)
+        try:
+            pg.set_content(html, wait_until="load")
+            pg.evaluate("document.fonts.ready.then(() => true)")
+            return pg.screenshot(type="png", omit_background=True)
+        finally:
+            pg.close()
+
+    if browser is None:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            b = p.chromium.launch()
+            try:
+                png = shoot(b)
+            finally:
+                b.close()
+    else:
+        png = shoot(browser)
+    im = Image.open(io.BytesIO(png)).convert("RGBA")
+    x0, y0, x1, y1 = im.getchannel("A").getbbox() or (0, 0, 1, 1)
+    im.crop((x0, y0, x1, y1)).save(out_png, "PNG")     # scale>1 keeps the sharp pixels; placed at 1x size
+    return {"src": out_png.name, "x": x0 / scale, "y": y0 / scale, "w": (x1 - x0) / scale, "h": (y1 - y0) / scale}
