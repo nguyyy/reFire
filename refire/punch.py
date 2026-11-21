@@ -24,7 +24,12 @@ DEFAULTS = {
     "coverage_window": 60.0, "coverage_window_max": 0.25, "coverage_total_max": 0.20,
     "threshold": 0.60, "weights": {"judge": 0.5, "loud": 0.2, "chat": 0.15, "flags": 0.15},
     "ocr": "auto", "sharpen": {"amount": 50, "radius": 1.0, "threshold": 0}, "track": 2,
+    # not in the spec table, tunable per game: laugh score cut, ocr crop boxes (x0, y0, x1, y1)
+    "laugh_threshold": 0.3,
+    "ocr_regions": [[0.15, 0.70, 0.85, 0.97], [0.66, 0.08, 0.99, 0.92]],   # genshin dialogue box, item panel
 }
+OCR_BUDGET = 30.0            # seconds per video in ocr: auto
+OCR_MIN_WORDS = 4            # a two-word yell is never a read
 PAUSE = 0.30                 # phrase split
 LAUGH_MIN = 1.0              # sustained laughter (P2)
 SOFT_EVERY = 3.0             # a long merged punch needs a qualifying phrase this often
@@ -335,9 +340,10 @@ def max_scale(box: list[float], p: list[float], cap: float) -> float:
 # --------------------------------------------------------------------------- whole pass
 
 def analyze(phr: list[dict], feats: dict, judge, face, cams: dict, cuts: list[float], tmap,
-            total: float, cfg: dict, loud: Signal):
+            total: float, cfg: dict, loud: Signal, reading=None):
     """phrases + features -> (punches, review rows). `face(p) -> fraction`, `cams` = source_id
-    -> Facecam|None, `judge(cands) -> {id: verdict}` (called once, prefilter survivors only)."""
+    -> Facecam|None, `judge(cands) -> {id: verdict}` (called once, prefilter survivors only),
+    `reading(phrases) -> {id: bool}` = the OCR check (None = transcript inference only)."""
     dropped: dict[str, str] = {}
     boxes, framing = {}, {}
     for sid, cam in cams.items():
@@ -366,6 +372,10 @@ def analyze(phr: list[dict], feats: dict, judge, face, cams: dict, cuts: list[fl
             else:
                 survivors.append(p)
 
+    if reading and survivors:
+        flags = reading(survivors)
+        for p in survivors:
+            feats[p["id"]]["reading"] = bool(flags.get(p["id"]))
     verdicts = judge([{"id": p["id"], "text": p["text"], "t0": p["t0"], "t1": p["t1"],
                        "src_t0": p["src_t0"], "src_t1": p["src_t1"], "features": feats[p["id"]]}
                       for p in survivors]) if survivors else {}
@@ -377,7 +387,8 @@ def analyze(phr: list[dict], feats: dict, judge, face, cams: dict, cuts: list[fl
         if f["score"] < cfg["threshold"]:
             cat = f["category"]
             dropped[p["id"]] = (cat if cat in ZERO_CATS else
-                                "reading" if cat == "dramatic_read" and not f["score"] else "below_threshold")
+                                "reading" if not f["score"] and (cat == "dramatic_read" or f.get("reading"))
+                                else "below_threshold")
             continue
         t_in, t_out, snapped = timing(p, f, cuts, tmap, boxes, cfg)
         part = {"id": p["id"], "t0": p["t0"], "t1": p["t1"], "score": f["score"]}
@@ -413,12 +424,65 @@ def analyze(phr: list[dict], feats: dict, judge, face, cams: dict, cuts: list[fl
         f = feats[p["id"]]
         review.append({"id": p["id"], "t0": round(p["t0"], 3), "t1": round(p["t1"], 3), "text": p["text"],
                        **{k: f.get(k, "") for k in ("z_loud_peak", "z_loud_mean", "z_chat", "laugh", "laugh_dur",
-                                                    "lex", "caps", "n_words", "dur", "rate", "face",
+                                                    "lex", "caps", "n_words", "dur", "rate", "face", "reading",
                                                     "category", "worthy", "score", "reason")},
                        "prefilter": "+".join(f.get("prefilter", [])),
                        "status": f"kept:{owner[p['id']]}" if p["id"] in owner else "dropped",
                        "drop_reason": "" if p["id"] in owner else dropped.get(p["id"], "?")})
     return punches, review
+
+
+# --------------------------------------------------------------------------- ocr
+
+def match_ratio(phrase: str, text: str) -> float:
+    """share of the phrase's words found, in order, in the on-screen text."""
+    from difflib import SequenceMatcher
+    a, b = _NORM.sub(" ", phrase.lower()).split(), _NORM.sub(" ", text.lower()).split()
+    if not a or not b:
+        return 0.0
+    return sum(m.size for m in SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks()) / len(a)
+
+
+def ocr_reader(frames, mode: str = "auto", regions=None, budget: float = OCR_BUDGET, engine=None, log=print,
+               prior=None):
+    """-> reading(phrases) -> {id: bool}: OCR 2 full-res frames per phrase in the dialogue/tooltip
+    boxes; reading = >= 60% of the phrase is on screen. `frames(source_id, src_times)`. auto stops
+    at `budget` s (the rest keep transcript inference), so the phrases most likely to punch go
+    first (judge-free part of the score). ponytail: ~3 s/phrase on CPU, a fast GPU ocr would
+    cover every candidate."""
+    import time
+    regions = regions or DEFAULTS["ocr_regions"]
+
+    def reading(phr):
+        if mode == "off":
+            return {}
+        todo = sorted((p for p in phr if len(p["words"]) >= OCR_MIN_WORDS),
+                      key=lambda p: -prior(p["id"]) if prior else -len(p["words"]))
+        eng = engine
+        if eng is None and todo:
+            try:
+                from rapidocr_onnxruntime import RapidOCR
+                eng = RapidOCR()
+            except Exception as e:          # missing models / runtime: transcript inference only
+                log(f"[punch] ocr off: {e}")
+                return {}
+        out, t0 = {}, time.monotonic()
+        for n, p in enumerate(todo):
+            if mode == "auto" and time.monotonic() - t0 > budget:
+                log(f"[punch] ocr budget spent after {n}/{len(todo)} phrases; the rest use the transcript")
+                break
+            a, b = p["src_t0"], p["src_t1"]
+            seen = []
+            for f in frames(p["source"], [a + (b - a) * 0.25, a + (b - a) * 0.75]):
+                h, w = f.shape[:2]
+                for x0, y0, x1, y1 in regions:
+                    # ui text is never rotated: skipping the angle classifier saves ~1/3
+                    res = eng(f[int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)], use_cls=False)[0]
+                    seen += [r[1] for r in res or []]
+            out[p["id"]] = match_ratio(p["text"], " ".join(seen)) >= 0.6
+        return out
+
+    return reading
 
 
 # --------------------------------------------------------------------------- judge
@@ -481,7 +545,7 @@ def context_text(words: list[dict], a: float, b: float, pad: float = 8.0) -> str
 
 
 def judge_payload(cands: list[dict], words: list[dict], glossary=()) -> str:
-    keys = ("z_loud_peak", "z_chat", "laugh_dur", "lex", "caps", "dur", "rate")
+    keys = ("z_loud_peak", "z_chat", "laugh_dur", "lex", "caps", "dur", "rate", "reading")
     rows = [{"id": c["id"], "text": c["text"], "context": context_text(words, c["src_t0"], c["src_t1"]),
              "features": {k: c["features"].get(k) for k in keys}} for c in cands]
     import json
@@ -542,7 +606,7 @@ UNSHARP = "AE.ADBE Unsharp Mask"     # 0 color mode, 1 amount, 2 radius, 3 thres
 ADJ_ITEM = "refire_punch_adj"
 REVIEW_COLS = ("id", "t0", "t1", "status", "drop_reason", "score", "category", "worthy", "text",
                "z_loud_peak", "z_loud_mean", "z_chat", "laugh", "laugh_dur", "lex", "caps",
-               "n_words", "dur", "rate", "face", "prefilter", "reason")
+               "n_words", "dur", "rate", "face", "reading", "prefilter", "reason")
 
 
 def _chat(manifest: dict) -> tuple[Path | None, float]:
@@ -614,6 +678,19 @@ def run(run_dir, timeline=None, overrides: dict | None = None, facecam_override:
     glossary = sorted({t for g in vod_dir.glob("glossary_*.json")
                        for t in json.loads(g.read_text(encoding="utf-8"))})
 
+    t_laugh = time.monotonic()
+    if laughs is None:
+        laughs = []
+        wav = vod_dir / "audio.wav"
+        if wav.exists():
+            try:
+                from .laughter import laugh_segments
+                laughs = laugh_segments(wav, [(s.src_in, s.src_out) for s in tmap.ours()],
+                                        thr=cfg["laugh_threshold"])
+            except Exception as e:              # model fetch / odd wav: punch still runs without it
+                log(f"[punch] laughter off: {e}")
+    log(f"[punch] laughter: {sum(1 for a, b, _ in laughs if b - a >= LAUGH_MIN)} sustained "
+        f"({time.monotonic() - t_laugh:.1f}s)")
     phr = phrases(timeline_words(words, tmap), tmap)
     phr += laugh_candidates(laughs, tmap, phr, len(phr))
     lex = load_lexicon()
@@ -633,9 +710,21 @@ def run(run_dir, timeline=None, overrides: dict | None = None, facecam_override:
             t_judge[0] = time.monotonic() - t
 
     total = max(s.tl_out for s in tmap.spans)
+    t_ocr = [0.0]
+    ocr = ocr_reader(lambda sid, ts: cams.frames(sid, ts, width=0), cfg["ocr"], cfg["ocr_regions"], log=log,
+                     prior=lambda i: score(feats[i], {"category": "other", "worthy": 0.0}, cfg))
+
+    def timed_ocr(phr_):
+        t = time.monotonic()
+        try:
+            return ocr(phr_)
+        finally:
+            t_ocr[0] = time.monotonic() - t
+
     punches, review = analyze(phr, feats, timed_judge,
                               lambda p: cams.face_present(p["source"], p["src_t0"], p["src_t1"]),
-                              by_src, tmap.cuts(), tmap, total, cfg, loud)
+                              by_src, tmap.cuts(), tmap, total, cfg, loud,
+                              reading=None if cfg["ocr"] == "off" else timed_ocr)
 
     params = {k: cfg[k] for k in ("scale", "preroll", "postroll", "merge_gap", "min_gap", "threshold")}
     (run_dir / "punch.json").write_text(json.dumps({"version": 1, "params": params, "punches": punches},
@@ -651,5 +740,7 @@ def run(run_dir, timeline=None, overrides: dict | None = None, facecam_override:
     secs = time.monotonic() - t_start
     covered = sum(p["t_out"] - p["t_in"] for p in punches)
     log(f"[punch] {len(punches)} punches ({covered:.1f}s, {100 * covered / total:.1f}% of {total:.0f}s) "
-        f"from {len(phr)} phrases; {secs - t_judge[0]:.1f}s + judge {t_judge[0]:.1f}s")
-    return {"punches": punches, "review": review, "seconds": secs, "judge_seconds": t_judge[0]}
+        f"from {len(phr)} phrases; {secs - t_judge[0] - t_ocr[0]:.1f}s + ocr {t_ocr[0]:.1f}s "
+        f"+ judge {t_judge[0]:.1f}s")
+    return {"punches": punches, "review": review, "seconds": secs, "judge_seconds": t_judge[0],
+            "ocr_seconds": t_ocr[0]}

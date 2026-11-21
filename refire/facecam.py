@@ -286,24 +286,28 @@ class Facecams:
         self._cams[source_id] = cam
         return cam
 
+    def frames(self, source_id: int, times, width: int = DECODE_W) -> list[np.ndarray]:
+        """decoded frames at source times (transcript clock) that the cut uses; width 0 = full res."""
+        samples = []
+        for t in times:
+            hit = next(((media, t - off) for sid, media, a, b, off in self._ranges
+                        if sid == source_id and a <= t < b), None)
+            if hit:
+                samples.append(hit)
+        return read_frames(samples, width, caps=self._caps) if samples else []
+
     def face_present(self, source_id: int, t0: float, t1: float, n: int = 3) -> float:
         """fraction of n frames in [t0, t1] (source time) with a face inside the facecam box."""
         cam = self.detect(source_id)
         if cam is None:
             return 0.0
-        samples = []
-        for k in range(n):
-            t = t0 + (t1 - t0) * (k + 0.5) / n
-            hit = next(((media, t - off) for sid, media, a, b, off in self._ranges
-                        if sid == source_id and a <= t < b), None)
-            if hit:
-                samples.append(hit)
-        if not samples:
+        frames = self.frames(source_id, [t0 + (t1 - t0) * (k + 0.5) / n for k in range(n)])
+        if not frames:
             return 0.0
         x0, y0, x1, y1 = cam.box
         hits = 0
-        for f in read_frames(samples, caps=self._caps):
+        for f in frames:
             h, w = f.shape[:2]
             roi = f[int(y0 * h):int(np.ceil(y1 * h)), int(x0 * w):int(np.ceil(x1 * w))]
             hits += bool(roi.size) and any(d[4] >= MIN_SCORE for d in self.detector(roi))
-        return hits / len(samples)
+        return hits / len(frames)

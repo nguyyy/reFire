@@ -234,3 +234,44 @@ def test_run_writes_outputs_and_tick_exact_ops(tmp_path, monkeypatch):
     (vod / "cut" / "ppro" / "ops_punch.json").unlink()
     punch.run(vod / "cut", facecam_override={"box": CAM.box}, judge=judge, dry_run=True, log=lambda *a: None)
     assert not (vod / "cut" / "ppro" / "ops_punch.json").exists()
+
+
+def test_match_ratio_is_word_order_aware():
+    assert punch.match_ratio("bring three crystal cores", "Quest: Bring three Crystal Cores to Old Man") == 1.0
+    assert punch.match_ratio("oh my god what", "Bring three crystal cores") == 0.0
+    assert punch.match_ratio("", "x") == 0.0
+
+
+def test_ocr_marks_reads_and_respects_budget():
+    import numpy as np
+    seen = {"words": "bring three crystal cores to the old man"}
+    frame = np.zeros((1080, 1920, 3), np.uint8)
+    calls = []
+
+    def engine(img, use_cls=True):
+        calls.append(img.shape)
+        return [[None, seen["words"], 0.9]], None
+
+    def ph(i, text):
+        return {"id": i, "text": text, "words": text.split(), "src_t0": 10.0, "src_t1": 12.0, "source": 0}
+
+    phr = [ph("c0", "bring three crystal cores to the old man"), ph("c1", "OH SHIT"),
+           ph("c2", "i love this character so much honestly")]
+    r = punch.ocr_reader(lambda sid, ts: [frame] * len(ts), "on", engine=engine)(phr)
+    assert r == {"c0": True, "c2": False}                       # c1: too short to be a read
+    assert len(calls) == 2 * 2 * 2                               # 2 phrases x 2 frames x 2 regions
+    assert calls[0] == (int(0.97 * 1080) - int(0.70 * 1080), int(0.85 * 1920) - int(0.15 * 1920), 3)
+    assert punch.ocr_reader(lambda *a: [frame], "auto", budget=-1, engine=engine, log=lambda *a: None)(phr) == {}
+    assert punch.ocr_reader(lambda *a: [frame], "off", engine=engine)(phr) == {}
+
+
+def test_ocr_reading_overrides_an_eager_judge():
+    words = say("BRING THREE CRYSTAL CORES TO THE OLD MAN", 30)     # shouted, judge says exclamation
+    VERDICT[" ".join(w["text"] for w in words)] = ("exclamation", 0.9)
+    tm = TimelineMap([Span(0, 300, "A.mov", OFF, OFF + 300, OFF)], 4233600000)
+    phr = punch.phrases(punch.timeline_words(words, tm), tm)
+    sig = punch.Signal([])
+    feats = {p["id"]: punch.features(p, sig, sig, punch.load_lexicon(), []) for p in phr}
+    punches, review = punch.analyze(phr, feats, judge, lambda p: 1.0, {0: CAM}, [], tm, 300.0,
+                                    punch.config(), sig, reading=lambda ps: {ps[0]["id"]: True})
+    assert punches == [] and review[0]["reading"] is True and review[0]["drop_reason"] == "reading"
