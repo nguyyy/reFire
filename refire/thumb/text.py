@@ -107,6 +107,15 @@ class Line:
         return m.cap * self.size / m.upm
 
 
+# straight quotes a display font may lack -> the typographic glyph it does have (Conneqt has
+# no U+0027: measured at the fallback width while the browser drew a narrow substitute = a gap)
+TYPOGRAPHIC = {"'": "’", '"': "”", "`": "‘"}
+
+
+def typeset(text: str, m: Metrics) -> str:
+    return "".join(TYPOGRAPHIC[c] if c not in m.advances and TYPOGRAPHIC.get(c) in m.advances else c for c in text)
+
+
 def _line(t, default_font: str) -> tuple[str, float, str, float]:
     """a hook line is "TEXT" or {"text", "scale_x" (squeeze), "font", "scale" (size vs the others)}."""
     if isinstance(t, str):
@@ -122,6 +131,7 @@ def layout(lines: list, m, canvas: tuple[int, int], st: Style, anchor: str = "bo
     W, H = canvas
     items = [(t, sx * st.squeeze, f, k) for t, sx, f, k in (_line(t, st.font) for t in lines)]
     mets = [metrics(str(font_path(f))) for _, _, f, _ in items]
+    items = [(typeset(t, mm), sx, f, k) for (t, sx, f, k), mm in zip(items, mets)]
     unit = max((mm.width(t, k, st.tracking) * sx + st.stroke * k) for (t, sx, _, k), mm in zip(items, mets))
     size = min(st.max_size_frac * H / max(k for *_, k in items), st.width_frac * W / unit if unit else H)
     widths = [mm.width(t, size * k, st.tracking) * sx for (t, sx, _, k), mm in zip(items, mets)]

@@ -289,7 +289,9 @@ def build_spec(c, d: Path, face_png: Path, subject_png: Path | None, subject_kin
                                "count": 22, "z": -120},
                       "cards": cards,
                       "sparkles": {"count": 26, "x0": 0, "x1": 700, "y0": 0, "y1": 420, "size": 9},
-                      "bloom": {"strength": 0.5, "radius": 0.4, "threshold": 0.82}},
+                      # bright splash art blooms to white at the gameplay setting
+                      "bloom": ({"strength": 0.25, "radius": 0.35, "threshold": 0.92} if subject_kind == "art"
+                                else {"strength": 0.5, "radius": 0.4, "threshold": 0.82})},
             "text": {"lines": [ln.upper() for ln in c.hook.lines], "accent_phrase": (c.hook.accent_phrase or "").upper() or None,
                      "accent": _accent(c.hook.accent_color, bg_rgb), "annotation": c.hook.annotation,
                      "width_frac": 0.6, **({"skew": -10} if c.type == "reveal" else {})}}

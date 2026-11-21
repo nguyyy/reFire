@@ -82,3 +82,10 @@ def test_slab_stops_before_trailing_dots(m):
     adv = m.advances_px("STALLING...", ln.size, st.tracking)
     g_end = ln.x + sum(adv[:8]) * ln.sx                               # right edge of the G
     assert x + w < g_end                                               # tucked inside the G, not over the dots
+
+
+def test_straight_apostrophe_uses_the_fonts_curly_glyph(m):
+    assert "'" not in m.advances and "’" in m.advances                 # conneqt: curly only
+    (ln,) = T.layout(["I'M NOT"], m, (1280, 720), T.Style())
+    assert ln.text == "I’M NOT"
+    assert ln.width == pytest.approx(m.width("I’M NOT", ln.size, T.Style().tracking) * ln.sx, abs=0.05)
