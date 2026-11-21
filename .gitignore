@@ -40,3 +40,5 @@ docs/ai-editor-workflow-memory.md
 postre/
 # Playwright CLI output (may contain credentials)
 .playwright-cli/
+tests/golden/thumb/thumb.png
+tests/golden/thumb/index.html

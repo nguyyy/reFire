@@ -1,0 +1,10 @@
+{
+ "version": 1, "layout": "reaction", "canvas": [1280, 720],
+ "background": {"src": "assets/bg.png", "blur": 12, "brightness": 0.62, "saturate": 1.15, "scale": 1.08, "vignette": 0.55},
+ "layers": [
+  {"kind": "subject", "src": "assets/subject.png", "x": 70, "y": 50, "w": 360, "rotate": -3, "shadow": 0.6},
+  {"kind": "face", "src": "assets/face.png", "x": 760, "y": 170, "w": 480, "glow": "#ffffff"}
+ ],
+ "text": {"lines": ["ARTIFACTS", "& STALLING..."], "accent_phrase": "ARTIFACTS", "accent": "gold",
+          "annotation": "(birthday)"}
+}

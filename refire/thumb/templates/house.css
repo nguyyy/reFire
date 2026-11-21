@@ -1,0 +1,10 @@
+/* house style for refire thumbnails; positions come from spec.json, looks live here */
+html, body { margin: 0; padding: 0; background: #000; }
+.stage { position: relative; overflow: hidden; }
+.bg { position: absolute; inset: 0; background-size: cover; background-position: center; }
+.vignette { position: absolute; inset: 0; pointer-events: none; }
+.layer { position: absolute; display: block; transform-origin: 50% 50%; }
+.hook { position: absolute; left: 0; top: 0; overflow: visible; }
+.hook text { font-kerning: none; letter-spacing: 0; text-rendering: geometricPrecision; }
+/* lowercase aside, e.g. "(birthday)": the display font is caps-only */
+.hook .ann { fill: #fff; stroke: #000; paint-order: stroke; font-family: "Segoe UI", Arial, sans-serif; font-weight: 700; }
