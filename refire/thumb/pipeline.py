@@ -172,11 +172,14 @@ def direct(ctx: dict, previous_hooks: list[str], variant: int, backend: str = "c
             return ask(text, Out)
         content = [{"type": "text", "text": text}]
         if backend == "cli":
-            try:
-                return director._complete_cli(model, SYSTEM, content, Out, tag="thumb director", effort=effort,
-                                              live=False)
-            except (RuntimeError, OSError) as e:
-                director._api_fallback("thumb director", e)
+            err = None
+            for _ in range(2):          # the cli now and then returns unparseable json: one more try first
+                try:
+                    return director._complete_cli(model, SYSTEM, content, Out, tag="thumb director", effort=effort,
+                                                  live=False)
+                except (RuntimeError, OSError) as e:
+                    err = e
+            director._api_fallback("thumb director", err)
         import anthropic
         return director._complete(anthropic.Anthropic(), model, SYSTEM, content, Out, tag="thumb director",
                                   effort=effort)
