@@ -494,6 +494,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.cmd == "caption":
         from . import caption
+        from .styles import resolve as _resolve_style
         _direction, knobs = _resolve_style(args.style)
         cfg = caption.config(knobs.get("caption"))
         caption.run(args.run_dir, args.timeline, overrides=knobs.get("caption"),
@@ -509,6 +510,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.cmd == "punch":
         from . import punch
+        from .styles import resolve as _resolve_style
         _direction, knobs = _resolve_style(args.style)
         punch.run(args.run_dir, args.timeline, overrides=knobs.get("punch"),
                   facecam_override=knobs.get("facecam"), backend=args.director_backend,
