@@ -43,3 +43,4 @@ postre/
 tests/golden/thumb/thumb.png
 tests/golden/thumb/index.html
 !tests/golden/thumb/assets/*.png
+!refire/thumb/assets/*.png

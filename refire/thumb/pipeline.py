@@ -40,9 +40,12 @@ Concept types, use each exactly once:
 - reveal: hide the answer (a stat, a tier placement, a pull result) behind a pixel mosaic with a
   "???" bubble; the hook is a question.
 
-Pick face.t ONLY from the given moments (source seconds) and say the expression. For a video
-subject give t (source seconds inside a beat) and a region: {", ".join(REGIONS)}. For art give
-query = a character name. Title <= 60 characters, paired with the hook.
+Pick face.t ONLY from the given moments (source seconds) and say the expression. The subject
+must be deliberate: either a game UI panel that was on screen (source "panel": t = source seconds
+when the panel (artifact card, tier list, wish result, character grid) is showing, region = where
+it sits: {", ".join(REGIONS)}), or official character art (source "art": query = one character
+name, or up to three comma-separated names for a team/collage). Never chat, never a random shot.
+Title <= 60 characters, paired with the hook.
 
 Reply with ONLY JSON:
 {{"brief": {{"promise": "...", "entities": ["..."], "reveal": {{"what": "...", "t": 0, "beat_id": 0}} or null,
@@ -51,7 +54,7 @@ Reply with ONLY JSON:
   "hook": {{"lines": ["LINE ONE", "LINE TWO"], "accent_phrase": "...", "accent_color": "gold|sky|green|mint|blue|cyan",
             "annotation": null}},
   "face": {{"t": 0, "expression": "shock|deadpan|skeptical|hype|laughing"}},
-  "subject": {{"source": "video|art|none", "t": 0, "region": "right-panel", "query": null}},
+  "subject": {{"source": "panel|art|none", "t": 0, "region": "right-panel", "query": null}},
   "title": "...", "payoff_beats": [0]}}]}}"""
 
 
@@ -258,7 +261,39 @@ def _accent(name: str, bg_rgb: np.ndarray) -> str:
     return name if dist(name) >= 60 else max(PALETTE, key=dist)
 
 
-def build_spec(c, d: Path, face_png: Path, subject_png: Path | None, subject_kind: str, bg_rgb, seed: int) -> dict:
+FOV = 50          # a wider lens than 30 so a tilted card actually reads as 3D (nguy: fix the focal length)
+SPEEDLINES = Path(__file__).with_name("assets") / "speedlines.png"
+
+
+def _fit(p: Path, max_w: float, max_h: float) -> float:
+    """card width in px so it fits a max_w x max_h box at its own aspect."""
+    from PIL import Image
+    w, h = Image.open(p).size
+    return round(min(max_w, max_h * w / h), 1)
+
+
+def cards_for(c, subject, kind: str) -> list[dict]:
+    """subject card(s) for a layout, swung toward zy0x (outer edge near, inner edge receding,
+    like the refs' tier list / wordle panels), sized from each image's aspect and set back
+    in depth so the near edge doesn't blow past the frame. `subject` = one png or a list
+    (art collage)."""
+    subs = subject if isinstance(subject, list) else ([subject] if subject else [])
+    if not subs:
+        return []
+    if kind == "art":
+        if len(subs) == 1:
+            w = _fit(subs[0], 560, 700)
+            return [{"src": f"assets/{subs[0].name}", "x": 40, "y": 0, "w": w, "z": -80, "rot": [0, 22, 0]}]
+        # collage: fanned, each a little deeper and more turned (the abyss ref's character spread)
+        return [{"src": f"assets/{p.name}", "x": 20 + i * 170, "y": 10 + i * 12, "w": _fit(p, 380, 560),
+                 "z": -60 - i * 60, "rot": [0, 18 + 6 * i, -3 + 3 * i]} for i, p in enumerate(subs)][::-1]
+    card = {"src": f"assets/{subs[0].name}", "shadow": 0.75, "glow": "#ffffff", "glow_alpha": 0.35}
+    if c.type == "subject":
+        return [{**card, "x": 70, "y": 40, "w": _fit(subs[0], 520, 420), "z": -70, "rot": [6, 26, -4]}]
+    return [{**card, "x": 70, "y": 50, "w": _fit(subs[0], 470, 380), "z": -70, "rot": [7, 30, -5]}]
+
+
+def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rgb, seed: int) -> dict:
     from PIL import Image
 
     from . import compose
@@ -268,25 +303,19 @@ def build_spec(c, d: Path, face_png: Path, subject_png: Path | None, subject_kin
     if box is None:
         raise ValueError("no face in the cutout")
     target = 0.80 if c.type == "subject" else compose.FIGURE_TARGET
+    import shutil
+    shutil.copy(SPEEDLINES, d / "assets" / "speedlines.png")
     f = compose.place_face(im.size, box, compose.head_top(arr), target=target)
     fx, fy, fw, fh = f["face"]
-    cards = []
-    if subject_png:
-        if subject_kind == "art":
-            cards.append({"src": f"assets/{subject_png.name}", "x": -60, "y": -20, "w": 640, "z": -80, "rot": [0, 10, 0]})
-        elif c.type == "subject":
-            cards.append({"src": f"assets/{subject_png.name}", "x": 30, "y": 20, "w": 600, "z": 10, "rot": [3, 12, -3],
-                          "shadow": 0.75, "glow": "#ffffff", "glow_alpha": 0.35})
-        else:
-            cards.append({"src": f"assets/{subject_png.name}", "x": 50, "y": 30, "w": 430, "z": 10, "rot": [4, 18, -4],
-                          "shadow": 0.75, "glow": "#ffffff", "glow_alpha": 0.35})
+    cards = cards_for(c, subject_png, subject_kind)
     spec = {"version": 1, "layout": c.type, "canvas": [1280, 720], "background": {"vignette": 0.55},
             "layers": [{"kind": "face", "src": f"assets/{face_png.name}", "x": f["x"], "y": f["y"], "w": f["w"],
                         "glow": "#ffffff", "face_box": f["face"]}],
-            "scene": {"seed": seed, "fov": 30, "bg": {"raw": "assets/bg.jpg", "blur": 12, "brightness": 0.6,
-                                                      "saturate": 1.15, "z": -400},
-                      "rays": {"x": fx + fw / 2, "y": fy + fh * 0.4, "color": "#fff3d6", "strength": 0.22,
-                               "count": 22, "z": -120},
+            "scene": {"seed": seed, "fov": FOV, "bg": {"raw": "assets/bg.jpg", "blur": 12, "brightness": 0.6,
+                                                       "saturate": 1.15, "z": -400},
+                      # nguy's editing-pack speed lines, 50% opacity, converging on zy0x's face
+                      "overlays": [{"src": "assets/speedlines.png", "cx": fx + fw / 2, "cy": fy + fh / 2,
+                                    "w": 1800, "z": -150, "opacity": 0.5}],
                       "cards": cards,
                       "sparkles": {"count": 26, "x0": 0, "x1": 700, "y0": 0, "y1": 420, "size": 9},
                       # bright splash art blooms to white at the gameplay setting
@@ -295,7 +324,7 @@ def build_spec(c, d: Path, face_png: Path, subject_png: Path | None, subject_kin
             "text": {"lines": [ln.upper() for ln in c.hook.lines], "accent_phrase": (c.hook.accent_phrase or "").upper() or None,
                      "accent": _accent(c.hook.accent_color, bg_rgb), "annotation": c.hook.annotation,
                      "width_frac": 0.6, **({"skew": -10} if c.type == "reveal" else {})}}
-    if c.type == "reveal" and cards and subject_kind == "video":
+    if c.type == "reveal" and cards and subject_kind != "art":
         compose.reveal(spec, d, boxes=[(0.06, 0.30, 0.94, 0.62)], bubble_at=(cards[0]["x"] + 280, 18))
     return spec
 
@@ -323,14 +352,166 @@ def snap(cams, sid: int, t: float) -> float:
     return min(max(t, a + 0.05), b - 0.05)
 
 
+def _ocr():
+    from rapidocr_onnxruntime import RapidOCR
+    return RapidOCR()
+
+
+def _clusters(boxes: list[list[float]], gap: float) -> list[list[list[float]]]:
+    """group text boxes (x0, y0, x1, y1) whose gap-padded rects overlap (union-find)."""
+    parent = list(range(len(boxes)))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for i, a in enumerate(boxes):
+        for j in range(i + 1, len(boxes)):
+            b = boxes[j]
+            if a[0] - gap < b[2] and b[0] - gap < a[2] and a[1] - gap < b[3] and b[1] - gap < a[3]:
+                parent[root(i)] = root(j)
+    groups: dict[int, list] = {}
+    for i, bx in enumerate(boxes):
+        groups.setdefault(root(i), []).append(bx)
+    return list(groups.values())
+
+
+def find_panel(cams, sid: int, t: float, cam_box, hint: str | None = None, window: float = 2.0, n: int = 5,
+               ocr=None):
+    """the game UI panel on screen near t (artifact card, tier list, character grid), or None.
+    text boxes (rapidocr detection) right of the stream's cam/chat column, grouped into blocks;
+    the densest block is the panel; the sharpest frame wins. never a blind region crop."""
+    import cv2
+    eng = ocr or _ocr()
+    gx0, _, gx1, _ = gameplay((0, 0, 1, 1), cam_box)
+    hx = None
+    if hint in REGIONS:
+        r = REGIONS[hint]
+        hx = (r[0] + r[2]) / 2
+    best = None
+    for tt in np.linspace(t - window, t + window, n):
+        fr = cams.frames(sid, [snap(cams, sid, float(tt))], width=0)
+        if not fr:
+            continue
+        f = fr[0]
+        H, W = f.shape[:2]
+        sw, sh = 960, 540
+        res = eng(cv2.resize(f, (sw, sh)), use_det=True, use_cls=False, use_rec=False)[0] or []
+        boxes = []
+        for q in res:
+            xs, ys = [pt[0] / sw for pt in q], [pt[1] / sh for pt in q]
+            bx = [min(xs), min(ys), max(xs), max(ys)]
+            if gx0 <= (bx[0] + bx[2]) / 2 <= gx1:
+                boxes.append(bx)
+        if len(boxes) < 5:
+            continue
+        for g in _clusters(boxes, 0.035):
+            if len(g) < 5:
+                continue
+            x0, y0 = min(b[0] for b in g), min(b[1] for b in g)
+            x1, y1 = max(b[2] for b in g), max(b[3] for b in g)
+            m = 0.03
+            x0, y0, x1, y1 = max(gx0, x0 - m), max(0, y0 - m), min(gx1, x1 + m), min(1, y1 + m)
+            w, h = x1 - x0, y1 - y0
+            if w * h < 0.06 or not 0.3 <= (w * W) / (h * H) <= 3.2:
+                continue
+            crop = f[int(y0 * H):int(y1 * H), int(x0 * W):int(x1 * W)]
+            sharp = float(cv2.Laplacian(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
+            near = 1.0 if hx is None else 1.0 - min(1.0, abs((x0 + x1) / 2 - hx))
+            score = len(g) * np.sqrt(sharp) * (0.5 + 0.5 * near)
+            if best is None or score > best[0]:
+                best = (score, crop, len(g))
+    return None if best is None else best[1]
+
+
+def art_cards(names: list[str], d: Path, log=print) -> list[Path]:
+    """official splash art for each name (a collage when several) -> cropped pngs in assets/."""
+    from . import art
+    out = []
+    for i, n in enumerate(names[:3]):
+        try:
+            sp = art.splash(n)
+        except art.ArtError as e:
+            log(f"[thumb] art for {n!r} unavailable ({e})")
+            continue
+        p = art_crop(sp, d / "assets" / f"art{i}.png")
+        (d / "assets" / f"art{i}.art.json").write_text(sp.with_suffix(".json").read_text(encoding="utf-8"), encoding="utf-8")
+        out.append(p)
+    return out
+
+
+def characters_in(names: list[str]) -> list[str]:
+    """which of these brief entities are genshin characters (resolved against the roster)."""
+    from . import art
+    try:
+        roster = art.characters(art.Fetcher())
+    except art.ArtError:
+        return []
+    return [r for r in (art.resolve(n, roster) for n in names) if r]
+
+
+def assemble(c, k: str, root: Path, cams, browser, variant: int, entities: list[str], ocr=None, log=print) -> None:
+    """one concept -> <root>/<k>/{assets, spec.json, thumb.png}."""
+    import cv2
+
+    from . import render
+    from .cutout import cutout
+    sid = 0
+    d = root / k
+    (d / "assets").mkdir(parents=True, exist_ok=True)
+    c.face.t = snap(cams, sid, c.face.t)
+    if c.subject.t is not None:
+        c.subject.t = snap(cams, sid, c.subject.t)
+    crop, info = best_face(cams, sid, c.face.t, c.face.expression)
+    cv2.imwrite(str(d / "assets" / "face.png"), cutout(crop))
+    cam_box = cams.detect(sid).box
+    sub, kind = None, c.subject.source
+    if kind in ("video", "panel") and c.subject.t is not None:
+        panel = find_panel(cams, sid, c.subject.t, cam_box, c.subject.region, ocr=ocr)
+        if panel is not None:
+            sub, kind = d / "assets" / "subject.png", "panel"
+            cv2.imwrite(str(sub), panel)
+        else:
+            log(f"[thumb] {k}: no UI panel near {c.subject.t:.0f}s; trying character art")
+            kind = "art"
+    if kind == "art":
+        names = [n.strip() for n in (c.subject.query or "").split(",") if n.strip()] or characters_in(entities)[:1]
+        sub = art_cards(names, d, log) or None
+        if sub and len(sub) == 1:
+            sub = sub[0]
+    t_bg = c.subject.t if c.subject.t is not None and kind == "panel" else c.face.t
+    bg = cams.frames(sid, [t_bg], width=0)[0]
+    gx0, _, gx1, _ = gameplay((0, 0, 1, 1), cam_box)
+    bg = bg[:, int(gx0 * bg.shape[1]):int(gx1 * bg.shape[1])]
+    cv2.imwrite(str(d / "assets" / "bg.jpg"), bg, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    bg_rgb = cv2.cvtColor(cv2.GaussianBlur(bg, (0, 0), 12), cv2.COLOR_BGR2RGB)
+    spec = build_spec(c, d, d / "assets" / "face.png", sub, "art" if kind == "art" else "panel", bg_rgb,
+                      seed=variant * 10 + "ABC".index(k))
+    (d / "spec.json").write_text(json.dumps(spec, indent=1, ensure_ascii=False), encoding="utf-8")
+    render.render(d / "spec.json", browser=browser)
+    log(f"[thumb] {k} {c.type}: {' / '.join(c.hook.lines)}  (face q {info['q']}, subject {kind if sub else 'none'})")
+
+
+def _render_all(run_dir: Path, root: Path, concepts: list, variant: int, entities: list[str], log=print) -> Path:
+    from ..facecam import Facecams
+    from . import render, report
+    cams = Facecams(run_dir / "ae" / "manifest.json")
+    ocr = _ocr()
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        b = render.launch(p)
+        try:
+            for k, c in zip("ABC", concepts):
+                assemble(c, k, root, cams, b, variant, entities, ocr, log)
+        finally:
+            b.close()
+    return report.build(run_dir, root=root)
+
+
 def run(run_dir, variant: int = 1, previous_hooks: list[str] | None = None, backend: str = "cli",
         model: str = "claude-opus-5", ask=None, log=print) -> Path:
     """one full candidate run -> <run_dir>/thumb/v<variant>/report.md."""
-    import cv2
-
-    from ..facecam import Facecams
-    from . import art, render, report
-    from .cutout import cutout
     run_dir = Path(run_dir)
     root = run_dir / "thumb" / f"v{variant}"
     root.mkdir(parents=True, exist_ok=True)
@@ -344,51 +525,18 @@ def run(run_dir, variant: int = 1, previous_hooks: list[str] | None = None, back
     order = sorted(out.concepts, key=lambda c: TYPES.index(c.type))
     concepts = [{"id": k, **c.model_dump()} for k, c in zip("ABC", order)]
     (root / "concepts.json").write_text(json.dumps({"concepts": concepts}, indent=1, ensure_ascii=False), encoding="utf-8")
-
-    mp = run_dir / "ae" / "manifest.json"
-    cams = Facecams(mp)
-    sid = 0
-    from playwright.sync_api import sync_playwright
-    with sync_playwright() as p:
-        b = render.launch(p)
-        try:
-            for k, c in zip("ABC", order):
-                d = root / k
-                (d / "assets").mkdir(parents=True, exist_ok=True)
-                c.face.t = snap(cams, sid, c.face.t)
-                if c.subject.t is not None:
-                    c.subject.t = snap(cams, sid, c.subject.t)
-                crop, info = best_face(cams, sid, c.face.t, c.face.expression)
-                cv2.imwrite(str(d / "assets" / "face.png"), cutout(crop))
-                cam_box = cams.detect(sid).box
-                bg = cams.frames(sid, [c.subject.t if c.subject.source == "video" and c.subject.t else c.face.t], width=0)
-                hh, ww = bg[0].shape[:2]
-                gx0, _, gx1, _ = gameplay((0, 0, 1, 1), cam_box)
-                bg = [bg[0][:, int(gx0 * ww):int(gx1 * ww)]]
-                cv2.imwrite(str(d / "assets" / "bg.jpg"), bg[0], [cv2.IMWRITE_JPEG_QUALITY, 90])
-                sub, kind = None, c.subject.source
-                if kind == "video" and c.subject.t is not None:
-                    fr = cams.frames(sid, [c.subject.t], width=0)
-                    if fr:
-                        h, w = fr[0].shape[:2]
-                        x0, y0, x1, y1 = gameplay(REGIONS.get(c.subject.region, REGIONS["right-panel"]), cam_box)
-                        sub = d / "assets" / "subject.png"
-                        cv2.imwrite(str(sub), fr[0][int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)])
-                elif kind == "art" and c.subject.query:
-                    try:
-                        sp = art.splash(c.subject.query)
-                        sub = art_crop(sp, d / "assets" / "art.png")
-                        (d / "assets" / "art.art.json").write_text(sp.with_suffix(".json").read_text(encoding="utf-8"),
-                                                                   encoding="utf-8")
-                    except art.ArtError as e:
-                        log(f"[thumb] {k}: art for {c.subject.query!r} unavailable ({e}); no subject")
-                bg_rgb = cv2.cvtColor(cv2.GaussianBlur(bg[0], (0, 0), 12), cv2.COLOR_BGR2RGB)
-                spec = build_spec(c, d, d / "assets" / "face.png", sub, kind, bg_rgb, seed=variant * 10 + "ABC".index(k))
-                (d / "spec.json").write_text(json.dumps(spec, indent=1, ensure_ascii=False), encoding="utf-8")
-                render.render(d / "spec.json", browser=b)
-                log(f"[thumb] {k} {c.type}: {' / '.join(c.hook.lines)}  (face q {info['q']} of {info['frames']} frames)")
-        finally:
-            b.close()
-    rep = report.build(run_dir, root=root)
+    rep = _render_all(run_dir, root, order, variant, out.brief.get("entities", []), log)
     log(f"[thumb] v{variant}: {rep}  ({time.monotonic() - t0:.0f}s)")
     return rep
+
+
+def recompose(run_dir, variant: int, log=print) -> Path:
+    """rebuild a run's candidates from its saved brief + concepts (no director call): for
+    layout/asset changes."""
+    run_dir = Path(run_dir)
+    root = run_dir / "thumb" / f"v{variant}"
+    Concept = _models().model_fields["concepts"].annotation.__args__[0]
+    concepts = [Concept.model_validate({k: v for k, v in c.items() if k != "id"})
+                for c in json.loads((root / "concepts.json").read_text(encoding="utf-8"))["concepts"]]
+    brief = json.loads((root / "brief.json").read_text(encoding="utf-8"))
+    return _render_all(run_dir, root, concepts, variant, brief.get("entities", []), log)

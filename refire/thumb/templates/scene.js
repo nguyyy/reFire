@@ -109,6 +109,16 @@ function rays(r) {                                       // light rays fanning o
   scene.add(p);
 }
 
+async function overlay(o) {                            // e.g. speed lines: centered on a point, behind the cards
+  const t = await tex(o.src);
+  const z = o.z ?? -150, k = (dist - z) / dist;          // depth-scaled so `w` is screen pixels
+  const w = o.w * k, h = w * t.image.height / t.image.width;
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: t, transparent: true,
+    opacity: o.opacity ?? 0.5, depthWrite: false }));
+  m.position.set((o.cx - W / 2) * k + W / 2, -((o.cy - H / 2) * k + H / 2), z);
+  scene.add(m);
+}
+
 function sparkles(s) {
   const n = s.count ?? 40, pos = new Float32Array(n * 3), c = document.createElement('canvas');
   for (let i = 0; i < n; i++) {
@@ -128,6 +138,7 @@ function sparkles(s) {
 async function build() {
   if (S.bg) await background(S.bg);
   if (S.rays) rays(S.rays);
+  for (const o of S.overlays || []) await overlay(o);
   for (const c of S.cards || []) await card(c);         // in order: later cards sit on top
   if (S.sparkles) sparkles(S.sparkles);
   const composer = new EffectComposer(renderer);
