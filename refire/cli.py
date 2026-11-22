@@ -477,7 +477,10 @@ def main(argv: list[str] | None = None) -> None:
         if len(a) == 1:                                   # the full run, --runs times
             from .thumb import pipeline
             hooks = []
-            for k in range(1, args.runs + 1):
+            # next free v<n>: earlier runs stay side by side for comparison, never overwritten
+            done = [int(d.name[1:]) for d in (Path(a[0]) / "thumb").glob("v*") if d.name[1:].isdigit()]
+            first = max(done, default=0) + 1
+            for k in range(first, first + args.runs):
                 rep = pipeline.run(a[0], k, hooks, backend=args.director_backend, model=args.claude_model)
                 cj = json.loads((rep.parent / "concepts.json").read_text(encoding="utf-8"))
                 hooks += [" / ".join(c["hook"]["lines"]) for c in cj["concepts"]]

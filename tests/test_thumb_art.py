@@ -125,10 +125,15 @@ def test_unknown_character_and_transient_retry(tmp_path, monkeypatch):
 
 
 def test_item_takes_the_wiki_lead_image(tmp_path):
-    api = ("https://genshin-impact.fandom.com/api.php?action=query&generator=search&gsrsearch=Primogem&gsrlimit=1"
+    api = ("https://genshin-impact.fandom.com/api.php?action=query&generator=search&gsrsearch=Primogem&gsrlimit=3"
            "&gsrnamespace=0&prop=pageimages&piprop=original&format=json")
     img = "https://static.wikia.nocookie.net/gensin-impact/images/primogem.png"
-    meta = {"query": {"pages": {"1": {"title": "Primogem", "original": {"source": img}}}}}
+    meta = {"query": {"pages": {"7": {"title": "Primogem/Gallery", "index": 2, "original": {"source": "nope"}},
+                                "5": {"title": "Primogem Shop", "index": 1},                      # no image
+                                "1": {"title": "Primogem", "index": 3, "original": {"source": img}}}}}
+    meta["query"]["pages"]["7"]["index"] = 4                     # best-ranked hit with an image wins
+    assert not art._names("Zabai", "Lauma") and art._names("Primogem", "Primogem")
+    assert art._names("Deepwood Memories", "Deepwood Memories (Set)")
     log = []
     f = art.Fetcher(delay=0, opener=opener({api: (json.dumps(meta).encode(), "application/json"),
                                            img: (png(300, 300), "image/png")}, log))

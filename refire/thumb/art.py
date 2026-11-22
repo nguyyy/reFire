@@ -189,12 +189,12 @@ def item(query: str, f: Fetcher | None = None, cache: Path = CACHE, cutout_fn=No
     out = cache / f"{slug(query)}_item.png"
     if out.exists():
         return out
-    q = urllib.parse.urlencode({"action": "query", "generator": "search", "gsrsearch": query, "gsrlimit": 1,
+    q = urllib.parse.urlencode({"action": "query", "generator": "search", "gsrsearch": query, "gsrlimit": 3,
                                 "gsrnamespace": 0, "prop": "pageimages", "piprop": "original", "format": "json"})
     meta, _, _ = f.get(f"{FANDOM_API}?{q}", accept=("application/json",))
-    pages = (json.loads(meta).get("query") or {}).get("pages") or {}
-    page = next(iter(pages.values()), None)
-    if not page or not page.get("original"):
+    pages = sorted(((json.loads(meta).get("query") or {}).get("pages") or {}).values(), key=lambda p: p.get("index", 0))
+    page = next((p for p in pages if p.get("original") and _names(query, p.get("title", ""))), None)
+    if not page:                                    # best-ranked hit that has an image and IS the thing
         raise ArtError(f"no wiki image for {query!r}")
     body, _, final = f.get(page["original"]["source"], accept=IMAGES)
     from PIL import Image
@@ -216,6 +216,13 @@ def item(query: str, f: Fetcher | None = None, cache: Path = CACHE, cutout_fn=No
         {"name": page.get("title"), "query": query, "source": "fandom", "url": final,
          "fetched": date.today().isoformat(), "size": list(im.size), "had_alpha": alpha}, indent=1), encoding="utf-8")
     return out
+
+
+def _names(query: str, title: str) -> bool:
+    """the wiki page is about the asked thing (a search for a person's name returns some random
+    character's page otherwise): same words, or a close spelling."""
+    q, t = query.lower().strip(), title.lower().strip()
+    return q in t or t in q or difflib.SequenceMatcher(None, q, t).ratio() >= 0.75
 
 
 def figure(png: Path, alpha_fn=None) -> Path:

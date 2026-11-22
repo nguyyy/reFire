@@ -21,6 +21,8 @@ from pathlib import Path
 
 from . import art
 
+# his tier lists: 3 rows of big icons (MORE TIER LISTS: ~150 px cells, the row's tail behind zy0x)
+TIER_ROWS, TIER_PER_ROW = 3, 4
 TIER_COLORS = ["#FF7F7F", "#FFBF7F", "#FFDF7F", "#BFFF7F", "#7FFFFF", "#7FBFFF"]
 
 
@@ -65,11 +67,11 @@ html,body{{margin:0;background:transparent;font-family:"Segoe UI",Arial,sans-ser
 {css}</style></head><body>{body}</body></html>"""
 
 TIER_CSS = """
-.tl{display:inline-grid;grid-template-columns:150px auto;gap:4px;background:#1b1b1f;padding:4px;border-radius:6px}
-.lab{display:flex;align-items:center;justify-content:center;font-weight:800;font-size:30px;color:#111;
-     text-align:center;line-height:1.05;padding:0 8px;min-height:120px}
-.row{display:flex;gap:4px;background:#2a2a30;padding:4px;min-width:120px}
-.row img{width:112px;height:112px;object-fit:cover;background:radial-gradient(circle at 50% 35%,#5b4b7a,#2b2338);
+.tl{display:inline-grid;grid-template-columns:170px auto;gap:5px;background:#1b1b1f;padding:5px;border-radius:6px}
+.lab{display:flex;align-items:center;justify-content:center;font-weight:800;font-size:36px;color:#111;
+     text-align:center;line-height:1.05;padding:0 8px;min-height:160px}
+.row{display:flex;gap:5px;background:#2a2a30;padding:5px;min-width:160px}
+.row img{width:150px;height:150px;object-fit:cover;background:radial-gradient(circle at 50% 35%,#5b4b7a,#2b2338);
          border-radius:4px}
 """
 
@@ -277,10 +279,10 @@ def _mosaic_svg(seed: int, x: float, y: float, cols: int, rows: int, cell: float
 def tierlist_html(rows: list[dict], icon_fn=icon, hidden=()) -> str:
     """hidden = [[row, col], ...]: those icons drawn as a coarse pixel mosaic (the reveal)."""
     out, hide = [], {tuple(h) for h in hidden or []}
-    for i, r in enumerate(rows[:5]):
+    for i, r in enumerate(rows[:TIER_ROWS]):
         color = r.get("color") or TIER_COLORS[i % len(TIER_COLORS)]
         cells = []
-        for j, p in enumerate(icon_fn(n) for n in r.get("chars", [])[:5]):
+        for j, p in enumerate(icon_fn(n) for n in r.get("chars", [])[:TIER_PER_ROW]):
             if not p:
                 continue
             if (i, j) in hide:

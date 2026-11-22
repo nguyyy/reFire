@@ -38,7 +38,7 @@ ONE clear item that says what the video is about, big: whatever conveys it best,
 characters or artifacts (a weapon, a boss, a wish result, a tier list, an artifact card, ...).
 
 Concept types, use each exactly once:
-- reaction: the strongest asset is his face at a moment; subject small.
+- reaction: the strongest asset is his face at a moment.
 - subject: the video is about a thing (an artifact, a character, a tier list); subject big.
 - reveal: hide the answer (a stat, a tier placement, a pull result) behind a pixel mosaic with a
   "???" bubble; the hook is a question.
@@ -50,7 +50,7 @@ where it sits: {", ".join(REGIONS)}), or official art of ONE thing (source "art"
 in-game name: a character, weapon, material, enemy or boss, e.g. "Skirk", "Primogem", "Lord of the
 Hidden Depths: Whisperer of Nightmares"), or a graphic you design (source "made": made =
 {{"kind": "tierlist", "rows": [{{"label": "GOD TIER", "color": "#FF7F7F", "chars": ["Furina", ...]}}, ...],
-"hidden": [[row, col]]}} with up to 4 rows x 5 Genshin characters, labels like the stream's own
+"hidden": [[row, col]]}} with 3 rows x up to 4 Genshin characters (the ones the video is about), labels like the stream's own
 (GOD TIER / OKAY / RUN AWAY or T0 / T0.5 / T67); or {{"kind": "stat_card", "title": exact artifact
 piece name, "set": its artifact set, "subtitle": slot (Flower of Life / Plume of Death / Sands of Eon /
 Goblet of Eonothem / Circlet of Logos), "main": [stat, value], "stars": 5, "level": "+20",
@@ -66,7 +66,7 @@ Reply with ONLY JSON:
   "hook": {{"lines": ["LINE ONE", "LINE TWO"], "accent_phrase": "...", "accent_color": "gold|sky|green|mint|blue|cyan",
             "annotation": null}},
   "face": {{"t": 0, "expression": "shock|deadpan|skeptical|hype|laughing"}},
-  "subject": {{"source": "panel|art|made|none", "t": 0, "region": "right-panel", "query": null, "made": null}},
+  "subject": {{"source": "panel|art|made", "t": 0, "region": "right-panel", "query": null, "made": null}},
   "title": "...", "payoff_beats": [0]}}]}}"""
 
 
@@ -297,12 +297,12 @@ def _fit(p: Path, max_w: float, max_h: float) -> float:
 LEFT_CENTER = (300, 300)
 # per element: a tall card sits a bit higher so its top rows clear the hook; a wide tier list
 # higher still (his MORE TIER LISTS); a cutout figure lower (it can stand behind the hook)
-CENTERS = {"stat_card": (300, 285), "tierlist": (300, 255), "panel": (300, 275), "art": (300, 340)}
+CENTERS = {"stat_card": (300, 285), "tierlist": (310, 270), "panel": (300, 275), "art": (300, 340)}
 # his strongbox card is drawn ~0.85 as tall as the game's proportions (header 235 px for a 513 px
 # wide card vs 283:492 in game): the free-transform squash every editor does, so the rows clear the hook
 SQUASH = {"stat_card": 0.86}
 LEFT_AREA = 0.6 * 640 * 720         # nguy "approx 50%"; his strongbox card measures ~59%
-LEFT_MAX = (600, 560)
+LEFT_MAX = (620, 560)
 LEFT_RIGHT = 680          # the element's right edge stays left of this (zy0x starts ~ here)
 FADES = {"panel": (0.08, 0.08, 0.08, 0.14), "stat_card": (0.05, 0.02, 0.03, 0.18),
          "tierlist": (0.05, 0.03, 0.04, 0.16), "art": (0.05, 0.03, 0.05, 0.18)}
@@ -362,9 +362,10 @@ def fit_card(src: str, aspect: float, box: tuple, z: float, rot: list, canvas=(1
     return card
 
 
-def left_box(sw: float, sh: float, center=LEFT_CENTER, margin=(40, 30), canvas=(1280, 720)) -> tuple:
+def left_box(sw: float, sh: float, center=LEFT_CENTER, margin=(40, 30), canvas=(1280, 720),
+             right: float = LEFT_RIGHT) -> tuple:
     """the element's screen box: sw x sh around `center`, pushed inside the frame margins."""
-    cx = max(margin[0] + sw / 2, min(center[0], LEFT_RIGHT - sw / 2))      # in frame, off zy0x
+    cx = max(margin[0] + sw / 2, min(center[0], right - sw / 2))      # in frame, off zy0x
     cy = max(margin[1] + sh / 2, min(center[1], canvas[1] - margin[1] - sh / 2))
     return cx - sw / 2, cy - sh / 2, cx + sw / 2, cy + sh / 2
 
@@ -388,8 +389,12 @@ def cards_for(c, subject, kind: str, made_kind: str | None = None) -> tuple[list
         box = left_box(sw, sh, CENTERS["art"], margin=(30, 20))
         rot = [0, 8, 0]
     else:
-        sw, sh = screen_size((aspect, 1))
-        box = left_box(sw, sh, CENTERS.get(fk, LEFT_CENTER))
+        if fk == "tierlist":    # his tier lists run on behind zy0x (only ~4 icons per row show)
+            sw, sh = screen_size((aspect, 1), area=0.75 * 640 * 720, max_wh=(700, 560))
+            box = left_box(sw, sh, CENTERS[fk], right=LEFT_RIGHT + 60)
+        else:
+            sw, sh = screen_size((aspect, 1))
+            box = left_box(sw, sh, CENTERS.get(fk, LEFT_CENTER))
         rot = [3, 14 if c.type == "subject" else 16, -2]
     card = fit_card(f"assets/{soft.name}", aspect, box, -70, rot)
     if fk in SQUASH:
@@ -544,8 +549,20 @@ def art_card(query: str, d: Path, log=print) -> Path | None:
         return None
     try:
         roster = art.characters(art.Fetcher())
-        src = art.splash(q) if art.resolve(q, roster) else art.item(q)
-        fig = art.figure(src)
+        if art.resolve(q, roster):
+            src = art.splash(q)
+        else:
+            try:
+                src = art.item(q)
+            except art.ArtError:
+                from . import made                      # an artifact set: its official flower icon
+                piece = made.artifact({"set": q, "subtitle": "flower"})
+                if not piece:
+                    raise
+                src = piece["icon"]
+                src.with_suffix(".json").write_text(json.dumps({"name": piece["set"], "source": "yatta",
+                                                                "icon": src.name}), encoding="utf-8")
+        fig = art.figure(src) if src.name.endswith(("_wish.png", "_item.png")) else src
     except art.ArtError as e:
         log(f"[thumb] art for {q!r} unavailable ({e})")
         return None
@@ -598,8 +615,12 @@ def assemble(c, k: str, root: Path, cams, browser, variant: int, entities: list[
         else:
             log(f"[thumb] {k}: no UI panel near {c.subject.t:.0f}s; trying character art")
             kind = "art"
+    if sub is None:                                      # nguy: there is always a left element
+        kind = "art"
     if kind == "art":
         sub = art_card(c.subject.query or next(iter(characters_in(entities)), ""), d, log)
+        if sub is None and c.subject.query:
+            sub = art_card(next(iter(characters_in(entities)), ""), d, log)
     t_bg = c.subject.t if c.subject.t is not None and kind == "panel" else c.face.t
     made_hides = kind == "made" and bool((c.subject.made or {}).get("hidden"))
     bg = cams.frames(sid, [t_bg], width=0)[0]
