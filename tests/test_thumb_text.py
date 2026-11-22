@@ -54,10 +54,10 @@ def test_svg_shine_runs_across_and_slab_connects(m):
     s = T.svg(lines, m, (1280, 720), st, accent_phrase="more", accent="blue")
     g = re.search(r'<linearGradient id="ga0"[^>]*x1="([\d.]+)" y1="0" x2="([\d.]+)" y2="0"', s)
     assert g and float(g.group(2)) > float(g.group(1))              # horizontal: left -> right
-    assert 'stop-color="#2C66F3"' in s and 'stop-color="#64A1FF"' in s
+    assert s.count("<stop", s.index('id="ga0"'), s.index('id="gw1"')) == 9          # sampled ramp, not 3 stops
     rects = [tuple(map(float, r)) for r in re.findall(r'<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"', s)]
     assert len(rects) == 2 and rects[0][1] + rects[0][3] == pytest.approx(rects[1][1], abs=0.02)   # slabs touch
-    assert rects[1][3] == pytest.approx(st.rect * lines[1].cap(m), abs=0.02)
+    assert rects[1][3] == pytest.approx(lines[1].cap(m) - 2 * st.rect_inset, abs=0.02)   # ~5 px under the caps
     assert rects[1][0] > lines[1].x                                  # tucked behind the first glyph
     assert '<tspan x="' in s and 'vector-effect="non-scaling-stroke"' in s
     # every stroke sits under every fill: one stroke layer for all lines, one fill layer above it
@@ -89,3 +89,15 @@ def test_straight_apostrophe_uses_the_fonts_curly_glyph(m):
     (ln,) = T.layout(["I'M NOT"], m, (1280, 720), T.Style())
     assert ln.text == "I’M NOT"
     assert ln.width == pytest.approx(m.width("I’M NOT", ln.size, T.Style().tracking) * ln.sx, abs=0.05)
+
+
+def test_shine_ramps_from_dark_edges_to_a_light_middle():
+    import colorsys
+    st = T.Style()
+    for acc in (None, T.PALETTE["gold"]):
+        stops = T.shine_stops(acc, st)
+        L = [colorsys.rgb_to_hls(*(int(c[i:i + 2], 16) / 255 for i in (1, 3, 5)))[1] for _, c in stops]
+        peak = L.index(max(L))
+        assert stops[peak][0] == pytest.approx(st.shine_peak, abs=0.07)
+        assert all(a <= b + 1e-3 for a, b in zip(L[:peak], L[1:peak + 1]))                  # rises to the peak
+        assert max(L) - (L[0] + L[-1]) / 2 > 0.25                                           # a real shine

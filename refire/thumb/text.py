@@ -44,13 +44,16 @@ class Style:
     max_size_frac: float = 0.24     # font size cap / canvas height (refs: caps ~0.16 H)
     margin: tuple = (34, 44)        # x, y px from the anchored corner
     tracking: float = -0.035        # em added between glyphs (negative = tighter)
-    squeeze: float = 0.88           # every line drawn at this width (refs measure 0.85-0.93)
+    squeeze: float = 0.95           # width of every line (measured on ARTIFACTS & STALLING: 0.94-0.95)
     font: str = "conneqt"           # face for every line (a line can override)
     end_inset: float = 0.28         # slab starts/stops this far into the end glyphs (hidden behind them)
     stroke: float = 0.14            # stroke width, em (half of it shows outside the glyph)
-    leading: float = 1.02           # baseline gap / cap height (refs: strokes just touch)
-    rect: float = 0.86              # backing slab height / cap height, per line
-    shine: tuple = (0.0, 0.42, 1.0)  # gradient stops across the line: base, light, base
+    leading: float = 1.09           # baseline gap / cap height (refs measure 1.07-1.12)
+    rect_inset: float = 2.5         # slab = cap height minus this many px top and bottom (at 720p)
+    shine_peak: float = 0.5         # where the shine is lightest across the line (refs: 0.45-0.55)
+    shine_gain: float = 0.12        # accent: peak lightness above the palette's light color (HLS L)
+    shine_edge: float = 0.06        # accent: edges this much darker than the palette's base
+    white: tuple = (0.60, 0.90)     # metallic white: edge, peak lightness (refs 0.53-0.73 / 0.88-0.91)
     skew: float = 0.0               # deg, negative leans right (italic look)
     shadow: tuple = (6, 8, 0.55)    # hard drop: dx, dy, alpha
     haze: tuple = (22, 0.75)        # soft dark glow: blur px, alpha
@@ -61,7 +64,7 @@ class Style:
     def from_spec(cls, d: dict | None) -> "Style":
         d = dict(d or {})
         known = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
-        for k in ("margin", "shine", "shadow", "haze"):
+        for k in ("margin", "white", "shadow", "haze"):
             if k in known:
                 known[k] = tuple(known[k])
         return cls(**known)
@@ -158,6 +161,29 @@ def _split_accent(text: str, accent: str | None) -> list[tuple[str, bool]]:
     return [p for p in parts if p[0]]
 
 
+def shine_stops(acc: tuple | None, st: Style, n: int = 9) -> list[tuple[float, str]]:
+    """the metallic shine across a line, measured off the refs: lightness ramps roughly
+    linearly from dark edges to a light peak near the middle (ARTIFACTS: 0.40 -> 0.83 -> 0.45,
+    & STALLING: 0.53 -> 0.88 -> 0.63). acc = (base, light) hex, None = metallic white."""
+    import colorsys
+
+    def hls(hx):
+        return colorsys.rgb_to_hls(*(int(hx[i:i + 2], 16) / 255 for i in (1, 3, 5)))
+    if acc is None:
+        h = s_ = 0.0
+        lo, hi = st.white
+    else:
+        (h, lb, s_), (_, ll, _) = hls(acc[0]), hls(acc[1])
+        lo, hi = max(0.05, lb - st.shine_edge), min(0.92, max(ll, lb) + st.shine_gain)
+    out = []
+    for k in range(n):
+        x = k / (n - 1)
+        tri = 1 - abs(x - st.shine_peak) / max(st.shine_peak, 1 - st.shine_peak)
+        r, g, b = colorsys.hls_to_rgb(h, lo + (hi - lo) * tri, s_)
+        out.append((x, "#%02X%02X%02X" % (round(r * 255), round(g * 255), round(b * 255))))
+    return out
+
+
 def families(lines: list[Line]) -> dict:
     """font name -> css family (F0, F1, ...) in line order; svg() and page() agree on it."""
     out = {}
@@ -177,7 +203,7 @@ def svg(lines: list[Line], m: Metrics, canvas: tuple[int, int], st: Style, accen
     for i, ln in enumerate(lines):
         m = metrics(str(font_path(ln.font)))
         cap, sw = ln.cap(m), st.stroke * ln.size
-        rh = st.rect * cap
+        rh = max(cap * 0.5, cap - 2 * st.rect_inset * H / 720)
         adv0 = m.advances_px(ln.text, ln.size, st.tracking)
         a = st.end_inset * adv0[0] * ln.sx                     # tuck the slab ends behind the end glyphs
         # trailing dots/commas sit below the slab's band: end it inside the last tall glyph instead
@@ -187,8 +213,8 @@ def svg(lines: list[Line], m: Metrics, canvas: tuple[int, int], st: Style, accen
         z = (sum(adv0[len(ln.text) - tail:]) + (st.tracking * ln.size if tail else 0)) * ln.sx             + st.end_inset * m.advances.get(last, m.fallback) * ln.size / m.upm * ln.sx
         boxes.append([ln.x + a, ln.baseline - cap / 2 - rh / 2, ln.width - a - z, rh])
         nat = ln.width / ln.sx                      # gradient lives in the unsqueezed space
-        for name, (base, light) in (("w", WHITE), ("a", acc)):
-            stops = "".join(f'<stop offset="{o}" stop-color="{c}"/>' for o, c in zip(st.shine, (base, light, base)))
+        for name, stops in (("w", shine_stops(None, st)), ("a", shine_stops(acc, st))):
+            stops = "".join(f'<stop offset="{o:.3f}" stop-color="{c}"/>' for o, c in stops)
             defs.append(f'<linearGradient id="g{name}{i}" gradientUnits="userSpaceOnUse" x1="{ln.x:.2f}" y1="0" '
                         f'x2="{ln.x + nat:.2f}" y2="0">{stops}</linearGradient>')
         spans, k = [], 0
