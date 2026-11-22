@@ -44,7 +44,13 @@ Pick face.t ONLY from the given moments (source seconds) and say the expression.
 must be deliberate: either a game UI panel that was on screen (source "panel": t = source seconds
 when the panel (artifact card, tier list, wish result, character grid) is showing, region = where
 it sits: {", ".join(REGIONS)}), or official character art (source "art": query = one character
-name, or up to three comma-separated names for a team/collage). Never chat, never a random shot.
+name, or up to three comma-separated names for a team/collage), or a graphic you design
+(source "made": made = {{"kind": "tierlist", "rows": [{{"label": "GOD TIER", "color": "#FF7F7F",
+"chars": ["Furina", ...]}}, ...], "hidden": [[row, col]]}} with up to 4 rows x 5 Genshin characters, labels
+like the stream's own (GOD TIER / OKAY / RUN AWAY or T0 / T0.5 / T67); or {{"kind": "stat_card",
+"title": artifact name, "subtitle": slot, "main": [stat, value], "stars": 5, "level": "+20",
+"rows": [[stat, value], ...], "hidden": [row indexes]}} for an artifact). Design it from what was said
+on stream; prefer it when no clean panel was shown. Never chat, never a random shot.
 Title <= 60 characters, paired with the hook.
 
 Reply with ONLY JSON:
@@ -54,7 +60,7 @@ Reply with ONLY JSON:
   "hook": {{"lines": ["LINE ONE", "LINE TWO"], "accent_phrase": "...", "accent_color": "gold|sky|green|mint|blue|cyan",
             "annotation": null}},
   "face": {{"t": 0, "expression": "shock|deadpan|skeptical|hype|laughing"}},
-  "subject": {{"source": "panel|art|none", "t": 0, "region": "right-panel", "query": null}},
+  "subject": {{"source": "panel|art|made|none", "t": 0, "region": "right-panel", "query": null, "made": null}},
   "title": "...", "payoff_beats": [0]}}]}}"""
 
 
@@ -110,6 +116,7 @@ def _models():
         t: float | None = None
         region: str = "right-panel"
         query: str | None = None
+        made: dict | None = None
 
     class Concept(BaseModel):
         type: str
@@ -325,7 +332,9 @@ def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rg
                      "accent": _accent(c.hook.accent_color, bg_rgb), "annotation": c.hook.annotation,
                      "width_frac": 0.6, **({"skew": -10} if c.type == "reveal" else {})}}
     if c.type == "reveal" and cards and subject_kind != "art":
-        compose.reveal(spec, d, boxes=[(0.06, 0.30, 0.94, 0.62)], bubble_at=(cards[0]["x"] + 280, 18))
+        # a made graphic hides its own values; a stream panel gets the mosaic band
+        compose.reveal(spec, d, boxes=None if subject_kind == "made" else [(0.06, 0.30, 0.94, 0.62)],
+                       bubble_at=(cards[0]["x"] + 280, 18))
     return spec
 
 
@@ -467,6 +476,15 @@ def assemble(c, k: str, root: Path, cams, browser, variant: int, entities: list[
     cv2.imwrite(str(d / "assets" / "face.png"), cutout(crop))
     cam_box = cams.detect(sid).box
     sub, kind = None, c.subject.source
+    if kind == "made" and c.subject.made:
+        from . import made
+        try:
+            sub = made.render(c.subject.made.get("kind", "tierlist"), c.subject.made, d / "assets" / "made.png",
+                              browser=browser)
+            kind = "made"
+        except Exception as e:                           # a bad made spec falls back to art
+            log(f"[thumb] {k}: made graphic failed ({e}); trying character art")
+            kind = "art"
     if kind in ("video", "panel") and c.subject.t is not None:
         panel = find_panel(cams, sid, c.subject.t, cam_box, c.subject.region, ocr=ocr)
         if panel is not None:
@@ -481,13 +499,14 @@ def assemble(c, k: str, root: Path, cams, browser, variant: int, entities: list[
         if sub and len(sub) == 1:
             sub = sub[0]
     t_bg = c.subject.t if c.subject.t is not None and kind == "panel" else c.face.t
+    made_hides = kind == "made" and bool((c.subject.made or {}).get("hidden"))
     bg = cams.frames(sid, [t_bg], width=0)[0]
     gx0, _, gx1, _ = gameplay((0, 0, 1, 1), cam_box)
     bg = bg[:, int(gx0 * bg.shape[1]):int(gx1 * bg.shape[1])]
     cv2.imwrite(str(d / "assets" / "bg.jpg"), bg, [cv2.IMWRITE_JPEG_QUALITY, 90])
     bg_rgb = cv2.cvtColor(cv2.GaussianBlur(bg, (0, 0), 12), cv2.COLOR_BGR2RGB)
-    spec = build_spec(c, d, d / "assets" / "face.png", sub, "art" if kind == "art" else "panel", bg_rgb,
-                      seed=variant * 10 + "ABC".index(k))
+    spec = build_spec(c, d, d / "assets" / "face.png", sub, "art" if kind == "art" else ("made" if made_hides else "panel"),
+                      bg_rgb, seed=variant * 10 + "ABC".index(k))
     (d / "spec.json").write_text(json.dumps(spec, indent=1, ensure_ascii=False), encoding="utf-8")
     render.render(d / "spec.json", browser=browser)
     log(f"[thumb] {k} {c.type}: {' / '.join(c.hook.lines)}  (face q {info['q']}, subject {kind if sub else 'none'})")

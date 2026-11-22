@@ -112,7 +112,10 @@ function rays(r) {                                       // light rays fanning o
 async function overlay(o) {                            // e.g. speed lines: centered on a point, behind the cards
   const t = await tex(o.src);
   const z = o.z ?? -150, k = (dist - z) / dist;          // depth-scaled so `w` is screen pixels
-  const w = o.w * k, h = w * t.image.height / t.image.width;
+  const ar = t.image.width / t.image.height;
+  // big enough to overhang every frame edge from wherever it's centered (no visible border)
+  const need = Math.max(2 * Math.max(o.cx, W - o.cx), 2 * Math.max(o.cy, H - o.cy) * ar) * (o.overscan ?? 1.12);
+  const w = Math.max(o.w ?? 0, need) * k, h = w / ar;
   const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: t, transparent: true,
     opacity: o.opacity ?? 0.5, depthWrite: false }));
   m.position.set((o.cx - W / 2) * k + W / 2, -((o.cy - H / 2) * k + H / 2), z);

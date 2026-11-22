@@ -42,7 +42,7 @@ class Style:
     """every knob of the hook look; spec.json `text` keys override these."""
     width_frac: float = 0.62        # widest line's stroked width / canvas width
     max_size_frac: float = 0.24     # font size cap / canvas height (refs: caps ~0.16 H)
-    margin: tuple = (34, 44)        # x, y px from the anchored corner
+    margin: tuple = (12, 25)        # x, y px from the anchored corner (refs: letters ~27 px in, bottom ~688)
     tracking: float = -0.035        # em added between glyphs (negative = tighter)
     squeeze: float = 0.95           # width of every line (measured on ARTIFACTS & STALLING: 0.94-0.95)
     font: str = "conneqt"           # face for every line (a line can override)
@@ -55,8 +55,8 @@ class Style:
     shine_edge: float = 0.06        # accent: edges this much darker than the palette's base
     white: tuple = (0.60, 0.90)     # metallic white: edge, peak lightness (refs 0.53-0.73 / 0.88-0.91)
     skew: float = 0.0               # deg, negative leans right (italic look)
-    shadow: tuple = (6, 8, 0.55)    # hard drop: dx, dy, alpha
-    haze: tuple = (22, 0.75)        # soft dark glow: blur px, alpha
+    shadow: tuple = (7, 9, 0.85)    # hard drop: dx, dy, alpha
+    haze: tuple = (30, 1.0)         # soft dark glow: blur px, alpha (halo measured 0.59/0.81/0.93 vs refs 0.55/0.82/0.94)
     ann_size: float = 0.30          # annotation size / line size
     palette: dict = field(default_factory=dict)
 

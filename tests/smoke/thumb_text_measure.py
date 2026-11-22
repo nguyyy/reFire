@@ -135,7 +135,31 @@ def measure_line(rgb, fill, dark, y0, y1):
             "shine_peak_at": round(float(np.argmax([c if c is not None else -1 for c in curve]) / 10 + 0.05), 2)}
 
 
-def measure(img: Image.Image, n: int, debug: Path | None = None) -> list[dict]:
+def block_and_halo(rgb: np.ndarray, fill: np.ndarray, dark: np.ndarray, offset=(0, 0)) -> dict:
+    """where the text block sits (letter fill bbox, frame px) and how dark the halo is just
+    outside it: mean luminance of bands 0-8, 8-16, ... px beyond the black outline/slab, to the
+    right of and above the block, as a fraction of the luminance 70-90 px out."""
+    import cv2
+    ys, xs = np.nonzero(fill)
+    x0, y0, x1, y1 = xs.min(), ys.min(), xs.max(), ys.max()
+    blk = (fill | dark).astype(np.uint8)
+    n, lab = cv2.connectedComponents(blk)
+    ids = [i for i in np.unique(lab[fill]) if i]
+    body = np.isin(lab, ids)
+    dist = cv2.distanceTransform((~body).astype(np.uint8), cv2.DIST_L2, 3)
+    lum = rgb.astype(np.float32).mean(-1)
+    side = np.zeros_like(fill)
+    side[max(0, y0 - 120):y1 + 1, x0:min(fill.shape[1], x1 + 130)] = True
+    far = lum[side & (dist > 70) & (dist <= 90)]
+    base = float(far.mean()) if far.size else 1.0
+    halo = []
+    for a in range(0, 64, 8):
+        m = side & (dist > a) & (dist <= a + 8)
+        halo.append(round(float(lum[m].mean()) / max(base, 1), 2) if m.any() else None)
+    return {"left": int(x0 + offset[0]), "bottom": int(y1 + offset[1]), "halo": halo}
+
+
+def measure(img: Image.Image, n: int, debug: Path | None = None, offset=(0, 0)) -> list[dict]:
     rgb = np.asarray(img.convert("RGB"))
     fill, dark = masks(rgb)
     if debug:
@@ -145,6 +169,7 @@ def measure(img: Image.Image, n: int, debug: Path | None = None) -> list[dict]:
             vis[a] = (0, 255, 0); vis[b] = (0, 255, 0)
         Image.fromarray(vis).save(debug)
     out = [measure_line(rgb, fill, dark, a, b) for a, b in bands(fill, n)]
+    out[0]["block"] = block_and_halo(rgb, fill, dark, offset)
     for i in range(1, len(out)):
         out[i]["gap_per_cap"] = round((out[i]["bottom"] - out[i - 1]["bottom"]) / out[i]["cap"], 3)
     return out
@@ -153,7 +178,7 @@ def measure(img: Image.Image, n: int, debug: Path | None = None) -> list[dict]:
 def ours(hook: dict) -> Image.Image:
     tmp = Path(tempfile.gettempdir()) / "refire_measure_hook.png"
     info = T.raster(hook, tmp)
-    canvas = Image.new("RGB", (1280, 720), "black")
+    canvas = Image.new("RGB", (1280, 720), (128, 128, 128))   # mid-gray, so the halo is measurable
     h = Image.open(tmp)
     canvas.paste(h, (round(info["x"]), round(info["y"])), h)
     return canvas
@@ -166,12 +191,16 @@ def main(argv) -> int:
             continue
         r = REGIONS[name]
         n = len(hook["lines"])
-        ref = measure(Image.open(REFS / name).crop(r), n, Path(tempfile.gettempdir()) / f"measure_{Path(name).stem}.png")
+        ref = measure(Image.open(REFS / name).crop(r), n, Path(tempfile.gettempdir()) / f"measure_{Path(name).stem}.png",
+                      offset=(r[0], r[1]))
         mine_full = ours(hook)
         # our block sits wherever the layout puts it: measure the bottom 300 px band it lives in
-        mine = measure(mine_full.crop((0, 380, 1280, 720)), n)
+        mine = measure(mine_full.crop((0, 380, 1280, 720)), n, offset=(0, 380))
         rows[name] = {"ref": ref, "ours": mine}
         print(f"\n== {name}")
+        rb, ob = ref[0]["block"], mine[0]["block"]
+        print(f"  block left {rb['left']}/{ob['left']}  bottom {rb['bottom']}/{ob['bottom']}  (frame px, ref/ours)")
+        print(f"  halo ref  {rb['halo']}\n  halo ours {ob['halo']}")
         for i, (a, b) in enumerate(zip(ref, mine)):
             print(f"  line {i}: cap {a['cap']:>4}/{b['cap']:<4} w/cap {a['w_per_cap']:>5}/{b['w_per_cap']:<5} "
                   f"gap/cap {a.get('gap_per_cap', '-')!s:>6}/{b.get('gap_per_cap', '-')!s:<6} "

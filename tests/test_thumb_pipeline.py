@@ -64,3 +64,14 @@ def test_gameplay_crops_avoid_the_stream_facecam():
     assert pipeline.gameplay((0, 0, 0.5, 1), left_cam)[0] == 0.26
     right_cam = (0.75, 0.6, 1.0, 1.0)
     assert pipeline.gameplay((0, 0, 1, 1), right_cam) == (0, 0, 0.74, 1)
+
+
+def test_made_graphics_html():
+    from refire.thumb import made
+    from pathlib import Path
+    fake = Path(__file__).parent / "golden" / "thumb" / "assets" / "face.png"
+    h = made.tierlist_html([{"label": "GOD TIER", "chars": ["A", "B"]}, {"label": "RUN AWAY", "color": "#7FFFFF",
+                            "chars": ["C"]}], icon_fn=lambda n: fake, hidden=[[0, 1]])
+    assert h.count("<img") == 3 and h.count('class="px"') == 1 and "#FF7F7F" in h and "RUN AWAY" in h
+    c = made.stat_card_html({"title": "Bloom", "rows": [["CRIT DMG", "+23.3%"], ["ATK", "+4.7%"]], "hidden": [0]})
+    assert "+23.3%" not in c and "+4.7%" in c and c.count('class="mz"') == 1 and "???" in c
