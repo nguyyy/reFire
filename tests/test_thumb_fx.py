@@ -35,3 +35,12 @@ def test_reveal_mosaics_the_card_and_adds_layers(tmp_path):
     assert spec["scene"]["cards"][0]["src"] == "assets/subject_px.png" and (a / "subject_px.png").exists()
     assert [L["kind"] for L in spec["layers"]] == ["bubble", "glyph"]
     json.dumps(spec)
+
+
+def test_fade_softens_only_the_asked_edges():
+    from refire.thumb import fx
+    im = fx.fade(Image.new("RGB", (200, 100), "white"), (0.0, 0.0, 0.0, 0.3))
+    a = np.asarray(im)[..., 3]
+    assert a[0, 0] == 255 and a[50, 199] == 255                 # left/top/right untouched
+    assert a[99, 100] < 10 and a[69, 100] == 255                # bottom 30% ramps to ~0
+    assert a[85, 100] < a[75, 100] < 255                        # smooth, monotone

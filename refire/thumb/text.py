@@ -42,6 +42,8 @@ class Style:
     """every knob of the hook look; spec.json `text` keys override these."""
     width_frac: float = 0.62        # widest line's stroked width / canvas width
     max_size_frac: float = 0.24     # font size cap / canvas height (refs: caps ~0.16 H)
+    cap_frac: float | None = None   # target cap height / canvas height (refs 0.125-0.163); the widest
+                                    # line still may not pass width_frac. None = fill width_frac
     margin: tuple = (12, 25)        # x, y px from the anchored corner (refs: letters ~27 px in, bottom ~688)
     tracking: float = -0.035        # em added between glyphs (negative = tighter)
     squeeze: float = 0.95           # width of every line (measured on ARTIFACTS & STALLING: 0.94-0.95)
@@ -137,6 +139,8 @@ def layout(lines: list, m, canvas: tuple[int, int], st: Style, anchor: str = "bo
     items = [(typeset(t, mm), sx, f, k) for (t, sx, f, k), mm in zip(items, mets)]
     unit = max((mm.width(t, k, st.tracking) * sx + st.stroke * k) for (t, sx, _, k), mm in zip(items, mets))
     size = min(st.max_size_frac * H / max(k for *_, k in items), st.width_frac * W / unit if unit else H)
+    if st.cap_frac:
+        size = min(size, st.cap_frac * H * mets[0].upm / mets[0].cap / max(k for *_, k in items))
     widths = [mm.width(t, size * k, st.tracking) * sx for (t, sx, _, k), mm in zip(items, mets)]
     block_w = max(w + st.stroke * size * k for w, (*_, k) in zip(widths, items))
     left = st.margin[0] if anchor.endswith("left") else W - st.margin[0] - block_w

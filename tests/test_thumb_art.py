@@ -122,3 +122,51 @@ def test_unknown_character_and_transient_retry(tmp_path, monkeypatch):
     with pytest.raises(art.ArtError, match="not a Genshin character"):
         art.splash("Elon Musk", f, cache=tmp_path)
     assert calls["n"] == 3                                          # two failures, then success
+
+
+def test_item_takes_the_wiki_lead_image(tmp_path):
+    api = ("https://genshin-impact.fandom.com/api.php?action=query&generator=search&gsrsearch=Primogem&gsrlimit=1"
+           "&gsrnamespace=0&prop=pageimages&piprop=original&format=json")
+    img = "https://static.wikia.nocookie.net/gensin-impact/images/primogem.png"
+    meta = {"query": {"pages": {"1": {"title": "Primogem", "original": {"source": img}}}}}
+    log = []
+    f = art.Fetcher(delay=0, opener=opener({api: (json.dumps(meta).encode(), "application/json"),
+                                           img: (png(300, 300), "image/png")}, log))
+    p = art.item("Primogem", f, cache=tmp_path)
+    assert p.exists() and json.loads(p.with_suffix(".json").read_text())["name"] == "Primogem"
+    tiny = {"query": {"pages": {"1": {"title": "X", "original": {"source": img}}}}}
+    f2 = art.Fetcher(delay=0, opener=opener({api.replace("Primogem", "X"): (json.dumps(tiny).encode(), "application/json"),
+                                            img: (png(64, 64), "image/png")}, []))
+    with pytest.raises(art.ArtError, match="too small"):
+        art.item("X", f2, cache=tmp_path)
+
+
+def test_figure_keeps_only_what_the_model_calls_foreground(tmp_path):
+    im = Image.new("RGBA", (400, 300), (200, 50, 50, 255))          # an opaque painted backdrop
+    im.save(tmp_path / "s.png")
+
+    def model(bgr):                                               # stand-in: a figure in the middle
+        a = np.zeros(bgr.shape[:2], np.uint8)
+        a[50:250, 150:250] = 255
+        return a
+    out = art.figure(tmp_path / "s.png", alpha_fn=model)
+    assert Image.open(out).size == (100, 200)                     # cropped to the figure
+    assert art.figure(tmp_path / "s.png", alpha_fn=None) == out    # cached: model not run again
+
+
+def test_figure_recrops_when_the_model_keeps_a_painted_medallion(tmp_path):
+    Image.new("RGBA", (1000, 500), (90, 40, 140, 255)).save(tmp_path / "m.png")
+    calls = []
+
+    def model(bgr):
+        calls.append(bgr.shape)
+        a = np.zeros(bgr.shape[:2], np.uint8)
+        if bgr.shape[1] == 1000:                 # full splash: one wide round object
+            a[50:450, 250:750] = 255
+        else:                                    # the crop around the figure: just the figure
+            a[60:480, bgr.shape[1] // 2 - 40:bgr.shape[1] // 2 + 40] = 255
+        return a
+    out = art.figure(tmp_path / "m.png", alpha_fn=model)
+    assert len(calls) == 2 and calls[1][1] == 300                  # re-run on a 30%-wide crop
+    w, h = Image.open(out).size
+    assert h > 2 * w                                                # figure-shaped, medallion gone

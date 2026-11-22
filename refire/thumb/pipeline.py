@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 
 TYPES = ("reaction", "subject", "reveal")
+LINE_MAX = 13         # hook characters per line, spaces included (refs: 6-13, ~10; nguy: "around 10")
 REGIONS = {"full": (0, 0, 1, 1), "left-half": (0, 0, 0.5, 1), "right-half": (0.5, 0, 1, 1),
            "center": (0.2, 0.08, 0.8, 0.92), "right-panel": (0.64, 0.06, 0.99, 0.94),
            "left-panel": (0.01, 0.06, 0.36, 0.94), "top-half": (0, 0, 1, 0.5), "bottom-half": (0, 0.5, 1, 1)}
@@ -28,11 +29,13 @@ three must be three different reasons to click, and each must be paid off by the
 outline beats that deliver it; a concept without payoff beats is rejected).
 
 House style (his thumbnails run 8-11% CTR, keep to it): a two-line ALL-CAPS hook, 2-4 words
-ideal, 5 max, no swearing; questions/teasers end in "?" or "..."; one accent phrase in one accent
-color ({PALETTE_THEMES}); a small lowercase annotation is optional, e.g. "(birthday)".
+ideal, 5 max, about 10 characters per line (12 at most, counting spaces and punctuation; his:
+"EASIEST / ABYSS?", "MORE / TIER LISTS", "STRONGBOX... / GONE RIGHT?"), no swearing;
+questions/teasers end in "?" or "..."; one accent phrase in one accent color ({PALETTE_THEMES});
+a small lowercase annotation is rare, only when it adds a fact, e.g. "(birthday)".
 zy0x's face is huge on the right (shock, deadpan, skeptical, hype, laughing). The left side holds
-the subject: a game UI moment from the stream (artifact card, tier list, wish screen) or a
-character's official splash art.
+ONE clear item that says what the video is about, big: whatever conveys it best, not only
+characters or artifacts (a weapon, a boss, a wish result, a tier list, an artifact card, ...).
 
 Concept types, use each exactly once:
 - reaction: the strongest asset is his face at a moment; subject small.
@@ -41,16 +44,19 @@ Concept types, use each exactly once:
   "???" bubble; the hook is a question.
 
 Pick face.t ONLY from the given moments (source seconds) and say the expression. The subject
-must be deliberate: either a game UI panel that was on screen (source "panel": t = source seconds
-when the panel (artifact card, tier list, wish result, character grid) is showing, region = where
-it sits: {", ".join(REGIONS)}), or official character art (source "art": query = one character
-name, or up to three comma-separated names for a team/collage), or a graphic you design
-(source "made": made = {{"kind": "tierlist", "rows": [{{"label": "GOD TIER", "color": "#FF7F7F",
-"chars": ["Furina", ...]}}, ...], "hidden": [[row, col]]}} with up to 4 rows x 5 Genshin characters, labels
-like the stream's own (GOD TIER / OKAY / RUN AWAY or T0 / T0.5 / T67); or {{"kind": "stat_card",
-"title": artifact name, "subtitle": slot, "main": [stat, value], "stars": 5, "level": "+20",
-"rows": [[stat, value], ...], "hidden": [row indexes]}} for an artifact). Design it from what was said
-on stream; prefer it when no clean panel was shown. Never chat, never a random shot.
+must be deliberate, one item: either a game UI panel that was on screen (source "panel": t = source
+seconds when the panel (artifact card, tier list, wish result, character grid) is showing, region =
+where it sits: {", ".join(REGIONS)}), or official art of ONE thing (source "art": query = one exact
+in-game name: a character, weapon, material, enemy or boss, e.g. "Skirk", "Primogem", "Lord of the
+Hidden Depths: Whisperer of Nightmares"), or a graphic you design (source "made": made =
+{{"kind": "tierlist", "rows": [{{"label": "GOD TIER", "color": "#FF7F7F", "chars": ["Furina", ...]}}, ...],
+"hidden": [[row, col]]}} with up to 4 rows x 5 Genshin characters, labels like the stream's own
+(GOD TIER / OKAY / RUN AWAY or T0 / T0.5 / T67); or {{"kind": "stat_card", "title": exact artifact
+piece name, "set": its artifact set, "subtitle": slot (Flower of Life / Plume of Death / Sands of Eon /
+Goblet of Eonothem / Circlet of Logos), "main": [stat, value], "stars": 5, "level": "+20",
+"rows": [[stat, value], ...] (4 substats), "hidden": [row indexes, the first rows: the lower ones sit
+behind the hook]}}: rendered one-to-one as the in-game artifact card with its icon). Design it from what was said on stream; prefer it when no
+clean panel was shown. Never chat, never a random shot.
 Title <= 60 characters, paired with the hook.
 
 Reply with ONLY JSON:
@@ -151,6 +157,9 @@ def validate(out, n_beats: int) -> list[str]:
         words = " ".join(c.hook.lines).split()
         if len(words) > 5:
             errs.append(f"hook too long ({len(words)} words): {c.hook.lines}")
+        long = [ln for ln in c.hook.lines if len(ln) > LINE_MAX]
+        if long:
+            errs.append(f"hook lines over {LINE_MAX} characters (aim for ~10): {long}")
         if any(b < 0 or b >= n_beats for b in c.payoff_beats):
             errs.append(f"payoff beat out of range: {c.payoff_beats}")
         if len(c.title) > 60:
@@ -271,6 +280,7 @@ def _accent(name: str, bg_rgb: np.ndarray) -> str:
     return name if dist(name) >= 60 else max(PALETTE, key=dist)
 
 
+CAP_FRAC = 0.152  # hook cap height / frame height: the refs' lines sit at 90-117 px caps (avg ~108)
 FOV = 50          # a wider lens than 30 so a tilted card actually reads as 3D (nguy: fix the focal length)
 SPEEDLINES = Path(__file__).with_name("assets") / "speedlines.png"
 
@@ -282,28 +292,114 @@ def _fit(p: Path, max_w: float, max_h: float) -> float:
     return round(min(max_w, max_h * w / h), 1)
 
 
-def cards_for(c, subject, kind: str) -> list[dict]:
-    """subject card(s) for a layout, swung toward zy0x (outer edge near, inner edge receding,
-    like the refs' tier list / wordle panels), sized from each image's aspect and set back
-    in depth so the near edge doesn't blow past the frame. `subject` = one png or a list
-    (art collage)."""
-    subs = subject if isinstance(subject, list) else ([subject] if subject else [])
-    if not subs:
-        return []
-    if kind == "art":
-        if len(subs) == 1:
-            w = _fit(subs[0], 560, 700)
-            return [{"src": f"assets/{subs[0].name}", "x": 40, "y": 0, "w": w, "z": -80, "rot": [0, 22, 0]}]
-        # collage: fanned, each a little deeper and more turned (the abyss ref's character spread)
-        return [{"src": f"assets/{p.name}", "x": 20 + i * 170, "y": 10 + i * 12, "w": _fit(p, 380, 560),
-                 "z": -60 - i * 60, "rot": [0, 18 + 6 * i, -3 + 3 * i]} for i, p in enumerate(subs)][::-1]
-    card = {"src": f"assets/{subs[0].name}", "shadow": 0.75, "glow": "#ffffff", "glow_alpha": 0.35}
-    if c.type == "subject":
-        return [{**card, "x": 70, "y": 40, "w": _fit(subs[0], 520, 420), "z": -70, "rot": [6, 26, -4]}]
-    return [{**card, "x": 70, "y": 50, "w": _fit(subs[0], 470, 380), "z": -70, "rot": [7, 30, -5]}]
+# the left element (nguy): one clear item, ~50% of the left half, centered at mid-height, its
+# edges blended into the scene. screen px; the card is set back in depth and swung toward zy0x.
+LEFT_CENTER = (300, 300)
+# per element: a tall card sits a bit higher so its top rows clear the hook; a wide tier list
+# higher still (his MORE TIER LISTS); a cutout figure lower (it can stand behind the hook)
+CENTERS = {"stat_card": (300, 285), "tierlist": (300, 255), "panel": (300, 275), "art": (300, 340)}
+# his strongbox card is drawn ~0.85 as tall as the game's proportions (header 235 px for a 513 px
+# wide card vs 283:492 in game): the free-transform squash every editor does, so the rows clear the hook
+SQUASH = {"stat_card": 0.86}
+LEFT_AREA = 0.6 * 640 * 720         # nguy "approx 50%"; his strongbox card measures ~59%
+LEFT_MAX = (600, 560)
+LEFT_RIGHT = 680          # the element's right edge stays left of this (zy0x starts ~ here)
+FADES = {"panel": (0.08, 0.08, 0.08, 0.14), "stat_card": (0.05, 0.02, 0.03, 0.18),
+         "tierlist": (0.05, 0.03, 0.04, 0.16), "art": (0.05, 0.03, 0.05, 0.18)}
 
 
-def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rgb, seed: int) -> dict:
+def screen_size(wh: tuple[int, int], area: float = LEFT_AREA, max_wh: tuple = LEFT_MAX) -> tuple[float, float]:
+    """on-screen (w, h) for an image of this size: `area` px at its own aspect, capped."""
+    a = wh[0] / wh[1]
+    sw, sh = (area * a) ** 0.5, (area / a) ** 0.5
+    k = min(1.0, max_wh[0] / sw, max_wh[1] / sh)
+    return sw * k, sh * k
+
+
+def project(card: dict, aspect: float, canvas=(1280, 720)) -> tuple[float, float, float, float]:
+    """screen bbox (x0, y0, x1, y1) of a scene.js card: plane w x w/aspect centered at
+    (x + w/2, -(y + h/2), z), rotated euler YXZ (three.js), pinhole camera on the frame center."""
+    import math
+    W, H = canvas
+    dist = (H / 2) / math.tan(math.radians(FOV / 2))
+    w = card["w"]
+    h = w / aspect
+    rx, ry, rz = (math.radians(v) for v in card.get("rot", [0, 0, 0]))
+    cx, cy, cz = card["x"] + w / 2, -(card["y"] + h / 2), card.get("z", 0)
+    pts = []
+    for px, py in ((-w / 2, h / 2), (w / 2, h / 2), (w / 2, -h / 2), (-w / 2, -h / 2)):
+        x, y = px * math.cos(rz) - py * math.sin(rz), px * math.sin(rz) + py * math.cos(rz)     # Rz
+        y, z = y * math.cos(rx), y * math.sin(rx)                                                # Rx
+        x, z = x * math.cos(ry) + z * math.sin(ry), -x * math.sin(ry) + z * math.cos(ry)         # Ry
+        X, Y, Z = cx + x, cy + y, cz + z
+        k = dist / (dist - Z)
+        pts.append((W / 2 + (X - W / 2) * k, H / 2 - (Y + H / 2) * k))
+    xs, ys = [q[0] for q in pts], [q[1] for q in pts]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def fit_card(src: str, aspect: float, box: tuple, z: float, rot: list, canvas=(1280, 720)) -> dict:
+    """a card whose projected bbox fills `box` (x0, y0, x1, y1 screen px) at its aspect:
+    scale to the box, then shift the center, a few rounds (perspective isn't linear)."""
+    import math
+    W, H = canvas
+    dist = (H / 2) / math.tan(math.radians(FOV / 2))
+    k = dist / (dist - z)
+    bw, bh = box[2] - box[0], box[3] - box[1]
+    card = {"src": src, "x": 0.0, "y": 0.0, "w": min(bw, bh * aspect) / k, "z": z, "rot": rot}
+    tx, ty = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+    card["x"] = W / 2 + (tx - W / 2) / k - card["w"] / 2
+    card["y"] = H / 2 + (ty - H / 2) / k - card["w"] / aspect / 2
+    for _ in range(6):
+        x0, y0, x1, y1 = project(card, aspect, canvas)
+        s_ = min(bw / (x1 - x0), bh / (y1 - y0))
+        cxw, cyw = card["x"] + card["w"] / 2, card["y"] + card["w"] / aspect / 2
+        card["w"] *= s_
+        cxw += (tx - (x0 + x1) / 2) / k
+        cyw += (ty - (y0 + y1) / 2) / k
+        card["x"], card["y"] = cxw - card["w"] / 2, cyw - card["w"] / aspect / 2
+    card.update(x=round(card["x"], 1), y=round(card["y"], 1), w=round(card["w"], 1))
+    return card
+
+
+def left_box(sw: float, sh: float, center=LEFT_CENTER, margin=(40, 30), canvas=(1280, 720)) -> tuple:
+    """the element's screen box: sw x sh around `center`, pushed inside the frame margins."""
+    cx = max(margin[0] + sw / 2, min(center[0], LEFT_RIGHT - sw / 2))      # in frame, off zy0x
+    cy = max(margin[1] + sh / 2, min(center[1], canvas[1] - margin[1] - sh / 2))
+    return cx - sw / 2, cy - sh / 2, cx + sw / 2, cy + sh / 2
+
+
+def cards_for(c, subject, kind: str, made_kind: str | None = None) -> tuple[list[dict], tuple]:
+    """the subject card for a layout + its screen box (x0, y0, x1, y1). one item only (nguy:
+    one clear theme). the png gets soft edges (FADES) written beside it as *_soft.png."""
+    from PIL import Image
+
+    from . import fx
+    p = subject[0] if isinstance(subject, list) else subject
+    if not p:
+        return [], None
+    fk = "art" if kind == "art" else (made_kind or "panel") if kind == "made" else "panel"
+    soft = p.with_name(p.stem + "_soft.png")
+    fx.fade(Image.open(p), FADES.get(fk, FADES["panel"])).save(soft)
+    w, h = Image.open(p).size
+    aspect = w / h / SQUASH.get(fk, 1.0)
+    if kind == "art":       # a cutout figure: taller, nearly flat on, may run behind the hook
+        sw, sh = screen_size((aspect, 1), area=640 * 720, max_wh=(560, 640))     # sized by height
+        box = left_box(sw, sh, CENTERS["art"], margin=(30, 20))
+        rot = [0, 8, 0]
+    else:
+        sw, sh = screen_size((aspect, 1))
+        box = left_box(sw, sh, CENTERS.get(fk, LEFT_CENTER))
+        rot = [3, 14 if c.type == "subject" else 16, -2]
+    card = fit_card(f"assets/{soft.name}", aspect, box, -70, rot)
+    if fk in SQUASH:
+        card["h"] = round(card["w"] / aspect, 1)
+    return [card], box
+
+
+def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rgb, seed: int,
+               made_kind: str | None = None, hides: bool = False) -> dict:
+    """subject_kind: art | made | panel. hides: a made graphic that already hides its own values."""
     from PIL import Image
 
     from . import compose
@@ -317,7 +413,7 @@ def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rg
     shutil.copy(SPEEDLINES, d / "assets" / "speedlines.png")
     f = compose.place_face(im.size, box, compose.head_top(arr), target=target)
     fx, fy, fw, fh = f["face"]
-    cards = cards_for(c, subject_png, subject_kind)
+    cards, sbox = cards_for(c, subject_png, subject_kind, made_kind)
     spec = {"version": 1, "layout": c.type, "canvas": [1280, 720], "background": {"vignette": 0.55},
             "layers": [{"kind": "face", "src": f"assets/{face_png.name}", "x": f["x"], "y": f["y"], "w": f["w"],
                         "glow": "#ffffff", "face_box": f["face"]}],
@@ -333,11 +429,11 @@ def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rg
                                 else {"strength": 0.5, "radius": 0.4, "threshold": 0.82})},
             "text": {"lines": [ln.upper() for ln in c.hook.lines], "accent_phrase": (c.hook.accent_phrase or "").upper() or None,
                      "accent": _accent(c.hook.accent_color, bg_rgb), "annotation": c.hook.annotation,
-                     "width_frac": 0.6, **({"skew": -10} if c.type == "reveal" else {})}}
+                     "cap_frac": CAP_FRAC, "width_frac": 0.74, **({"skew": -10} if c.type == "reveal" else {})}}
     if c.type == "reveal" and cards and subject_kind != "art":
         # a made graphic hides its own values; a stream panel gets the mosaic band
-        compose.reveal(spec, d, boxes=None if subject_kind == "made" else [(0.06, 0.30, 0.94, 0.62)],
-                       bubble_at=(cards[0]["x"] + 280, 18))
+        compose.reveal(spec, d, boxes=None if hides else [(0.06, 0.30, 0.94, 0.62)],
+                       bubble_at=(round(min(sbox[2] - 70, 560)), round(max(12, sbox[1] - 40))))
     return spec
 
 
@@ -437,19 +533,25 @@ def find_panel(cams, sid: int, t: float, cam_box, hint: str | None = None, windo
     return None if best is None else best[1]
 
 
-def art_cards(names: list[str], d: Path, log=print) -> list[Path]:
-    """official splash art for each name (a collage when several) -> cropped pngs in assets/."""
+def art_card(query: str, d: Path, log=print) -> Path | None:
+    """one official image for the left element -> the figure cut out of it, in assets/.
+    a character -> its wish splash; anything else (weapon, item, enemy, boss) -> its wiki image."""
+    import shutil
+
     from . import art
-    out = []
-    for i, n in enumerate(names[:3]):
-        try:
-            sp = art.splash(n)
-        except art.ArtError as e:
-            log(f"[thumb] art for {n!r} unavailable ({e})")
-            continue
-        p = art_crop(sp, d / "assets" / f"art{i}.png")
-        (d / "assets" / f"art{i}.art.json").write_text(sp.with_suffix(".json").read_text(encoding="utf-8"), encoding="utf-8")
-        out.append(p)
+    q = query.split(",")[0].strip()
+    if not q:
+        return None
+    try:
+        roster = art.characters(art.Fetcher())
+        src = art.splash(q) if art.resolve(q, roster) else art.item(q)
+        fig = art.figure(src)
+    except art.ArtError as e:
+        log(f"[thumb] art for {q!r} unavailable ({e})")
+        return None
+    out = d / "assets" / "art0.png"
+    shutil.copy(fig, out)
+    (d / "assets" / "art0.art.json").write_text(src.with_suffix(".json").read_text(encoding="utf-8"), encoding="utf-8")
     return out
 
 
@@ -497,10 +599,7 @@ def assemble(c, k: str, root: Path, cams, browser, variant: int, entities: list[
             log(f"[thumb] {k}: no UI panel near {c.subject.t:.0f}s; trying character art")
             kind = "art"
     if kind == "art":
-        names = [n.strip() for n in (c.subject.query or "").split(",") if n.strip()] or characters_in(entities)[:1]
-        sub = art_cards(names, d, log) or None
-        if sub and len(sub) == 1:
-            sub = sub[0]
+        sub = art_card(c.subject.query or next(iter(characters_in(entities)), ""), d, log)
     t_bg = c.subject.t if c.subject.t is not None and kind == "panel" else c.face.t
     made_hides = kind == "made" and bool((c.subject.made or {}).get("hidden"))
     bg = cams.frames(sid, [t_bg], width=0)[0]
@@ -508,8 +607,9 @@ def assemble(c, k: str, root: Path, cams, browser, variant: int, entities: list[
     bg = bg[:, int(gx0 * bg.shape[1]):int(gx1 * bg.shape[1])]
     cv2.imwrite(str(d / "assets" / "bg.jpg"), bg, [cv2.IMWRITE_JPEG_QUALITY, 90])
     bg_rgb = cv2.cvtColor(cv2.GaussianBlur(bg, (0, 0), 12), cv2.COLOR_BGR2RGB)
-    spec = build_spec(c, d, d / "assets" / "face.png", sub, "art" if kind == "art" else ("made" if made_hides else "panel"),
-                      bg_rgb, seed=variant * 10 + "ABC".index(k))
+    spec = build_spec(c, d, d / "assets" / "face.png", sub, kind if kind in ("art", "made") else "panel",
+                      bg_rgb, seed=variant * 10 + "ABC".index(k),
+                      made_kind=(c.subject.made or {}).get("kind") if kind == "made" else None, hides=made_hides)
     (d / "spec.json").write_text(json.dumps(spec, indent=1, ensure_ascii=False), encoding="utf-8")
     render.render(d / "spec.json", browser=browser)
     log(f"[thumb] {k} {c.type}: {' / '.join(c.hook.lines)}  (face q {info['q']}, subject {kind if sub else 'none'})")

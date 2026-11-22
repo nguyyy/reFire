@@ -28,6 +28,15 @@ def test_lines_share_a_size_and_center(m):
     assert b.width == pytest.approx(m.width("& STALLING...", b.size, st.tracking) * st.squeeze, abs=0.05)
 
 
+def test_cap_frac_sets_the_size_unless_the_line_is_too_wide(m):
+    st = T.Style(cap_frac=0.152, width_frac=0.74)
+    a, b = T.layout(["MORE", "TIER LISTS"], m, (1280, 720), st)
+    assert b.cap(m) == pytest.approx(0.152 * 720, abs=0.05)         # short lines: the refs' cap height
+    wide = T.layout(["GENSHIN OWED ME", "THIS PIECE"], m, (1280, 720), st)
+    assert wide[0].cap(m) < 0.152 * 720                              # a long line shrinks to fit width_frac
+    assert wide[0].width + st.stroke * wide[0].size == pytest.approx(0.74 * 1280, abs=0.05)
+
+
 def test_block_corner_margins_and_stacking(m):
     st = T.Style()
     a, b = T.layout(["EASIEST", "ABYSS?"], m, (1280, 720), st)

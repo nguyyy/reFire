@@ -76,3 +76,24 @@ def glyph(ch: str = "?", cell: int = 12, outline: int = 1) -> Image.Image:
     for x, y in on:
         d.point((x, y), fill="white")
     return g.resize((gw * cell, gh * cell), Image.NEAREST)
+
+
+def fade(img: Image.Image, edges: tuple[float, float, float, float]) -> Image.Image:
+    """soft alpha edges so an in-game asset blends into the scene instead of ending in a hard
+    border (nguy): edges = (left, top, right, bottom) ramp widths as fractions of the image's
+    width/height, smoothstep from 0 at the edge to 1. multiplies any alpha already there."""
+    import numpy as np
+    im = img.convert("RGBA")
+    W, H = im.size
+
+    def ramp(n, a, b):
+        t = np.arange(n, dtype=np.float32) + 0.5
+        lo = np.clip(t / max(a * n, 1e-6), 0, 1) if a > 0 else np.ones(n, np.float32)
+        hi = np.clip((n - t) / max(b * n, 1e-6), 0, 1) if b > 0 else np.ones(n, np.float32)
+        s = np.minimum(lo, hi)
+        return s * s * (3 - 2 * s)
+    left, top, right, bottom = edges
+    m = ramp(H, top, bottom)[:, None] * ramp(W, left, right)[None, :]
+    arr = np.asarray(im).copy()
+    arr[..., 3] = (arr[..., 3].astype(np.float32) * m).round().astype(np.uint8)
+    return Image.fromarray(arr)

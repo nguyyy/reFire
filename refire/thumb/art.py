@@ -176,3 +176,83 @@ def splash(name: str, f: Fetcher | None = None, cache: Path = CACHE, cutout_fn=N
         except ArtError as e:
             errors.append(f"{src}: {e}")
     raise ArtError(f"no official art for {canon}: " + "; ".join(errors))
+
+
+ITEM_MIN_EDGE = 256                 # item / weapon / enemy images on the wiki are icon-sized
+
+
+def item(query: str, f: Fetcher | None = None, cache: Path = CACHE, cutout_fn=None) -> Path:
+    """any other game thing by name (weapon, material, enemy, boss, location, ...): the lead
+    image of its Genshin wiki page (MediaWiki search -> pageimages original), cut out with
+    BiRefNet when it has no transparency -> cached PNG."""
+    f = f or Fetcher()
+    out = cache / f"{slug(query)}_item.png"
+    if out.exists():
+        return out
+    q = urllib.parse.urlencode({"action": "query", "generator": "search", "gsrsearch": query, "gsrlimit": 1,
+                                "gsrnamespace": 0, "prop": "pageimages", "piprop": "original", "format": "json"})
+    meta, _, _ = f.get(f"{FANDOM_API}?{q}", accept=("application/json",))
+    pages = (json.loads(meta).get("query") or {}).get("pages") or {}
+    page = next(iter(pages.values()), None)
+    if not page or not page.get("original"):
+        raise ArtError(f"no wiki image for {query!r}")
+    body, _, final = f.get(page["original"]["source"], accept=IMAGES)
+    from PIL import Image
+    im = Image.open(io.BytesIO(body))
+    im.load()
+    if max(im.size) < ITEM_MIN_EDGE:
+        raise ArtError(f"wiki image for {query!r} too small ({im.size})")
+    alpha = im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info)
+    cache.mkdir(parents=True, exist_ok=True)
+    if alpha:
+        im.convert("RGBA").save(out)
+    else:
+        import cv2
+        import numpy as np
+        from .cutout import cutout
+        img = cv2.cvtColor(np.asarray(im.convert("RGB")), cv2.COLOR_RGB2BGR)
+        cv2.imwrite(str(out), (cutout_fn or cutout)(img, inset_frac=0.0))
+    out.with_suffix(".json").write_text(json.dumps(
+        {"name": page.get("title"), "query": query, "source": "fandom", "url": final,
+         "fetched": date.today().isoformat(), "size": list(im.size), "had_alpha": alpha}, indent=1), encoding="utf-8")
+    return out
+
+
+def figure(png: Path, alpha_fn=None) -> Path:
+    """just the figure out of an official image: a wish splash carries its effects swirl and
+    painted backdrop on the alpha (the boxy crops), so BiRefNet picks the character and that
+    mask is multiplied into the image's own alpha. older splashes paint a whole medallion behind
+    the character, which the model keeps as one object (wide, not figure-shaped): then it runs
+    again on a crop around the figure, where the medallion is background. cached as *_fig.png."""
+    out = png.with_name(png.stem + "_fig.png")
+    if out.exists():
+        return out
+    import numpy as np
+    from PIL import Image
+
+    from .cutout import alpha as birefnet
+    model = alpha_fn or birefnet
+    im = Image.open(png).convert("RGBA")
+    a0 = np.asarray(im)[..., 3].astype(np.float32) / 255
+    rgb = np.asarray(im)[..., :3].astype(np.float32)
+    flat = (rgb * a0[..., None] + 128 * (1 - a0[..., None])).astype(np.uint8)       # over mid-gray
+    H, W = a0.shape
+    a = model(flat[..., ::-1].copy()).astype(np.float32) / 255                       # model takes bgr
+    ys, xs = np.nonzero(a > 0.5)
+    if len(xs) and (ys.max() - ys.min()) < FIGURE_ASPECT * (xs.max() - xs.min()) and W > H:
+        cols = (a > 0.5).sum(0).astype(float)
+        mid = cols[W // 3:2 * W // 3]
+        cx = W // 3 + int(np.average(np.arange(len(mid)), weights=mid + 1e-6))
+        half = int(0.3 * W / 2)
+        x0, x1 = max(0, cx - half), min(W, cx + half)
+        a = np.zeros_like(a)
+        a[:, x0:x1] = model(flat[:, x0:x1, ::-1].copy()).astype(np.float32) / 255
+    keep = np.clip(a0 * a, 0, 1)
+    arr = np.asarray(im).copy()
+    arr[..., 3] = (keep * 255).round().astype(np.uint8)
+    res = Image.fromarray(arr)
+    res.crop(res.getchannel("A").point(lambda v: 255 if v > 24 else 0).getbbox() or (0, 0, *res.size)).save(out)
+    return out
+
+
+FIGURE_ASPECT = 1.25        # a standing figure's mask is taller than wide by at least this
