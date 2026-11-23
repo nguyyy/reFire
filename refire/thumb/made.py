@@ -94,6 +94,9 @@ CARD = {"w": 492, "head": 283, "pad": 29.5, "body_bg": "#EBE3D8",
         "text": "#4D5057", "unact": "#99978F", "green": "#5EBE53", "bonus": "#737371", "ring": "#B8B2AA"}
 
 
+# a result card's header in the game's rarity colors (5 gold, 4 purple, 3 blue, 2 green) + red: a hue
+# turn of the gold header (nguy: not every card the same artifact gold)
+THEMES = {"gold": 0, "purple": 235, "blue": 190, "green": 75, "red": -32}
 CARD_MAX_H = 560     # thumbnails show the header through the substats + set name, fading out (his strongbox card)
 
 
@@ -215,7 +218,11 @@ def stat_card_svg(c: dict, piece: dict | None = None, height: float | None = Non
     title = (piece or {}).get("piece") or c.get("title", "")          # the real piece name when known
     fit = (W - 2 * x0) / 1.06                    # metrics run ~5% under the drawn width
     ts = min(K["title"][0], fit * 1000 / max(1.0, m.width(title, 1000, 0)))
-    out = [f'<image href="{_data_uri(ASSETS / "artifact_head_5.png")}" x="0" y="0" width="{W}" height="{K["head"]}"/>']
+    turn = THEMES.get(c.get("theme") or "gold", 0)
+    tint = f'<filter id="theme"><feColorMatrix type="hueRotate" values="{turn}"/></filter>' if turn else ""
+    use = ' filter="url(#theme)"' if turn else ""
+    out = [f'{tint}<image href="{_data_uri(ASSETS / "artifact_head_5.png")}" x="0" y="0" width="{W}" '
+           f'height="{K["head"]}"{use}/>']
     ix, iy, isz = K["icon"]
     if piece and piece.get("icon"):
         out.append(f'<image href="{_data_uri(Path(piece["icon"]))}" x="{ix}" y="{iy}" width="{isz}" height="{isz}"/>')

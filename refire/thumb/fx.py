@@ -6,7 +6,11 @@ it's deterministic: mosaic = nearest-neighbor down/up at block ~= target width /
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from PIL import Image, ImageDraw
+
+PIXEL_FONT = Path(__file__).with_name("assets") / "Silkscreen-Regular.ttf"     # OFL, for quote bubbles
 
 # 5x7 bitmap glyphs, enough for teaser bubbles
 GLYPHS = {
@@ -42,11 +46,28 @@ def _grid_text(draw: ImageDraw.ImageDraw, text: str, x: int, y: int, color) -> N
                     draw.point((x + i * 6 + c, y + r), fill=color)
 
 
+def _text_bitmap(text: str) -> Image.Image:
+    """1-bit text: the 5x7 glyphs for ?!. teasers, the pixel font for words (a quote bubble)."""
+    if set(text) <= set(GLYPHS):
+        g = Image.new("1", (len(text) * 6 - 1, 7), 0)
+        _grid_text(ImageDraw.Draw(g), text, 0, 0, 1)
+        return g
+    from PIL import ImageFont
+    f = ImageFont.truetype(str(PIXEL_FONT), 8)
+    x0, y0, x1, y1 = f.getbbox(text)
+    g = Image.new("1", (x1 - x0, y1 - y0), 0)
+    d = ImageDraw.Draw(g)
+    d.fontmode = "1"
+    d.text((-x0, -y0), text, font=f, fill=1)
+    return g
+
+
 def bubble(text: str = "???", cell: int = 9, tail: str = "left") -> Image.Image:
     """pixel-art speech bubble: white body, 1-cell black outline, stepped corners, a tail.
-    grid rows: 0 outline, 1 pad, 2-8 glyphs, 9 pad, 10 outline, 11-13 tail."""
-    n = len(text)
-    bw, bh = n * 6 + 5, 11
+    grid rows: 0 outline, 1 pad, 2.. glyphs, pad, outline, 3 rows of tail."""
+    t = _text_bitmap(text)
+    pad = 1 if set(text) <= set(GLYPHS) else 3          # words breathe more (his quote bubbles)
+    bw, bh = t.width + 4 + 2 * pad, t.height + 2 + 2 * pad
     g = Image.new("RGBA", (bw, bh + 3), (0, 0, 0, 0))
     d = ImageDraw.Draw(g)
     d.rectangle([1, 0, bw - 2, bh - 1], fill="black")           # outline with stepped corners
@@ -58,8 +79,30 @@ def bubble(text: str = "???", cell: int = 9, tail: str = "left") -> Image.Image:
         d.rectangle([tx, bh - 1 + k, tx + 3 - k, bh - 1 + k], fill="black")
         if k < 2:
             d.rectangle([tx + 1, bh - 1 + k, tx + 2 - k, bh - 1 + k], fill="white")
-    _grid_text(d, text, 3, 2, "black")
+    d.bitmap((2 + pad, 1 + pad), t, fill="black")
     return g.resize((bw * cell, (bh + 3) * cell), Image.NEAREST)
+
+
+def anger(size: int = 110) -> Image.Image:
+    """the anime anger mark as nguy draws it (his stygian refs, over zy0x's head): three thick red
+    strokes (up-left, up-right, below), each bowed toward the middle, thin black outline."""
+    import math
+
+    from PIL import ImageFilter
+    S = 400
+    red = Image.new("L", (S, S), 0)
+    d = ImageDraw.Draw(red)
+    R, w = 0.3 * S, int(0.13 * S)
+    # each stroke's circle center: direction + distance from the middle (measured on his mark)
+    for th, D in ((222, 0.47 * S), (318, 0.47 * S), (90, 0.4 * S)):
+        cx, cy = S / 2 + D * math.cos(math.radians(th)), S / 2 + D * math.sin(math.radians(th))
+        a = th + 180
+        d.arc([cx - R, cy - R, cx + R, cy + R], a - 58, a + 58, fill=255, width=w)
+    line = red.filter(ImageFilter.MaxFilter(13))        # the outline: the strokes grown ~6 px
+    g = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    g.paste((0, 0, 0, 255), mask=line)
+    g.paste((214, 32, 38, 255), mask=red)
+    return g.resize((size, size), Image.LANCZOS)
 
 
 def glyph(ch: str = "?", cell: int = 12, outline: int = 1) -> Image.Image:

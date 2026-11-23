@@ -53,6 +53,24 @@ def test_left_element_fills_the_left_and_middle():
     assert x0 <= 20 and x1 >= 800                                           # left edge into the middle
 
 
+def test_a_characters_face_lands_in_the_middle_of_the_top_left_quarter(tmp_path, monkeypatch):
+    from PIL import Image
+    Image.new("RGBA", (400, 800), (200, 100, 50, 255)).save(tmp_path / "art0.png")
+    monkeypatch.setattr(pipeline, "art_face", lambda im: (0.5, 0.2))
+    c = concepts().concepts[0]
+    cards, box = pipeline.cards_for(c, tmp_path / "art0.png", "art")
+    assert cards[0]["face"] == list(pipeline.ART_FACE)
+
+
+def test_quotes_stay_short_and_cards_differ():
+    out = concepts()
+    out.concepts[0].quote = "THIS IS WAY TOO LONG FOR A BUBBLE"
+    for k in (1, 2):
+        out.concepts[k].subject.source, out.concepts[k].subject.made = "made", {"kind": "result"}
+    errs = pipeline.validate(out, 5)
+    assert any("quote over" in e for e in errs) and any("same kind of card" in e for e in errs)
+
+
 def test_bottom_shade_sits_under_the_hook_only():
     from refire.thumb import render
     html = render._layers([{"kind": "face", "src": "f.png"}, {"kind": "hook", "src": "h.png"}],

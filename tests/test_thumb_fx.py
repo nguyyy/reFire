@@ -26,6 +26,15 @@ def test_bubble_and_glyph_are_crisp_pixel_art():
     assert g.shape == (16 * 4, 12 * 4, 4) and (g[..., 3] == 255).sum() > 0
 
 
+def test_quote_bubble_uses_the_pixel_font_and_the_anger_mark_is_red():
+    q = np.asarray(fx.bubble("I CAN'T BEAT THIS SH*T", cell=1, tail="right"))
+    assert q.shape[1] > 100 and {tuple(v) for v in q.reshape(-1, 4)} <= {(0, 0, 0, 0), (0, 0, 0, 255),
+                                                                          (255, 255, 255, 255)}
+    a = np.asarray(fx.anger(120))
+    red = (a[..., 0] > 180) & (a[..., 1] < 80) & (a[..., 3] > 200)
+    assert red.sum() > 500 and not red[55:65, 55:65].any()                          # strokes, empty middle
+
+
 def test_reveal_mosaics_the_card_and_adds_layers(tmp_path):
     a = tmp_path / "assets"
     a.mkdir()

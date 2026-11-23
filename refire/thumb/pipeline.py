@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 
 TYPES = ("reaction", "subject", "reveal")
+QUOTE_MAX = 26        # characters in a quote bubble (his: "I CAN'T BEAT THIS SH*T", 22)
 LINE_MAX = 13         # hook characters per line, spaces included (refs: 6-13, ~10; nguy: "around 10")
 PALETTE_THEMES = "gold: artifacts/rewards; sky: Cryo/Snezhnaya; green or mint: easy/right/wins; cyan: people/reviews; blue: series/lists"
 
@@ -87,8 +88,19 @@ behind the hook]}}: rendered one-to-one as the in-game artifact card with its ic
 Setekh"), "subtitle": the mode ("Spiral Abyss", "Stygian Onslaught", "Exploration Progress"), "main":
 [label, value] (the headline number: ["Time Elapsed", "117s"]), "stars": 0-3 (abyss stars, else 0),
 "icon": one exact in-game name pictured in the header (the character he played or the boss), "rows":
-up to 4 [label, value] facts you read off the screen, "hidden": ["main" and/or row indexes]}}: the same
-in-game card look. Never chat, never a stream screen, never a random shot.
+up to 4 [label, value] facts you read off the screen, "hidden": ["main" and/or row indexes], "theme":
+the header color: gold (rewards), purple (Stygian Onslaught), blue (Spiral Abyss), green (exploration),
+red (danger)}}: the in-game card look. Never chat, never a stream screen, never a random shot.
+
+Be creative with the left side: his newest thumbnails mix pieces, not always a card. Use them where
+they sell the video (each optional):
+- quote: a short line he actually SAID (from the moments or beat text), ALL CAPS, <= {QUOTE_MAX}
+  characters, swears censored with * ("I CAN'T BEAT THIS SH*T"): a pixel speech bubble at the top,
+  pointing at him. His own words when they are the funniest or most honest line; not on every concept.
+- face.emote: "anger" puts the red anger mark over his head (tilted, betrayed, raging moments), else null.
+- a reveal whose left element is character art gets big pixel ??? marks beside the character (his
+  NUTTY SKIRK PULLS): use it when the question is who or what (the pull, the carry).
+The three left elements must look different: never two cards of the same kind.
 Title <= 60 characters, paired with the hook.
 
 Reply with ONLY JSON:
@@ -101,7 +113,8 @@ Reply with ONLY JSON:
   "bet": "the one-line reason to click",
   "hook": {{"lines": ["LINE ONE", "LINE TWO"], "accent_phrase": "...", "accent_color": "gold|sky|green|mint|blue|cyan",
             "annotation": null}},
-  "face": {{"t": 0, "expression": "shock|deadpan|skeptical|hype|laughing"}},
+  "face": {{"t": 0, "expression": "shock|deadpan|skeptical|hype|laughing", "emote": null}},
+  "quote": null,
   "subject": {{"source": "art|made", "query": null,
                "alt_query": "a second exact name showing the same thing, used if the first has no art",
                "made": null}},
@@ -163,6 +176,7 @@ def _models():
     class Face(BaseModel):
         t: float
         expression: str = "shock"
+        emote: str | None = None
 
     class Subject(BaseModel):
         source: str = "art"
@@ -177,6 +191,7 @@ def _models():
         hook: Hook
         face: Face
         subject: Subject
+        quote: str | None = None
         title: str = ""
         payoff_beats: list[int]
 
@@ -215,6 +230,11 @@ def validate(out, n_beats: int) -> list[str]:
             errs.append(f"title over 60 chars: {c.title}")
         if c.subject.source not in ("art", "made"):
             errs.append(f"subject source {c.subject.source!r}: only art or made (never a stream screen)")
+        if c.quote and len(c.quote) > QUOTE_MAX:
+            errs.append(f"quote over {QUOTE_MAX} characters: {c.quote}")
+    made = [(c.subject.made or {}).get("kind", "tierlist") for c in out.concepts if c.subject.source == "made"]
+    if len(made) != len(set(made)):
+        errs.append(f"two left elements are the same kind of card ({made}): make the three look different")
     return errs
 
 
@@ -385,6 +405,7 @@ ART_COVER = 0.32                # a figure's VISIBLE opaque pixels / frame (his 
 ART_AT = (-30, 10)              # a figure hangs from the top-left, a little off the left edge (his bleed off
 ART_MAX_W = 1100                # the edges) and may run on behind zy0x and off the bottom
 ART_MAX_H = 920                 # the figure's upper half (its face) stays above the hook (~y 470)
+ART_FACE = (320, 180)           # nguy: a character's face centered in the top-left quarter of the frame
 LEFT_CENTER = (390, 310)
 # per element: a tall card a bit higher so its top rows clear the hook; a cutout figure lower (it
 # stands behind the hook and may run off the bottom)
@@ -502,7 +523,11 @@ def cards_for(c, subject, kind: str, made_kind: str | None = None) -> tuple[list
         # sized by what the figure covers, not its box: a cutout is mostly transparent
         # a team stays in the left part so its middle (the hook's character) isn't behind zy0x's head
         sw, sh = art_size(np.asarray(im.getchannel("A")) > 128, LEFT_RIGHT + 30 if aspect > 1.4 else ART_MAX_W)
-        box = (ART_AT[0], ART_AT[1], ART_AT[0] + sw, ART_AT[1] + sh)
+        x0, y0 = ART_AT
+        face = art_face(im) if aspect <= 1.4 else None      # a team keeps its spread from the left edge
+        if face:                                             # the face on ART_FACE, the figure around it
+            x0, y0 = ART_FACE[0] - face[0] * sw, max(-0.5 * sh, min(80.0, ART_FACE[1] - face[1] * sh))
+        box = (x0, y0, x0 + sw, y0 + sh)
         rot = [0, 8, 0]
     else:
         if fk == "tierlist":    # his tier lists run on behind zy0x (only ~4 icons per row show)
@@ -515,7 +540,26 @@ def cards_for(c, subject, kind: str, made_kind: str | None = None) -> tuple[list
     card = fit_card(f"assets/{soft.name}", aspect, box, -70, rot)
     if fk in SQUASH:
         card["h"] = round(card["w"] / aspect, 1)
+    if kind == "art" and face:                           # screen px, for the critic's measurements
+        card["face"] = [round(box[0] + face[0] * sw), round(box[1] + face[1] * sh)]
     return [card], box
+
+
+def art_face(im, score: float = 0.3) -> tuple[float, float] | None:
+    """the character's face center (0-1 of the figure) in official art: yunet finds anime faces at
+    a low threshold (checked on 7 splash arts); the largest, surest one wins."""
+    import cv2
+
+    from ..facecam import YuNet
+    a = np.asarray(im.convert("RGBA"))
+    bgr = cv2.cvtColor(a[:, :, :3], cv2.COLOR_RGB2BGR)
+    bgr[a[:, :, 3] < 128] = 0
+    k = 640 / max(bgr.shape[:2])
+    faces = YuNet(score=score)(cv2.resize(bgr, (round(bgr.shape[1] * k), round(bgr.shape[0] * k))))
+    if not faces:
+        return None
+    x, y, w, h, _ = max(faces, key=lambda f: f[2] * f[3] * f[4])
+    return float(x + w / 2), float(y + h / 2)
 
 
 def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rgb, seed: int,
@@ -525,6 +569,7 @@ def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rg
     from PIL import Image
 
     from . import compose
+    from . import fx as pfx
     from . import text as T
     im = Image.open(face_png)
     arr = np.asarray(im.convert("RGBA"))[:, :, [2, 1, 0, 3]]
@@ -559,7 +604,25 @@ def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rg
     if c.type == "reveal" and cards and subject_kind != "art" and not (hides and made_kind in ("stat_card", "result")):
         # a made graphic hides its own values; one that doesn't gets the mosaic band
         compose.reveal(spec, d, boxes=None if hides else [(0.06, 0.30, 0.94, 0.62)],
-                       bubble_at=(round(min(sbox[2] - 70, 560)), round(max(12, sbox[1] - 40))))
+                       bubble_at=None if c.quote else (round(min(sbox[2] - 70, 560)), round(max(12, sbox[1] - 40))))
+    if c.type == "reveal" and subject_kind == "art":     # his NUTTY SKIRK PULLS: big pixel ??? by the character,
+        x0 = fx - 40 - 3 * 108                           # ending short of zy0x's face
+        compose.reveal(spec, d, glyphs=[("?", round(x0 + 108 * i), 170, 8) for i in range(3)])
+    if c.face.emote == "anger":                          # his stygian refs: the anger mark over his head
+        g = pfx.anger(round(0.62 * fw))
+        g.save(d / "assets" / "emote.png")
+        # on the hair at his left temple (his: over the head's top-left; ours fills 90%, so the head top is
+        # at the frame edge and a mark above it would be cut)
+        spec["layers"].append({"kind": "emote", "src": "assets/emote.png", "x": round(fx - 0.42 * fw),
+                               "y": round(max(6, fy - 0.42 * fh)), "w": g.width})
+    if c.quote:                                          # his words in a pixel speech bubble, pointing at him
+        q = c.quote.upper()[:QUOTE_MAX]
+        cell = max(3, min(6, 500 // pfx.bubble(q, cell=1).width))
+        b = pfx.bubble(q, cell=cell, tail="right")
+        b.save(d / "assets" / "quote.png")
+        right = min(1264, fx + 0.8 * fw)                 # over his head, clear of a card's title
+        spec["layers"].append({"kind": "quote", "src": "assets/quote.png", "x": round(max(16, right - b.width)),
+                               "y": 10, "w": b.width})
     return spec
 
 
@@ -609,7 +672,9 @@ def frame_sheets(cams, times: list[tuple[int, float]], root: Path, sid: int = 0)
 
 
 STREAM_BG = {"blur": 12, "brightness": 0.6, "saturate": 1.15}      # the stream frame: pushed back hard
-BACKDROP = {"blur": 4, "brightness": 0.85, "saturate": 1.1}          # a real game screenshot stays readable
+# nguy: slightly blurred, a little darkened. measured on his EASIEST ABYSS? (the same Spiral Abyss
+# screenshot): edges ~5 px soft on screen, sky ~15% darker and ~10% less saturated than ours at 0.85 / 1.1
+BACKDROP = {"blur": 7, "brightness": 0.72, "saturate": 1.0}
 
 
 def backdrop(names: str | None, log=print):

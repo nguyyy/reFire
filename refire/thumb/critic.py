@@ -23,8 +23,10 @@ MOVE = {"dx": 200.0, "dy": 200.0, "scale": (0.8, 1.35)}     # bounds on what one
 MISTAKES = [
     ("left element small: its solid part covers well under a quarter of the frame (his: 24-42%)",
      "left.scale 1.1-1.3"),
-    ("left element sits in the middle, empty space between it and the left edge (his hug the left and "
-     "top edges)", "left.dx negative"),
+    ("a card sits in the middle, empty space between it and the left edge (his cards hug the left edge)",
+     "left.dx negative"),
+    ("a character's face is not centered in the top-left quarter of the frame (aim: face center x ~320, "
+     "y ~180; measured below)", "left.dx / left.dy toward it"),
     ("left element too high: its top or a card's title cut off by the frame", "left.dy positive"),
     ("left element too low: a character's face or a card's key rows behind the hook text", "left.dy negative"),
     ("zy0x small: the top of his head well below ~12% of the height (his 80-90 rule: he fills 88-93%)",
@@ -105,6 +107,10 @@ def move_left(spec: dict, d: Path, m: dict) -> None:
     k = k / (k - c.get("z", 0))
     ih, iw = _img_hw(d / c["src"])
     h = c.get("h") or c["w"] * ih / iw
+    if c.get("face"):                             # screen px: moves with the card, scales about its center
+        sx, sy = W / 2 + (c["x"] + c["w"] / 2 - W / 2) * k, H / 2 + (c["y"] + h / 2 - H / 2) * k
+        c["face"] = [round(sx + m["dx"] + (c["face"][0] - sx) * m["scale"]),
+                     round(sy + m["dy"] + (c["face"][1] - sy) * m["scale"])]
     cx, cy = c["x"] + c["w"] / 2 + m["dx"] / k, c["y"] + h / 2 + m["dy"] / k
     c["w"] *= m["scale"]
     if "h" in c:
@@ -128,6 +134,10 @@ def move_face(spec: dict, d: Path, m: dict) -> None:
     if bottom < H:                                # never show the crop's cut edge
         m = {**m, "dy": m["dy"] + H - bottom}
         y += H - bottom
+    for E in spec.get("layers", []):              # his anger mark and quote bubble follow his face
+        if E.get("kind") in ("emote", "quote"):
+            E["x"] = round(E["x"] + m["dx"] + (E["x"] - fcx) * (s - 1) * (E["kind"] == "emote"), 1)
+            E["y"] = round(max(6, E["y"] + m["dy"]), 1) if E["kind"] == "emote" else E["y"]
     L.update(x=round(x, 1), y=round(y, 1), w=round(w, 1))
     L["face_box"] = [round(fcx - (fcx - fb[0]) * s + m["dx"], 1), round(fcy - (fcy - fb[1]) * s + m["dy"], 1),
                      round(fb[2] * s, 1), round(fb[3] * s, 1)]
@@ -157,6 +167,8 @@ def measure(d: Path, spec: dict) -> str:
         if len(xs):
             out.append(f"left element covers {100 * frame.mean():.0f}% of the frame, solid part x {xs.min()}-{xs.max()}, "
                        f"y {ys.min()}-{ys.max()}")
+        if c.get("face"):
+            out.append(f"the character's face center x {c['face'][0]}, y {c['face'][1]} (aim 320, 180)")
     L = next((L for L in spec.get("layers", []) if L.get("kind") == "face"), None)
     if L and L.get("face_box"):
         im = cv2.imread(str(d / L["src"]), cv2.IMREAD_UNCHANGED)
