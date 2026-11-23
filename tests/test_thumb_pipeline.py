@@ -41,11 +41,22 @@ def test_hook_lines_stay_short():
     assert any("characters" in e for e in errs)
 
 
-def test_left_element_is_half_the_left_side_and_centered():
+def test_left_element_fills_the_left_and_middle():
     for wh in ((1000, 640), (492, 690), (300, 900)):
         sw, sh = pipeline.screen_size(wh)
         assert sw <= pipeline.LEFT_MAX[0] + 1e-6 and sh <= pipeline.LEFT_MAX[1] + 1e-6
-        assert sw * sh >= 0.4 * 640 * 720 or sh >= pipeline.LEFT_MAX[1] - 1e-6       # big unless height-capped
+        assert abs(sw - pipeline.LEFT_MAX[0]) < 1e-6 or abs(sh - pipeline.LEFT_MAX[1]) < 1e-6   # as big as fits
+    x0, y0, x1, y1 = pipeline.left_box(*pipeline.screen_size((1000, 640)), pipeline.LEFT_CENTER, margin=(12, 10))
+    assert x0 <= 20 and x1 >= 800                                           # left edge into the middle
+
+
+def test_bottom_shade_sits_under_the_hook_only():
+    from refire.thumb import render
+    html = render._layers([{"kind": "face", "src": "f.png"}, {"kind": "hook", "src": "h.png"}],
+                          {"height": 0.2, "alpha": 0.3}, 720)
+    assert html.index('class="shade"') > html.index("f.png") and html.index('class="shade"') < html.index("h.png")
+    assert "rgba(0,0,0,0.3000) 100%" in html and "height: 144.0px" in html
+    assert 'class="shade"' not in render._layers([{"kind": "hook", "src": "h.png"}], None, 720)
 
 
 def test_snap_moves_times_into_the_cut():

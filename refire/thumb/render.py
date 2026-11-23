@@ -91,7 +91,21 @@ def html(spec: dict, layers: list | None = None, dpr: int = 1) -> str:
     return Template((TEMPLATES / "stage.html").read_text(encoding="utf-8")).substitute(
         house_css=(TEMPLATES / "house.css").read_text(encoding="utf-8"), w=W, h=H,
         background=world + _vignette(bg.get("vignette", 0.55)),
-        layers="\n".join(_layer(L) for L in (spec.get("layers", []) if layers is None else layers)))
+        layers=_layers(spec.get("layers", []) if layers is None else layers, spec.get("shade"), H))
+
+
+def _layers(layers: list, shade: dict | None, H: int) -> str:
+    """the flat layers in order, a bottom shade (if any) slipped in under the hook text."""
+    out = [_layer(L) for L in layers]
+    if shade:
+        a, h = shade.get("alpha", 0.3), shade.get("height", 0.2) * H
+        # eased in (alpha ~ t^2): no visible start line, darkest at the frame's edge
+        stops = ", ".join(f"rgba(0,0,0,{a * t * t:.4f}) {t * 100:.0f}%" for t in (0, 0.25, 0.5, 0.75, 1))
+        div = (f'<div class="shade" style="position: absolute; left: 0; right: 0; bottom: 0; height: {h:.1f}px; '
+               f'background: linear-gradient(to bottom, {stops})"></div>')
+        i = next((k for k, L in enumerate(layers) if L.get("kind") == "hook"), len(out))
+        out.insert(i, div)
+    return "\n".join(out)
 
 
 def bake_plate(src: Path, out: Path, blur: float = 12, brightness: float = 0.62, saturate: float = 1.15) -> Path:

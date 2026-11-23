@@ -345,6 +345,9 @@ def _accent(name: str, bg_rgb: np.ndarray) -> str:
 # average ~99 px (abyss 106, more tier lists 103, strongbox 94, skirk 80), lines ~730 px wide
 # (widest 870). cap_frac sets the near end; the 3D plane (text.PLANE) shrinks the far end
 CAP_FRAC, WIDTH_FRAC = 0.142, 0.68
+# a slight black gradient up from the bottom edge, over zy0x and the scene, under the hook (his more
+# tier lists: the shirt ~6% darker at 88-94% height, ~18% in the last strip; nguy: "slight")
+SHADE = {"height": 0.2, "alpha": 0.3}
 FOV = 50          # a wider lens than 30 so a tilted card actually reads as 3D (nguy: fix the focal length)
 SPEEDLINES = Path(__file__).with_name("assets") / "speedlines.png"
 
@@ -361,17 +364,20 @@ def _fit(p: Path, max_w: float, max_h: float) -> float:
 FIG_TALL, FIG_KEEP = 1.2, 0.6   # a figure taller than 1.2x its width keeps its top 60%
 FIG_THIN = 0.25                 # rows under 25% of the widest row's coverage above the body = effects
 TEAM_STEP = 0.5                 # each team figure starts this far into the previous one's width
-ART_FILL = 0.5                  # a figure's opaque pixels cover ~half the left half (nguy: ~50%)
-LEFT_CENTER = (300, 300)
-# per element: a tall card sits a bit higher so its top rows clear the hook; a wide tier list
-# higher still (his MORE TIER LISTS); a cutout figure lower (it can stand behind the hook)
-CENTERS = {"stat_card": (300, 285), "tierlist": (310, 270), "panel": (300, 275), "art": (300, 340)}
+# nguy: the left element fills the left AND the middle so little background shows; the hook may
+# cover part of it. his run from the left edge into the middle and behind zy0x (more tier lists to
+# x ~770, the best tier list past 1000), from the top down behind the hook
+ART_FILL = 0.8                  # a figure's opaque pixels cover ~80% of the left half
+LEFT_CENTER = (390, 310)
+# per element: a tall card a bit higher so its top rows clear the hook; a cutout figure lower (it
+# stands behind the hook and may run off the bottom)
+CENTERS = {"stat_card": (390, 305), "tierlist": (420, 300), "panel": (420, 300), "art": (380, 380)}
 # his strongbox card is drawn ~0.85 as tall as the game's proportions (header 235 px for a 513 px
 # wide card vs 283:492 in game): the free-transform squash every editor does, so the rows clear the hook
 SQUASH = {"stat_card": 0.86}
-LEFT_AREA = 0.6 * 640 * 720         # nguy "approx 50%"; his strongbox card measures ~59%
-LEFT_MAX = (620, 560)
-LEFT_RIGHT = 680          # the element's right edge stays left of this (zy0x starts ~ here)
+LEFT_MAX = (840, 620)
+LEFT_AREA = LEFT_MAX[0] * LEFT_MAX[1]   # = as big as fits: the cap decides
+LEFT_RIGHT = 860          # right edge limit: runs behind zy0x's near side like his tier lists
 FADES = {"panel": (0.08, 0.08, 0.08, 0.14), "stat_card": (0.05, 0.02, 0.03, 0.18),
          "tierlist": (0.05, 0.03, 0.04, 0.16), "art": (0.05, 0.03, 0.05, 0.18)}
 
@@ -459,16 +465,16 @@ def cards_for(c, subject, kind: str, made_kind: str | None = None) -> tuple[list
         # sized by what the figure covers, not its box: a cutout is mostly transparent
         cov = max(0.25, float((np.asarray(im.getchannel("A")) > 128).mean()))
         wide = aspect > 1.4             # a team / an action pose: may run on behind zy0x like his tier lists
-        sw, sh = screen_size((aspect, 1), area=ART_FILL * 640 * 720 / cov, max_wh=(820 if wide else 660, 680))
-        box = left_box(sw, sh, CENTERS["art"], margin=(20, 20), right=LEFT_RIGHT + (140 if wide else 0))
+        sw, sh = screen_size((aspect, 1), area=ART_FILL * 640 * 720 / cov, max_wh=(LEFT_RIGHT, 720))
+        box = left_box(sw, sh, CENTERS["art"], margin=(10, 0), right=LEFT_RIGHT + (60 if wide else 0))
         rot = [0, 8, 0]
     else:
         if fk == "tierlist":    # his tier lists run on behind zy0x (only ~4 icons per row show)
-            sw, sh = screen_size((aspect, 1), area=0.75 * 640 * 720, max_wh=(700, 560))
-            box = left_box(sw, sh, CENTERS[fk], right=LEFT_RIGHT + 60)
+            sw, sh = screen_size((aspect, 1))
+            box = left_box(sw, sh, CENTERS[fk], margin=(12, 10), right=LEFT_RIGHT + 60)
         else:
             sw, sh = screen_size((aspect, 1))
-            box = left_box(sw, sh, CENTERS.get(fk, LEFT_CENTER))
+            box = left_box(sw, sh, CENTERS.get(fk, LEFT_CENTER), margin=(12, 10))
         rot = [3, 14 if c.type == "subject" else 16, -2]
     card = fit_card(f"assets/{soft.name}", aspect, box, -70, rot)
     if fk in SQUASH:
@@ -495,6 +501,7 @@ def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rg
     fx, fy, fw, fh = f["face"]
     cards, sbox = cards_for(c, subject_png, subject_kind, made_kind)
     spec = {"version": 1, "layout": c.type, "canvas": [1280, 720], "background": {"vignette": 0.55},
+            "shade": SHADE,
             "layers": [{"kind": "face", "src": f"assets/{face_png.name}", "x": f["x"], "y": f["y"], "w": f["w"],
                         "glow": "#ffffff", "face_box": f["face"]}],
             "scene": {"seed": seed, "fov": FOV, "bg": {"raw": "assets/bg.jpg", "blur": 12, "brightness": 0.6,
