@@ -57,9 +57,8 @@ class Style:
     shine_edge: float = 0.06        # accent: edges this much darker than the palette's base
     white: tuple = (0.60, 0.90)     # metallic white: edge, peak lightness (refs 0.53-0.73 / 0.88-0.91)
     skew: float = 0.0               # deg, negative leans right (italic look)
-    keystone: float = 1.0           # far-end height / anchored-end height: the anchored bottom corner is
-                                    # nearest the camera (fitted on the refs: 0.84-0.91, median ~0.9)
-    lean: float = 1.0               # top edge width / bottom edge width: the block leans back (refs 0.95-0.98)
+    plane: tuple | None = None      # the block in 3D: its TL, TR, BR corners for a block PLANE_ASPECT wide x 1
+                                    # tall with the anchored bottom corner at 0,0 (fitted on the refs; None = flat)
     shadow: tuple = (7, 9, 0.85)    # hard drop: dx, dy, alpha
     haze: tuple = (30, 1.0)         # soft dark glow: blur px, alpha (halo measured 0.59/0.81/0.93 vs refs 0.55/0.82/0.94)
     ann_size: float = 0.30          # annotation size / line size
@@ -294,25 +293,23 @@ def page(hook: dict, canvas: tuple[int, int], font: Path | None = None) -> str:
     faces = [_face(fam, font_path(f)) for f, fam in families(lines).items()]
     if hook.get("annotation") and font_path("coolvetica").exists():
         faces.append(_face("AnnFont", font_path("coolvetica")))
-    if st.keystone != 1.0 or st.lean != 1.0:
-        css = keystone_css(lines, st.keystone, hook.get("anchor", "bottom-left"), st.lean)
+    if st.plane:
+        css = plane_css(lines, st.plane, hook.get("anchor", "bottom-left"))
         body = f'<div style="transform-origin: 0 0; transform: {css}">{body}</div>'
     return PAGE.format(faces="\n".join(faces), svg=body)
 
 
-def keystone(lines: list[Line], k: float, anchor: str = "bottom-left", lean: float = 1.0):
-    """3x3 homography, the whole hook as one plane in 3D with its anchored bottom corner nearest:
-    the far end's height times k about the block's center line, the top edge times `lean`
-    (centered: the block leans back), the anchored bottom corner and the bottom edge untouched."""
+PLANE_ASPECT = 3.0
+# nguy's hooks in 3D (free 4-corner fits on his thumbnails, normalized to the block): the anchored
+# bottom corner nearest; the upright strokes converge up and to the right, toward the camera at the
+# frame center (the top-left corner sits 0.12 to the right: what reads as italics is perspective,
+# more tier lists 0.137); far end ~0.86 tall; top edge ~0.96 of the bottom (leans back); the
+# baseline rises a little to the right (median 0.037)
+PLANE = ((0.12, -1.0), (3.0, -0.9), (3.0, -0.04))
+
+
+def _homog(src, dst):
     import numpy as np
-    m0 = metrics(str(font_path(lines[0].font)))
-    x0, x1 = min(ln.x for ln in lines), max(ln.x + ln.width for ln in lines)
-    yt, yb = lines[0].baseline - lines[0].cap(m0), lines[-1].baseline
-    yc, h = (yt + yb) / 2, (yb - yt) / 2
-    near_l, near_r = (1.0, k) if anchor.endswith("left") else (k, 1.0)
-    inset = (1 - lean) * (x1 - x0) / 2
-    src = [(x0, yt), (x1, yt), (x1, yb), (x0, yb)]
-    dst = [(x0 + inset, yc - h * near_l), (x1 - inset, yc - h * near_r), (x1, yc + h * near_r), (x0, yc + h * near_l)]
     A, b = [], []
     for (x, y), (u, v) in zip(src, dst):
         A += [[x, y, 1, 0, 0, 0, -u * x, -u * y], [0, 0, 0, x, y, 1, -v * x, -v * y]]
@@ -320,9 +317,32 @@ def keystone(lines: list[Line], k: float, anchor: str = "bottom-left", lean: flo
     return np.append(np.linalg.solve(np.array(A, float), np.array(b, float)), 1.0).reshape(3, 3)
 
 
-def keystone_css(lines: list[Line], k: float, anchor: str = "bottom-left", lean: float = 1.0) -> str:
+def plane(lines: list[Line], quad=PLANE, anchor: str = "bottom-left"):
+    """3x3 homography putting the whole hook on one plane in 3D: `quad` is where a reference block
+    (PLANE_ASPECT x 1, anchored bottom corner at 0,0, units of the block's height) lands; the same
+    projective map, applied to this block, keeps the anchored corner and scales with the height, so
+    a longer block gets more perspective at its far end, like a real plane would."""
+    import numpy as np
+    m0 = metrics(str(font_path(lines[0].font)))
+    x0, x1 = min(ln.x for ln in lines), max(ln.x + ln.width for ln in lines)
+    yt, yb = lines[0].baseline - lines[0].cap(m0), lines[-1].baseline
+    h = yb - yt
+    n = _homog([(0, -1), (PLANE_ASPECT, -1), (PLANE_ASPECT, 0), (0, 0)], [quad[0], quad[1], quad[2], (0, 0)])
+    left = anchor.endswith("left")
+    ax = x0 if left else x1
+    sgn = 1 if left else -1                          # right-anchored: the mirror image
+    src, dst = [], []
+    for x, y in ((x0, yt), (x1, yt), (x1, yb), (x0, yb)):
+        u, v = sgn * (x - ax) / h, (y - yb) / h
+        p, q, w = n @ np.array([u, v, 1.0])
+        src.append((x, y))
+        dst.append((ax + sgn * p / w * h, yb + q / w * h))
+    return _homog(src, dst)
+
+
+def plane_css(lines: list[Line], quad=PLANE, anchor: str = "bottom-left") -> str:
     """the homography as css matrix3d (column-major, z passed through), origin at the page's 0,0."""
-    H = keystone(lines, k, anchor, lean)
+    H = plane(lines, quad, anchor)
     cols = [(H[0, 0], H[1, 0], 0, H[2, 0]), (H[0, 1], H[1, 1], 0, H[2, 1]), (0, 0, 1, 0), (H[0, 2], H[1, 2], 0, H[2, 2])]
     return "matrix3d(" + ", ".join(f"{v:.9g}" for c in cols for v in c) + ")"
 

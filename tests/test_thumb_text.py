@@ -112,24 +112,23 @@ def test_shine_ramps_from_dark_edges_to_a_light_middle():
         assert max(L) - (L[0] + L[-1]) / 2 > 0.25                                           # a real shine
 
 
-def test_hook_plane_keeps_its_anchored_corner_shrinks_the_far_end_and_leans_back(m):
+def test_hook_plane_is_the_fitted_quad_and_keeps_the_anchored_corner(m):
     import numpy as np
     lines = T.layout(["MORE", "TIER LISTS"], m, (1280, 720), T.Style())
     x0, x1 = min(ln.x for ln in lines), max(ln.x + ln.width for ln in lines)
     yt, yb = lines[0].baseline - lines[0].cap(m), lines[-1].baseline
+    h = yb - yt
 
     def at(H, x, y):
         u, v, w = H @ np.array([x, y, 1.0])
-        return u / w, v / w
-    for anchor, near, far in (("bottom-left", x0, x1), ("bottom-right", x1, x0)):
-        H = T.keystone(lines, 1.2, anchor)
-        for y in (yt, yb):
-            assert np.allclose(at(H, near, y), (near, y))                  # anchored edge untouched
-        (fx, ft), (_, fb) = at(H, far, yt), at(H, far, yb)
-        assert abs(fx - far) < 1e-6 and abs((fb - ft) - 1.2 * (yb - yt)) < 1e-6   # width kept, far end x1.2
-    H = T.keystone(lines, 0.9, "bottom-left", lean=0.95)                       # leans back: top edge narrower
-    (tlx, _), (trx, _) = at(H, x0, yt), at(H, x1, yt)
-    assert abs((trx - tlx) - 0.95 * (x1 - x0)) < 1e-6 and np.allclose(at(H, x0, yb), (x0, yb))
-    assert "matrix3d(" in T.page({"lines": ["MORE", "TIER LISTS"], "keystone": 0.88}, (1280, 720))
-    assert "matrix3d(" in T.page({"lines": ["MORE", "TIER LISTS"], "lean": 0.95}, (1280, 720))
+        return np.array([u / w, v / w])
+    H = T.plane(lines)
+    assert np.allclose(at(H, x0, yb), (x0, yb))                               # anchored corner stays
+    tl = (at(H, x0, yt) - (x0, yb)) / h
+    assert np.allclose(tl, T.PLANE[0], atol=1e-6)                             # left edge as fitted (any width)
+    br, tr = at(H, x1, yb), at(H, x1, yt)
+    assert np.linalg.norm(tr - br) < 0.95 * h and br[1] < yb                  # far end shorter, baseline rises
+    Hr = T.plane(lines, anchor="bottom-right")                                # right-anchored: mirrored
+    assert np.allclose(at(Hr, x1, yb), (x1, yb)) and at(Hr, x1, yt)[0] < x1
+    assert "matrix3d(" in T.page({"lines": ["MORE", "TIER LISTS"], "plane": T.PLANE}, (1280, 720))
     assert "matrix3d(" not in T.page({"lines": ["MORE", "TIER LISTS"]}, (1280, 720))

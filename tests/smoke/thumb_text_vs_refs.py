@@ -39,10 +39,9 @@ HOOKS = {
 }
 
 
-# the pipeline's fitted hook plane (refire.thumb.pipeline KEYSTONE, LEAN) on every ref's words
+# the pipeline's fitted hook plane (refire.thumb.text.PLANE) on every ref's words
 for _h in HOOKS.values():
-    _h.setdefault("keystone", 0.9)
-    _h.setdefault("lean", 0.95)
+    _h.setdefault("plane", T.PLANE)
 
 
 def main(argv) -> int:

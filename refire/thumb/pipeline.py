@@ -329,11 +329,10 @@ def _accent(name: str, bg_rgb: np.ndarray) -> str:
     return name if dist(name) >= 60 else max(PALETTE, key=dist)
 
 
-# hook geometry fitted on the refs (4-corner homography per ref, then measured on the letters):
-# the anchored bottom corner is nearest, far end ~0.9x as tall, top edge ~0.95x the bottom (leans
-# back); letters average ~99 px (abyss 106, more tier lists 103, strongbox 94, skirk 80), lines
-# ~730 px wide (widest 870). cap_frac sets the near end, so the line averages ~0.95x of it
-CAP_FRAC, WIDTH_FRAC, KEYSTONE, LEAN = 0.142, 0.68, 0.9, 0.95
+# hook size fitted on the refs (4-corner homography per ref, measured on the letters): letters
+# average ~99 px (abyss 106, more tier lists 103, strongbox 94, skirk 80), lines ~730 px wide
+# (widest 870). cap_frac sets the near end; the 3D plane (text.PLANE) shrinks the far end
+CAP_FRAC, WIDTH_FRAC = 0.142, 0.68
 FOV = 50          # a wider lens than 30 so a tilted card actually reads as 3D (nguy: fix the focal length)
 SPEEDLINES = Path(__file__).with_name("assets") / "speedlines.png"
 
@@ -470,6 +469,7 @@ def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rg
     from PIL import Image
 
     from . import compose
+    from . import text as T
     im = Image.open(face_png)
     arr = np.asarray(im.convert("RGBA"))[:, :, [2, 1, 0, 3]]
     box = compose.face_box(arr)
@@ -496,7 +496,7 @@ def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rg
                                 else {"strength": 0.5, "radius": 0.4, "threshold": 0.82})},
             "text": {"lines": [ln.upper() for ln in c.hook.lines], "accent_phrase": (c.hook.accent_phrase or "").upper() or None,
                      "accent": _accent(c.hook.accent_color, bg_rgb), "annotation": c.hook.annotation,
-                     "cap_frac": CAP_FRAC, "width_frac": WIDTH_FRAC, "keystone": KEYSTONE, "lean": LEAN,
+                     "cap_frac": CAP_FRAC, "width_frac": WIDTH_FRAC, "plane": T.PLANE,
                      **({"skew": -10} if c.type == "reveal" else {})}}
     if c.type == "reveal" and cards and subject_kind != "art":
         # a made graphic hides its own values; a stream panel gets the mosaic band
