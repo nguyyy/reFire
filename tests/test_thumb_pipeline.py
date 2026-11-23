@@ -190,3 +190,14 @@ def test_team_puts_the_middle_figure_in_front_and_larger():
     assert px[g.height - 5, cx, 1] == 255                     # green (middle) drawn over its neighbours
     assert px[g.height - 5, 5, 0] == 255 and px[g.height - 5, g.width - 5, 2] == 255
     assert px[2, 5, 3] == 0                                   # the smaller side figures stand lower
+
+
+def test_text_boxes_find_a_reveals_giveaways():
+    img = np.zeros((100, 200, 3), np.uint8)
+
+    def ocr(im):                                              # rapidocr's shape: [[pts, text, score]], elapse
+        return [[[[20, 10], [120, 10], [120, 30], [20, 30]], "Challenge Completed", 0.99],
+                [[[20, 60], [80, 60], [80, 70], [20, 70]], "Leave for Now", 0.98]], 0.1
+    got = pipeline.text_boxes(img, ["challenge completed"], ocr)
+    assert len(got) == 1 and abs(got[0][0] - (0.1 - 0.012)) < 1e-9 and got[0][3] < 0.35
+    assert pipeline.text_boxes(img, ["143,229"], ocr) == [] and pipeline.text_boxes(img, None, ocr) == []

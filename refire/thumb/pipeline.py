@@ -62,8 +62,9 @@ Stygian Onslaught, Imaginarium Theater) the team he cleared with is the stronges
 an art query of up to 3 names, comma separated, becomes one group (his EASIEST ABYSS? shows the
 team's art). It must read at phone size: bright, colorful official art or a designed card beats a
 dark or text-only screen; use a stream screen only when it is bright and readable in a glance.
-A reveal on a stream screen gives subject.hide = [x0, y0, x1, y1], 0-1 of the picture in that
-tile, covering exactly what is hidden. An artifact you saw is ALWAYS a
+A reveal on a stream screen lists in subject.hide_text every piece of on-screen text that gives
+the answer away ("Challenge Completed" answers "did he clear it?"; a damage number; a name); each
+is found and mosaicked. Nothing left visible may answer the hook. An artifact you saw is ALWAYS a
 designed stat_card with the exact name, set, main stat and substats you read off the frame (a
 cropped stream card looks worse); a panel is only for screens that can't be designed (a wish
 result, a clear-time screen, an exploration %, a ranking). Names are spelled as in the game
@@ -98,7 +99,7 @@ Reply with ONLY JSON:
   "face": {{"t": 0, "expression": "shock|deadpan|skeptical|hype|laughing"}},
   "subject": {{"source": "panel|art|made", "t": 0, "region": "right-panel", "query": null,
                "alt_query": "a second exact name showing the same thing, used if the first has no art",
-               "hide": null, "made": null}},
+               "hide_text": null, "made": null}},
   "title": "...", "payoff_beats": [0]}}]}}"""
 
 
@@ -165,6 +166,7 @@ def _models():
         query: str | None = None
         alt_query: str | None = None
         hide: list[float] | None = None
+        hide_text: list[str] | None = None
         made: dict | None = None
 
     class Concept(BaseModel):
@@ -254,6 +256,9 @@ def direct(ctx: dict, previous_hooks: list[str], variant: int, backend: str = "c
 
 # --------------------------------------------------------------------------- frames
 
+EDGE = 0.04          # a face box this close to the cam's side or top edge is cut off by the cam frame
+
+
 def best_face(cams, sid: int, t: float, expression: str, window: float = 1.5, fps: float = 6.0):
     """score facecam frames around t (spec q = .35 sharp + .35 expression + .15 size + .15 open);
     -> (crop BGR, info). expression proxy: mouth-open darkness from yunet's mouth corners.
@@ -284,9 +289,14 @@ def best_face(cams, sid: int, t: float, expression: str, window: float = 1.5, fp
         dark = 1.0 - float(mouth.mean()) / max(1.0, float(face.mean())) if mouth.size and face.size else 0.0
         motion = float(np.abs(cv2.absdiff(crop, prev)).mean()) if prev is not None and prev.shape == crop.shape else 0.0
         prev = crop
-        cand.append({"crop": crop, "sharp": sharp, "size": fh, "conf": float(r[14]), "mouth": dark, "motion": motion})
+        ch, cw = crop.shape[:2]
+        # leaning out of the cam: the cutout gets a flat sliced edge (and drags the wall along)
+        clipped = fx < EDGE * cw or fx + fw > (1 - EDGE) * cw or fy < EDGE * ch
+        cand.append({"crop": crop, "sharp": sharp, "size": fh, "conf": float(r[14]), "mouth": dark, "motion": motion,
+                     "clipped": clipped})
     if not cand:
         raise ValueError(f"no face in the facecam around {t:.1f}s")
+    cand = [c for c in cand if not c["clipped"]] or cand
     cut = np.percentile([c["motion"] for c in cand], 80) if len(cand) > 4 else float("inf")
     keep = [c for c in cand if c["motion"] <= cut] or cand
 
@@ -464,7 +474,7 @@ def cards_for(c, subject, kind: str, made_kind: str | None = None) -> tuple[list
 
 
 def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rgb, seed: int,
-               made_kind: str | None = None, hides: bool = False, hide_box=None) -> dict:
+               made_kind: str | None = None, hides: bool = False, hide_boxes=None) -> dict:
     """subject_kind: art | made | panel. hides: a made graphic that already hides its own values."""
     from PIL import Image
 
@@ -499,7 +509,7 @@ def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rg
                      "cap_frac": CAP_FRAC, "width_frac": WIDTH_FRAC, "plane": T.PLANE}}   # no skew: the slant is the 3D plane
     if c.type == "reveal" and cards and subject_kind != "art":
         # a made graphic hides its own values; a stream panel gets the mosaic band
-        compose.reveal(spec, d, boxes=None if hides else [hide_box or (0.06, 0.30, 0.94, 0.62)],
+        compose.reveal(spec, d, boxes=None if hides else (hide_boxes or [(0.06, 0.30, 0.94, 0.62)]),
                        bubble_at=(round(min(sbox[2] - 70, 560)), round(max(12, sbox[1] - 40))))
     return spec
 
@@ -547,6 +557,25 @@ def frame_sheets(cams, times: list[tuple[int, float]], root: Path, sid: int = 0)
         cv2.imwrite(str(Path(root) / names[-1]), sheet, [cv2.IMWRITE_JPEG_QUALITY, 85])
     (Path(root) / "frames.json").write_text(json.dumps(seen), encoding="utf-8")   # what the director saw
     return names
+
+
+def text_boxes(img, phrases: list[str], ocr=None, pad: float = 0.012) -> list[tuple]:
+    """0-1 boxes of the on-screen text lines that match any phrase: a reveal's giveaways, found by
+    reading the screen (the director's guessed coordinates off a 480 px tile missed)."""
+    from difflib import SequenceMatcher
+    want = [p.lower().strip() for p in phrases or [] if p and p.strip()]
+    if not want:
+        return []
+    res = (ocr or _ocr())(img)[0] or []
+    h, w = img.shape[:2]
+    out = []
+    for pts, txt, _ in res:
+        t = txt.lower().strip()
+        if any(p in t or (len(t) > 3 and t in p) or SequenceMatcher(None, p, t).ratio() >= 0.7 for p in want):
+            xs, ys = [q[0] for q in pts], [q[1] for q in pts]
+            out.append((max(0.0, min(xs) / w - pad), max(0.0, min(ys) / h - pad),
+                        min(1.0, max(xs) / w + pad), min(1.0, max(ys) / h + pad)))
+    return out
 
 
 def seen_screen(cams, sid: int, t: float, cam_box, region: str, root: Path, slack: float = 3.0):
@@ -775,12 +804,17 @@ def assemble(c, k: str, root: Path, cams, browser, variant: int, brief: dict, oc
             kind = "art"
     if kind in ("video", "panel") and c.subject.t is not None:
         # a reveal that says where its answer sits takes the whole screen it saw, so the box lands
-        hide = c.subject.hide if c.type == "reveal" and c.subject.hide and len(c.subject.hide) == 4 else None
-        panel = None if hide else find_panel(cams, sid, c.subject.t, cam_box, c.subject.region, ocr=ocr)
+        box = c.subject.hide if c.type == "reveal" and c.subject.hide and len(c.subject.hide) == 4 else None
+        words = c.subject.hide_text if c.type == "reveal" else None
+        whole = bool(box or words)
+        panel = None if whole else find_panel(cams, sid, c.subject.t, cam_box, c.subject.region, ocr=ocr)
         if panel is None:                                # a whole screen (clear time, party setup) it saw
-            panel = seen_screen(cams, sid, c.subject.t, cam_box, "full" if hide else c.subject.region, root)
-        if panel is None:
-            hide = None
+            panel = seen_screen(cams, sid, c.subject.t, cam_box, "full" if whole else c.subject.region, root)
+        if panel is not None and whole:
+            hide = (text_boxes(panel, words, ocr) if words else []) or ([box] if box else None)
+            if words and not hide:
+                (d / "assets" / "off_plan.txt").write_text(f"reveal: none of {words} found on screen",
+                                                           encoding="utf-8")
         if panel is not None:
             sub, kind = d / "assets" / "subject.png", "panel"
             cv2.imwrite(str(sub), panel)
@@ -806,7 +840,7 @@ def assemble(c, k: str, root: Path, cams, browser, variant: int, brief: dict, oc
     spec = build_spec(c, d, d / "assets" / "face.png", sub, kind if kind in ("art", "made") else "panel",
                       bg_rgb, seed=variant * 10 + "ABC".index(k),
                       made_kind=(c.subject.made or {}).get("kind") if kind == "made" else None, hides=made_hides,
-                      hide_box=hide if kind == "panel" else None)
+                      hide_boxes=hide if kind == "panel" else None)
     (d / "spec.json").write_text(json.dumps(spec, indent=1, ensure_ascii=False), encoding="utf-8")
     render.render(d / "spec.json", browser=browser)
     log(f"[thumb] {k} {c.type}: {' / '.join(c.hook.lines)}  (face q {info['q']}, subject {kind if sub else 'none'})")
