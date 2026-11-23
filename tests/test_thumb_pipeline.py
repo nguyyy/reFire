@@ -201,3 +201,14 @@ def test_text_boxes_find_a_reveals_giveaways():
     got = pipeline.text_boxes(img, ["challenge completed"], ocr)
     assert len(got) == 1 and abs(got[0][0] - (0.1 - 0.012)) < 1e-9 and got[0][3] < 0.35
     assert pipeline.text_boxes(img, ["143,229"], ocr) == [] and pipeline.text_boxes(img, None, ocr) == []
+
+
+def test_head_to_thigh_skips_thin_effects_above_the_head():
+    from PIL import Image
+    a = np.zeros((1000, 400), np.uint8)
+    a[0:200, 190:210] = 255                                   # a thin ribbon above the head
+    a[200:1000, 100:300] = 255                                # the body
+    im = Image.fromarray(np.dstack([a, a, a, a]), "RGBA")
+    out = np.asarray(pipeline.head_to_thigh(im).getchannel("A"))
+    assert (out[0] > 0).sum() > 150                           # starts at the body, not the ribbon
+    assert out.shape[0] <= round(800 * 0.6) + 1

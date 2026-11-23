@@ -45,7 +45,9 @@ character he built or pulled, the boss he fought, the artifact that dropped), ne
 only mentioned in passing. The three concepts may show it differently (official art / a designed
 in-game card / the stream's own panel) but all sell this video. What makes a fan click: novelty
 (a new character, boss, area), value (5-star, max roll, #1, C6, 100%), stakes or mystery (hidden
-behind the mosaic). The hook and the left element work as a pair: the hook asks about or names
+behind the mosaic). Show what is chased or named (the stream title's "C6 VALERIY" -> Valeriy),
+not the banner or menu around it. The three left elements must look different from each other
+(never two of the same screen or map). The hook and the left element work as a pair: the hook asks about or names
 what the left shows, never repeats it word for word. Write each concept's plan before its fields.
 
 Concept types, use each exactly once:
@@ -357,6 +359,7 @@ def _fit(p: Path, max_w: float, max_h: float) -> float:
 # the left element (nguy): one clear item, ~50% of the left half, centered at mid-height, its
 # edges blended into the scene. screen px; the card is set back in depth and swung toward zy0x.
 FIG_TALL, FIG_KEEP = 1.2, 0.6   # a figure taller than 1.2x its width keeps its top 60%
+FIG_THIN = 0.25                 # rows under 25% of the widest row's coverage above the body = effects
 TEAM_STEP = 0.5                 # each team figure starts this far into the previous one's width
 ART_FILL = 0.5                  # a figure's opaque pixels cover ~half the left half (nguy: ~50%)
 LEFT_CENTER = (300, 300)
@@ -713,9 +716,12 @@ def _figure(q: str, log=print):
 
 
 def head_to_thigh(im):
-    """a full-body figure reads tiny: keep its top FIG_KEEP (his arlecchino, skirk)."""
+    """a full-body figure reads tiny: keep its top FIG_KEEP (his arlecchino, skirk), counted from
+    where the body starts: thin effect rows above the head (a ribbon, a swoosh) are dropped first."""
     if im.height > FIG_TALL * im.width:
-        im = im.crop((0, 0, im.width, round(im.height * FIG_KEEP)))
+        rows = (np.asarray(im.getchannel("A")) > 128).mean(axis=1)
+        top = int(np.argmax(rows >= FIG_THIN * rows.max()))
+        im = im.crop((0, top, im.width, top + round((im.height - top) * FIG_KEEP)))
         im = im.crop(im.getchannel("A").point(lambda v: 255 if v > 24 else 0).getbbox() or (0, 0, *im.size))
     return im
 
