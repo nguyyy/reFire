@@ -264,6 +264,7 @@ def main(argv: list[str] | None = None) -> None:
     th.add_argument("--runs", type=int, default=1, help="full runs side by side in thumb/v1.. (each bets differently)")
     th.add_argument("--claude-model", default="claude-opus-5")
     th.add_argument("--director-backend", choices=["cli", "api"], default="cli")
+    th.add_argument("--no-critic", action="store_true", help="skip the cheap vision pass over placement")
 
     sr = sub.add_parser("srt", help="manifest.json -> captions.srt (the Premiere path)")
     sr.add_argument("manifest", help="path to a run's ae/manifest.json")
@@ -481,7 +482,8 @@ def main(argv: list[str] | None = None) -> None:
             done = [int(d.name[1:]) for d in (Path(a[0]) / "thumb").glob("v*") if d.name[1:].isdigit()]
             first = max(done, default=0) + 1
             for k in range(first, first + args.runs):
-                rep = pipeline.run(a[0], k, hooks, backend=args.director_backend, model=args.claude_model)
+                rep = pipeline.run(a[0], k, hooks, backend=args.director_backend, model=args.claude_model,
+                                   critic=not args.no_critic)
                 cj = json.loads((rep.parent / "concepts.json").read_text(encoding="utf-8"))
                 hooks += [" / ".join(c["hook"]["lines"]) for c in cj["concepts"]]
                 print(f"Report: {rep.resolve()}")

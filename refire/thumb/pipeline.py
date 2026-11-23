@@ -881,7 +881,8 @@ def assemble(c, k: str, root: Path, cams, browser, variant: int, brief: dict, oc
     log(f"[thumb] {k} {c.type}: {' / '.join(c.hook.lines)}  (face q {info['q']}, subject {kind if sub else 'none'})")
 
 
-def _render_all(run_dir: Path, root: Path, concepts: list, variant: int, brief: dict, log=print) -> Path:
+def _render_all(run_dir: Path, root: Path, concepts: list, variant: int, brief: dict, log=print,
+                critic: bool = True) -> Path:
     from ..facecam import Facecams
     from . import render, report
     cams = Facecams(run_dir / "ae" / "manifest.json")
@@ -892,13 +893,16 @@ def _render_all(run_dir: Path, root: Path, concepts: list, variant: int, brief: 
         try:
             for k, c in zip("ABC", concepts):
                 assemble(c, k, root, cams, b, variant, brief, ocr, log)
+            if critic:                                   # one cheap look at placement, moves applied
+                from . import critic as crit
+                crit.review(root, browser=b, log=log)
         finally:
             b.close()
     return report.build(run_dir, root=root)
 
 
 def run(run_dir, variant: int = 1, previous_hooks: list[str] | None = None, backend: str = "cli",
-        model: str = "claude-opus-5", ask=None, log=print) -> Path:
+        model: str = "claude-opus-5", ask=None, log=print, critic: bool = True) -> Path:
     """one full candidate run -> <run_dir>/thumb/v<variant>/report.md."""
     run_dir = Path(run_dir)
     root = run_dir / "thumb" / f"v{variant}"
@@ -916,12 +920,12 @@ def run(run_dir, variant: int = 1, previous_hooks: list[str] | None = None, back
     order = sorted(out.concepts, key=lambda c: TYPES.index(c.type))
     concepts = [{"id": k, **c.model_dump()} for k, c in zip("ABC", order)]
     (root / "concepts.json").write_text(json.dumps({"concepts": concepts}, indent=1, ensure_ascii=False), encoding="utf-8")
-    rep = _render_all(run_dir, root, order, variant, out.brief, log)
+    rep = _render_all(run_dir, root, order, variant, out.brief, log, critic=critic)
     log(f"[thumb] v{variant}: {rep}  ({time.monotonic() - t0:.0f}s)")
     return rep
 
 
-def recompose(run_dir, variant: int, log=print) -> Path:
+def recompose(run_dir, variant: int, log=print, critic: bool = False) -> Path:
     """rebuild a run's candidates from its saved brief + concepts (no director call): for
     layout/asset changes."""
     run_dir = Path(run_dir)
@@ -930,4 +934,4 @@ def recompose(run_dir, variant: int, log=print) -> Path:
     concepts = [Concept.model_validate({k: v for k, v in c.items() if k != "id"})
                 for c in json.loads((root / "concepts.json").read_text(encoding="utf-8"))["concepts"]]
     brief = json.loads((root / "brief.json").read_text(encoding="utf-8"))
-    return _render_all(run_dir, root, concepts, variant, brief, log)
+    return _render_all(run_dir, root, concepts, variant, brief, log, critic=critic)

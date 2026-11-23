@@ -70,6 +70,7 @@ def build(run_dir, ocr=None, root=None) -> Path:
                                           for x in r["checks"])]
         if r["critic"]:
             L.append("- **Critic:** " + ", ".join(f"{k} {v}" for k, v in r["critic"].get("scores", {}).items()))
+            L += [f"- **Critic issue:** {i}" for i in r["critic"].get("issues", [])]
         L += [f"- **Warning:** {w}" for w in r["warnings"]] + [""]
     out = root / "report.md"
     out.write_text("\n".join(L), encoding="utf-8")
