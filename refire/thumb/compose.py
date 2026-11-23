@@ -15,8 +15,8 @@ FIGURE = (0.80, 0.90)           # head top -> frame bottom / canvas height (Nguy
 FIGURE_TARGET = 0.90             # head top -> frame bottom (refs 88-93%; nguy: the 80-90 rule)
 SHOULDER_K = 1.15                # face center -> frame edge in face widths: his far shoulder touches the
                                  # edge (refs, same detector: 0.9-2.2, median 1.15; face centers 917-1008)
-FACE_SPAN = (0.70, 0.84)         # the face center stays within this share of the width (refs 0.72-0.79)
-FACE_MAX = 0.62                 # never let a tight cam crop blow the face past this
+FACE_SPAN = (0.70, 0.80)         # the face center stays within this share of the width (refs 0.72-0.79)
+FACE_MAX = 0.62                 # a tight cam crop's face stops here (refs, yunet: median 47%, max 63%); the 80-90 rule wins
 BADGE = (0.16, 0.12)            # youtube duration badge: bottom-right width x height
 
 

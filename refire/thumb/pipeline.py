@@ -62,11 +62,12 @@ must be one you saw (its t = that label's seconds), an art query names a thing y
 character he played, the boss he fought, the item that dropped). For a team video (Spiral Abyss,
 Stygian Onslaught, Imaginarium Theater) the team he cleared with is the strongest left element:
 an art query of up to 3 names, comma separated, becomes one group (his EASIEST ABYSS? shows the
-team's art). It must read at phone size: bright, colorful official art or a designed card beats a
+team's art); name first the one the hook is about: it stands in the middle, in front. It must read at phone size: bright, colorful official art or a designed card beats a
 dark or text-only screen; use a stream screen only when it is bright and readable in a glance.
 A reveal on a stream screen lists in subject.hide_text every piece of on-screen text that gives
-the answer away ("Challenge Completed" answers "did he clear it?"; a damage number; a name); each
-is found and mosaicked. Nothing left visible may answer the hook. An artifact you saw is ALWAYS a
+the answer away, copied EXACTLY as it reads on screen, never described ("Challenge Completed",
+"100%", "117s"; not "the percentage under the map label"); each is found by reading the screen and
+mosaicked. Nothing left visible may answer the hook. An artifact you saw is ALWAYS a
 designed stat_card with the exact name, set, main stat and substats you read off the frame (a
 cropped stream card looks worse); a panel is only for screens that can't be designed (a wish
 result, a clear-time screen, an exploration %, a ranking). Names are spelled as in the game
@@ -305,7 +306,11 @@ def best_face(cams, sid: int, t: float, expression: str, window: float = 1.5, fp
     def norm(k):
         v = np.array([c[k] for c in keep], float)
         return (v - v.min()) / (v.max() - v.min()) if v.max() > v.min() else np.ones_like(v)
-    S, A, O, M = norm("sharp"), norm("size"), norm("conf"), norm("mouth")
+    S, O, M = norm("sharp"), norm("conf"), norm("mouth")
+    # his usual size in the window, not the biggest: leaning into the cam blows the face up and
+    # breaks the 80-90 framing (the cap then leaves him short of the frame top)
+    sz = np.array([c["size"] for c in keep], float)
+    A = 1.0 - np.minimum(1.0, np.abs(sz - np.median(sz)) / max(1.0, np.median(sz)))
     E = 1.0 - M if expression in ("deadpan", "skeptical") else M
     q = 0.35 * S + 0.35 * E + 0.15 * A + 0.15 * O
     i = int(np.argmax(q))
@@ -381,6 +386,7 @@ SQUASH = {"stat_card": 0.86}
 LEFT_MAX = (840, 620)
 LEFT_AREA = LEFT_MAX[0] * LEFT_MAX[1]   # = as big as fits: the cap decides
 LEFT_RIGHT = 860          # right edge limit: runs behind zy0x's near side like his tier lists
+CARD_MARGIN = (-40, 10)   # a card's soft left fade bleeds off the frame so its solid part hugs the edge
 FADES = {"panel": (0.08, 0.08, 0.08, 0.14), "stat_card": (0.05, 0.02, 0.03, 0.18),
          "tierlist": (0.05, 0.03, 0.04, 0.16), "art": (0.05, 0.03, 0.05, 0.18)}
 
@@ -479,24 +485,23 @@ def cards_for(c, subject, kind: str, made_kind: str | None = None) -> tuple[list
     soft = p.with_name(p.stem + "_soft.png")
     im = Image.open(p)
     if kind == "art":                   # the cut edge fades out behind the hook
-        im = head_to_thigh(im)
-        # hang it by its solid pixels: a splash's faint wisps would otherwise push it toward the middle
-        im = im.crop(im.getchannel("A").point(lambda v: 255 if v > 128 else 0).getbbox() or (0, 0, *im.size))
+        im = body(head_to_thigh(im))
     fx.fade(im, FADES.get(fk, FADES["panel"])).save(soft)
     w, h = im.size
     aspect = w / h / SQUASH.get(fk, 1.0)
     if kind == "art":       # a cutout figure: nearly flat on, may run behind the hook
         # sized by what the figure covers, not its box: a cutout is mostly transparent
-        sw, sh = art_size(np.asarray(im.getchannel("A")) > 128, ART_MAX_W)
+        # a team stays in the left part so its middle (the hook's character) isn't behind zy0x's head
+        sw, sh = art_size(np.asarray(im.getchannel("A")) > 128, LEFT_RIGHT + 30 if aspect > 1.4 else ART_MAX_W)
         box = (ART_AT[0], ART_AT[1], ART_AT[0] + sw, ART_AT[1] + sh)
         rot = [0, 8, 0]
     else:
         if fk == "tierlist":    # his tier lists run on behind zy0x (only ~4 icons per row show)
             sw, sh = screen_size((aspect, 1))
-            box = left_box(sw, sh, CENTERS[fk], margin=(12, 10), right=LEFT_RIGHT + 60)
+            box = left_box(sw, sh, CENTERS[fk], margin=CARD_MARGIN, right=LEFT_RIGHT + 60)
         else:
             sw, sh = screen_size((aspect, 1))
-            box = left_box(sw, sh, CENTERS.get(fk, LEFT_CENTER), margin=(12, 10))
+            box = left_box(sw, sh, CENTERS.get(fk, LEFT_CENTER), margin=CARD_MARGIN)
         rot = [3, 14 if c.type == "subject" else 16, -2]
     card = fit_card(f"assets/{soft.name}", aspect, box, -70, rot)
     if fk in SQUASH:
@@ -608,6 +613,19 @@ def text_boxes(img, phrases: list[str], ocr=None, pad: float = 0.012) -> list[tu
             out.append((max(0.0, min(xs) / w - pad), max(0.0, min(ys) / h - pad),
                         min(1.0, max(xs) / w + pad), min(1.0, max(ys) / h + pad)))
     return out
+
+
+PANEL_MEAN = 95            # a stream screen darker than this is lifted toward it (gamma): dark menus
+                           # read as nothing at phone size (critic, every run)
+
+
+def lift(img):
+    """brighten a dark stream screen (gamma on luminance terms, colors kept): its mean toward PANEL_MEAN."""
+    m = float(img.mean())
+    if m >= PANEL_MEAN or m <= 1:
+        return img
+    g = np.log(PANEL_MEAN / 255) / np.log(m / 255)
+    return (255 * (img.astype(np.float32) / 255) ** g).clip(0, 255).astype(np.uint8)
 
 
 def seen_screen(cams, sid: int, t: float, cam_box, region: str, root: Path, slack: float = 3.0):
@@ -755,12 +773,23 @@ def head_to_thigh(im):
     return im
 
 
+def body(im):
+    """hang a figure by its body: crop to its solid pixels, then drop thin effect columns at either
+    side (sucrose's wind ribbon, a trailing sash) that would push the body toward the middle."""
+    im = im.crop(im.getchannel("A").point(lambda v: 255 if v > 128 else 0).getbbox() or (0, 0, *im.size))
+    cols = (np.asarray(im.getchannel("A")) > 128).mean(axis=0)
+    keep = np.where(cols >= FIG_THIN * cols.max())[0] if cols.max() > 0 else []
+    return im.crop((int(keep[0]), 0, int(keep[-1]) + 1, im.height)) if len(keep) else im
+
+
 def team(figs: list):
     """2-3 figures as one group (his EASIEST ABYSS?): same height, overlapping, the middle one
     larger and in front."""
     from PIL import Image
     H = 900
     ims = [head_to_thigh(f.convert("RGBA")) for f in figs]
+    if len(ims) == 3:                                     # the first named (the hook's) stands in the middle
+        ims = [ims[1], ims[0], ims[2]]
     mid = len(ims) // 2 if len(ims) == 3 else -1
     ims = [im.resize((round(im.width * H * (1.12 if i == mid else 0.92) / im.height),
                       round(H * (1.12 if i == mid else 0.92)))) for i, im in enumerate(ims)]
@@ -852,7 +881,7 @@ def assemble(c, k: str, root: Path, cams, browser, variant: int, brief: dict, oc
                                                            encoding="utf-8")
         if panel is not None:
             sub, kind = d / "assets" / "subject.png", "panel"
-            cv2.imwrite(str(sub), panel)
+            cv2.imwrite(str(sub), lift(panel))
         else:
             log(f"[thumb] {k}: no UI panel near {c.subject.t:.0f}s; trying character art")
             kind = "art"

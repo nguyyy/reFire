@@ -191,15 +191,14 @@ def test_seen_screen_only_for_a_frame_the_director_saw(tmp_path):
     assert pipeline.seen_screen(Cams(), 0, 180.0, cam, "full", tmp_path) is None    # never blind
 
 
-def test_team_puts_the_middle_figure_in_front_and_larger():
+def test_team_puts_the_first_named_in_the_middle_in_front_and_larger():
     from PIL import Image
     figs = [Image.new("RGBA", (300, 400), c) for c in ((255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255))]
-    g = pipeline.team(figs)
+    g = pipeline.team(figs)                                   # red = the one the hook is about
     px = np.asarray(g)
     assert g.height == round(900 * 1.12)                      # the middle one sets the height
-    cx = g.width // 2
-    assert px[g.height - 5, cx, 1] == 255                     # green (middle) drawn over its neighbours
-    assert px[g.height - 5, 5, 0] == 255 and px[g.height - 5, g.width - 5, 2] == 255
+    assert px[g.height - 5, g.width // 2, 0] == 255           # red stands in the middle, drawn over the others
+    assert px[g.height - 5, 5, 1] == 255 and px[g.height - 5, g.width - 5, 2] == 255
     assert px[2, 5, 3] == 0                                   # the smaller side figures stand lower
 
 
@@ -238,3 +237,20 @@ def test_art_grows_from_the_top_left_until_it_covers_its_share():
     sw, sh = pipeline.art_size(tall, 1100)                    # its face stays above the hook
     assert sh <= pipeline.ART_MAX_H and cover(tall, sw, sh) < pipeline.ART_COVER
     assert pipeline.art_size(tall, 300)[0] <= 300             # never past the width cap
+
+
+def test_dark_stream_screens_are_lifted_bright_ones_kept():
+    dark = np.full((10, 10, 3), 40, np.uint8)
+    out = pipeline.lift(dark)
+    assert abs(float(out.mean()) - pipeline.PANEL_MEAN) < 3
+    bright = np.full((10, 10, 3), 150, np.uint8)
+    assert (pipeline.lift(bright) == bright).all()
+
+
+def test_body_drops_a_thin_ribbon_at_the_side():
+    from PIL import Image
+    a = np.zeros((400, 600), np.uint8)
+    a[100:110, 0:300] = 255                                   # a thin ribbon trailing left
+    a[50:400, 300:500] = 255                                  # the body
+    out = pipeline.body(Image.fromarray(np.dstack([a, a, a, a]), "RGBA"))
+    assert out.width == 200                                   # just the body's columns
