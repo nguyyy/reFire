@@ -329,10 +329,11 @@ def _accent(name: str, bg_rgb: np.ndarray) -> str:
     return name if dist(name) >= 60 else max(PALETTE, key=dist)
 
 
-CAP_FRAC = 0.152  # hook cap height / frame height: the refs' lines sit at 90-117 px caps (avg ~108)
-# the hook block is one plane in 3D: far end / anchored end height (refs: strongbox 0.87, artifacts
-# 0.9, abyss 0.97 recede; tier list 1.18, skirk ~1.3 come at you). one per candidate, by seed
-KEYSTONES = (0.88, 1.16, 0.93)
+# hook geometry fitted on the refs (4-corner homography per ref, then measured on the letters):
+# the anchored bottom corner is nearest, far end ~0.9x as tall, top edge ~0.95x the bottom (leans
+# back); letters average ~99 px (abyss 106, more tier lists 103, strongbox 94, skirk 80), lines
+# ~730 px wide (widest 870). cap_frac sets the near end, so the line averages ~0.95x of it
+CAP_FRAC, WIDTH_FRAC, KEYSTONE, LEAN = 0.142, 0.68, 0.9, 0.95
 FOV = 50          # a wider lens than 30 so a tilted card actually reads as 3D (nguy: fix the focal length)
 SPEEDLINES = Path(__file__).with_name("assets") / "speedlines.png"
 
@@ -495,7 +496,7 @@ def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rg
                                 else {"strength": 0.5, "radius": 0.4, "threshold": 0.82})},
             "text": {"lines": [ln.upper() for ln in c.hook.lines], "accent_phrase": (c.hook.accent_phrase or "").upper() or None,
                      "accent": _accent(c.hook.accent_color, bg_rgb), "annotation": c.hook.annotation,
-                     "cap_frac": CAP_FRAC, "width_frac": 0.74, "keystone": KEYSTONES[seed % 3],
+                     "cap_frac": CAP_FRAC, "width_frac": WIDTH_FRAC, "keystone": KEYSTONE, "lean": LEAN,
                      **({"skew": -10} if c.type == "reveal" else {})}}
     if c.type == "reveal" and cards and subject_kind != "art":
         # a made graphic hides its own values; a stream panel gets the mosaic band

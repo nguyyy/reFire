@@ -21,22 +21,28 @@ OUT = Path(tempfile.gettempdir()) / "refire_thumb_text"
 # what each ref's hook says + how it sits (anchor, width) -- read off the refs by eye
 HOOKS = {
     "artifacts+stall.png": {"lines": ["ARTIFACTS", "& STALLING..."], "accent_phrase": "ARTIFACTS",
-                            "accent": "gold", "width_frac": 0.71, "keystone": 0.9},
+                            "accent": "gold", "width_frac": 0.71},
     "stronboxthumbnail - Copy.png": {"lines": ["STRONGBOX...", "GONE RIGHT?"], "font": "coolvetica",
                                      "accent_phrase": "RIGHT?", "accent": "green", "annotation": "(birthday)",
-                                     "width_frac": 0.60, "squeeze": 1.0, "keystone": 0.87},
+                                     "width_frac": 0.60, "squeeze": 1.0},
     "tierlistpng - Copy.png": {"lines": ["THE BEST", "TIER LIST?"], "accent_phrase": "TIER LIST?", "accent": "mint",
                                "anchor": "bottom-right", "width_frac": 0.56, "skew": -12},
     "abysseasyzy0xzyoxthumbnailspiral.png": {"lines": ["EASIEST", "ABYSS?"], "accent_phrase": "EASIEST",
-                                             "accent": "green", "width_frac": 0.55, "keystone": 0.97},
+                                             "accent": "green", "width_frac": 0.55},
     "schz.png": {"lines": ["SNEZHNAYA", {"text": "DAY TWO...", "scale_x": 0.92, "scale": 1.15}], "accent_phrase": "SNEZHNAYA",
                  "accent": "sky", "width_frac": 0.66},
     "funnytierlistthumbnailB.png": {"lines": ["MORE", "TIER LISTS"], "accent_phrase": "MORE", "accent": "blue",
-                                    "width_frac": 0.65, "keystone": 1.18},
-    "skirkThumbnail_1.png": {"lines": ["NUTTY", "SKIRK PULLS"], "width_frac": 0.56, "skew": -10, "keystone": 1.3},
+                                    "width_frac": 0.65},
+    "skirkThumbnail_1.png": {"lines": ["NUTTY", "SKIRK PULLS"], "width_frac": 0.56, "skew": -10},
     "zajrevthumb.png": {"lines": ["ZAJEF ACCOUNT", "REVIEW"], "font": "coolvetica", "squeeze": 1.0,
                         "accent_phrase": "ZAJEF ACCOUNT", "accent": "cyan", "width_frac": 0.66, "skew": -8},
 }
+
+
+# the pipeline's fitted hook plane (refire.thumb.pipeline KEYSTONE, LEAN) on every ref's words
+for _h in HOOKS.values():
+    _h.setdefault("keystone", 0.9)
+    _h.setdefault("lean", 0.95)
 
 
 def main(argv) -> int:

@@ -112,7 +112,7 @@ def test_shine_ramps_from_dark_edges_to_a_light_middle():
         assert max(L) - (L[0] + L[-1]) / 2 > 0.25                                           # a real shine
 
 
-def test_keystone_keeps_width_and_anchor_and_scales_the_far_end(m):
+def test_hook_plane_keeps_its_anchored_corner_shrinks_the_far_end_and_leans_back(m):
     import numpy as np
     lines = T.layout(["MORE", "TIER LISTS"], m, (1280, 720), T.Style())
     x0, x1 = min(ln.x for ln in lines), max(ln.x + ln.width for ln in lines)
@@ -127,5 +127,9 @@ def test_keystone_keeps_width_and_anchor_and_scales_the_far_end(m):
             assert np.allclose(at(H, near, y), (near, y))                  # anchored edge untouched
         (fx, ft), (_, fb) = at(H, far, yt), at(H, far, yb)
         assert abs(fx - far) < 1e-6 and abs((fb - ft) - 1.2 * (yb - yt)) < 1e-6   # width kept, far end x1.2
+    H = T.keystone(lines, 0.9, "bottom-left", lean=0.95)                       # leans back: top edge narrower
+    (tlx, _), (trx, _) = at(H, x0, yt), at(H, x1, yt)
+    assert abs((trx - tlx) - 0.95 * (x1 - x0)) < 1e-6 and np.allclose(at(H, x0, yb), (x0, yb))
     assert "matrix3d(" in T.page({"lines": ["MORE", "TIER LISTS"], "keystone": 0.88}, (1280, 720))
+    assert "matrix3d(" in T.page({"lines": ["MORE", "TIER LISTS"], "lean": 0.95}, (1280, 720))
     assert "matrix3d(" not in T.page({"lines": ["MORE", "TIER LISTS"]}, (1280, 720))
