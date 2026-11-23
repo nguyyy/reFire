@@ -165,3 +165,28 @@ def test_annotation_may_not_repeat_the_hook():
     assert any("repeats the hook" in e for e in pipeline.validate(out, 5))
     out.concepts[0].hook.annotation = "(day 3)"
     assert pipeline.validate(out, 5) == []
+
+
+def test_seen_screen_only_for_a_frame_the_director_saw(tmp_path):
+    import json
+
+    class Cams:
+        def frames(self, sid, ts, width=0):
+            return [np.full((720, 1280, 3), 77, np.uint8)]
+    (tmp_path / "frames.json").write_text(json.dumps([100.0, 250.0]), encoding="utf-8")
+    cam = (0.0, 0.0, 0.2, 0.4)                                  # stream cam on the left
+    got = pipeline.seen_screen(Cams(), 0, 101.5, cam, "full", tmp_path)
+    assert got is not None and got.shape[1] < 1280 * 0.8 + 2      # cam column cropped off
+    assert pipeline.seen_screen(Cams(), 0, 180.0, cam, "full", tmp_path) is None    # never blind
+
+
+def test_team_puts_the_middle_figure_in_front_and_larger():
+    from PIL import Image
+    figs = [Image.new("RGBA", (300, 400), c) for c in ((255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255))]
+    g = pipeline.team(figs)
+    px = np.asarray(g)
+    assert g.height == round(900 * 1.12)                      # the middle one sets the height
+    cx = g.width // 2
+    assert px[g.height - 5, cx, 1] == 255                     # green (middle) drawn over its neighbours
+    assert px[g.height - 5, 5, 0] == 255 and px[g.height - 5, g.width - 5, 2] == 255
+    assert px[2, 5, 3] == 0                                   # the smaller side figures stand lower

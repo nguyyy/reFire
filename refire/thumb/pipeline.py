@@ -57,7 +57,13 @@ Concept types, use each exactly once:
 When frame sheets are given, Read every one before you plan: they show the gameplay at each beat,
 labelled "b<beat> <source seconds>". Plan the left element from what was actually on screen: a panel
 must be one you saw (its t = that label's seconds), an art query names a thing you saw (the
-character he played, the boss he fought, the item that dropped). An artifact you saw is ALWAYS a
+character he played, the boss he fought, the item that dropped). For a team video (Spiral Abyss,
+Stygian Onslaught, Imaginarium Theater) the team he cleared with is the strongest left element:
+an art query of up to 3 names, comma separated, becomes one group (his EASIEST ABYSS? shows the
+team's art). It must read at phone size: bright, colorful official art or a designed card beats a
+dark or text-only screen; use a stream screen only when it is bright and readable in a glance.
+A reveal on a stream screen gives subject.hide = [x0, y0, x1, y1], 0-1 of the picture in that
+tile, covering exactly what is hidden. An artifact you saw is ALWAYS a
 designed stat_card with the exact name, set, main stat and substats you read off the frame (a
 cropped stream card looks worse); a panel is only for screens that can't be designed (a wish
 result, a clear-time screen, an exploration %, a ranking). Names are spelled as in the game
@@ -91,7 +97,8 @@ Reply with ONLY JSON:
             "annotation": null}},
   "face": {{"t": 0, "expression": "shock|deadpan|skeptical|hype|laughing"}},
   "subject": {{"source": "panel|art|made", "t": 0, "region": "right-panel", "query": null,
-               "alt_query": "a second exact name showing the same thing, used if the first has no art", "made": null}},
+               "alt_query": "a second exact name showing the same thing, used if the first has no art",
+               "hide": null, "made": null}},
   "title": "...", "payoff_beats": [0]}}]}}"""
 
 
@@ -157,6 +164,7 @@ def _models():
         region: str = "right-panel"
         query: str | None = None
         alt_query: str | None = None
+        hide: list[float] | None = None
         made: dict | None = None
 
     class Concept(BaseModel):
@@ -339,6 +347,7 @@ def _fit(p: Path, max_w: float, max_h: float) -> float:
 # the left element (nguy): one clear item, ~50% of the left half, centered at mid-height, its
 # edges blended into the scene. screen px; the card is set back in depth and swung toward zy0x.
 FIG_TALL, FIG_KEEP = 1.2, 0.6   # a figure taller than 1.2x its width keeps its top 60%
+TEAM_STEP = 0.5                 # each team figure starts this far into the previous one's width
 ART_FILL = 0.5                  # a figure's opaque pixels cover ~half the left half (nguy: ~50%)
 LEFT_CENTER = (300, 300)
 # per element: a tall card sits a bit higher so its top rows clear the hook; a wide tier list
@@ -428,19 +437,17 @@ def cards_for(c, subject, kind: str, made_kind: str | None = None) -> tuple[list
     fk = "art" if kind == "art" else (made_kind or "panel") if kind == "made" else "panel"
     soft = p.with_name(p.stem + "_soft.png")
     im = Image.open(p)
-    if kind == "art" and im.height > FIG_TALL * im.width:
-        # a full-body splash reads tiny: head to thigh, like his (arlecchino, skirk); the cut
-        # edge fades out behind the hook
-        im = im.crop((0, 0, im.width, round(im.height * FIG_KEEP)))
-        im = im.crop(im.getchannel("A").point(lambda v: 255 if v > 24 else 0).getbbox() or (0, 0, *im.size))
+    if kind == "art":                   # the cut edge fades out behind the hook
+        im = head_to_thigh(im)
     fx.fade(im, FADES.get(fk, FADES["panel"])).save(soft)
     w, h = im.size
     aspect = w / h / SQUASH.get(fk, 1.0)
     if kind == "art":       # a cutout figure: nearly flat on, may run behind the hook
         # sized by what the figure covers, not its box: a cutout is mostly transparent
         cov = max(0.25, float((np.asarray(im.getchannel("A")) > 128).mean()))
-        sw, sh = screen_size((aspect, 1), area=ART_FILL * 640 * 720 / cov, max_wh=(660, 680))
-        box = left_box(sw, sh, CENTERS["art"], margin=(20, 20))
+        wide = aspect > 1.4             # a team / an action pose: may run on behind zy0x like his tier lists
+        sw, sh = screen_size((aspect, 1), area=ART_FILL * 640 * 720 / cov, max_wh=(820 if wide else 660, 680))
+        box = left_box(sw, sh, CENTERS["art"], margin=(20, 20), right=LEFT_RIGHT + (140 if wide else 0))
         rot = [0, 8, 0]
     else:
         if fk == "tierlist":    # his tier lists run on behind zy0x (only ~4 icons per row show)
@@ -457,7 +464,7 @@ def cards_for(c, subject, kind: str, made_kind: str | None = None) -> tuple[list
 
 
 def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rgb, seed: int,
-               made_kind: str | None = None, hides: bool = False) -> dict:
+               made_kind: str | None = None, hides: bool = False, hide_box=None) -> dict:
     """subject_kind: art | made | panel. hides: a made graphic that already hides its own values."""
     from PIL import Image
 
@@ -492,7 +499,7 @@ def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rg
                      **({"skew": -10} if c.type == "reveal" else {})}}
     if c.type == "reveal" and cards and subject_kind != "art":
         # a made graphic hides its own values; a stream panel gets the mosaic band
-        compose.reveal(spec, d, boxes=None if hides else [(0.06, 0.30, 0.94, 0.62)],
+        compose.reveal(spec, d, boxes=None if hides else [hide_box or (0.06, 0.30, 0.94, 0.62)],
                        bubble_at=(round(min(sbox[2] - 70, 560)), round(max(12, sbox[1] - 40))))
     return spec
 
@@ -517,11 +524,12 @@ def frame_sheets(cams, times: list[tuple[int, float]], root: Path, sid: int = 0)
     cam = cams.detect(sid)
     gx0, _, gx1, _ = gameplay((0, 0, 1, 1), cam.box if cam else None)
     tw, th = SHEET_TILE
-    tiles = []
+    tiles, seen = [], []
     for b, t in times:
         got = cams.frames(sid, [t], width=0)
         if not got:
             continue
+        seen.append(t)
         f = got[0][:, int(gx0 * got[0].shape[1]):int(gx1 * got[0].shape[1])]
         w = min(tw, round(f.shape[1] * th / f.shape[0]))
         tile = np.zeros((th, tw, 3), np.uint8)
@@ -537,7 +545,22 @@ def frame_sheets(cams, times: list[tuple[int, float]], root: Path, sid: int = 0)
         sheet = np.vstack([np.hstack(chunk[r * SHEET_COLS:(r + 1) * SHEET_COLS]) for r in range(SHEET_ROWS)])
         names.append(f"frames_{k // per + 1}.jpg")
         cv2.imwrite(str(Path(root) / names[-1]), sheet, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    (Path(root) / "frames.json").write_text(json.dumps(seen), encoding="utf-8")   # what the director saw
     return names
+
+
+def seen_screen(cams, sid: int, t: float, cam_box, region: str, root: Path, slack: float = 3.0):
+    """the gameplay frame at t (stream cam cropped off, cut to `region`) when t is a frame the
+    director looked at on its sheet, else None: a screen it chose by sight, never a blind crop."""
+    f = Path(root) / "frames.json"
+    if not f.exists() or not any(abs(t - s) <= slack for s in json.loads(f.read_text(encoding="utf-8"))):
+        return None
+    got = cams.frames(sid, [t], width=0)
+    if not got:
+        return None
+    x0, y0, x1, y1 = gameplay(REGIONS.get(region, REGIONS["full"]), cam_box)
+    h, w = got[0].shape[:2]
+    return got[0][int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)]
 
 
 def gameplay(region: tuple, cam_box) -> tuple:
@@ -634,15 +657,10 @@ def find_panel(cams, sid: int, t: float, cam_box, hint: str | None = None, windo
     return None if best is None else best[1]
 
 
-def art_card(query: str, d: Path, log=print) -> Path | None:
-    """one official image for the left element -> the figure cut out of it, in assets/.
+def _figure(q: str, log=print):
+    """one name -> (figure png cut out of its official art, sidecar json text) or None.
     a character -> its wish splash; anything else (weapon, item, enemy, boss) -> its wiki image."""
-    import shutil
-
     from . import art
-    q = query.split(",")[0].strip()
-    if not q:
-        return None
     try:
         roster = art.characters(art.Fetcher())
         if art.resolve(q, roster):
@@ -662,9 +680,55 @@ def art_card(query: str, d: Path, log=print) -> Path | None:
     except art.ArtError as e:
         log(f"[thumb] art for {q!r} unavailable ({e})")
         return None
+    return fig, src.with_suffix(".json").read_text(encoding="utf-8")
+
+
+def head_to_thigh(im):
+    """a full-body figure reads tiny: keep its top FIG_KEEP (his arlecchino, skirk)."""
+    if im.height > FIG_TALL * im.width:
+        im = im.crop((0, 0, im.width, round(im.height * FIG_KEEP)))
+        im = im.crop(im.getchannel("A").point(lambda v: 255 if v > 24 else 0).getbbox() or (0, 0, *im.size))
+    return im
+
+
+def team(figs: list) -> "Image.Image":
+    """2-3 figures as one group (his EASIEST ABYSS?): same height, overlapping, the middle one
+    larger and in front."""
+    from PIL import Image
+    H = 900
+    ims = [head_to_thigh(f.convert("RGBA")) for f in figs]
+    mid = len(ims) // 2 if len(ims) == 3 else -1
+    ims = [im.resize((round(im.width * H * (1.12 if i == mid else 0.92) / im.height),
+                      round(H * (1.12 if i == mid else 0.92)))) for i, im in enumerate(ims)]
+    xs, x = [], 0
+    for im in ims:
+        xs.append(x)
+        x += round(im.width * TEAM_STEP)
+    W, top = xs[-1] + ims[-1].width, max(im.height for im in ims)
+    out = Image.new("RGBA", (W, top))
+    order = [i for i in range(len(ims)) if i != mid] + ([mid] if mid >= 0 else [])
+    for i in order:                                       # the middle one last = in front
+        out.alpha_composite(ims[i], (xs[i], top - ims[i].height))
+    return out.crop(out.getchannel("A").getbbox())
+
+
+def art_card(query: str, d: Path, log=print) -> Path | None:
+    """official art for the left element -> assets/art0.png: one name -> its figure; up to 3
+    names, comma separated -> the team as one group."""
+    import shutil
+
+    from PIL import Image
+    names = [n.strip() for n in (query or "").split(",") if n.strip()][:3]
+    got = [g for g in (_figure(n, log) for n in names) if g]
+    if not got:
+        return None
     out = d / "assets" / "art0.png"
-    shutil.copy(fig, out)
-    (d / "assets" / "art0.art.json").write_text(src.with_suffix(".json").read_text(encoding="utf-8"), encoding="utf-8")
+    if len(got) == 1:
+        shutil.copy(got[0][0], out)
+    else:
+        team([Image.open(f) for f, _ in got]).save(out)
+    for i, (_, meta) in enumerate(got):
+        (d / "assets" / f"art{i}.art.json").write_text(meta, encoding="utf-8")
     return out
 
 
@@ -699,7 +763,7 @@ def assemble(c, k: str, root: Path, cams, browser, variant: int, brief: dict, oc
     crop, info = best_face(cams, sid, c.face.t, c.face.expression)
     cv2.imwrite(str(d / "assets" / "face.png"), cutout(crop))
     cam_box = cams.detect(sid).box
-    sub, kind = None, c.subject.source
+    sub, kind, hide = None, c.subject.source, None
     if kind == "made" and c.subject.made:
         from . import made
         try:
@@ -710,7 +774,13 @@ def assemble(c, k: str, root: Path, cams, browser, variant: int, brief: dict, oc
             log(f"[thumb] {k}: made graphic failed ({e}); trying character art")
             kind = "art"
     if kind in ("video", "panel") and c.subject.t is not None:
-        panel = find_panel(cams, sid, c.subject.t, cam_box, c.subject.region, ocr=ocr)
+        # a reveal that says where its answer sits takes the whole screen it saw, so the box lands
+        hide = c.subject.hide if c.type == "reveal" and c.subject.hide and len(c.subject.hide) == 4 else None
+        panel = None if hide else find_panel(cams, sid, c.subject.t, cam_box, c.subject.region, ocr=ocr)
+        if panel is None:                                # a whole screen (clear time, party setup) it saw
+            panel = seen_screen(cams, sid, c.subject.t, cam_box, "full" if hide else c.subject.region, root)
+        if panel is None:
+            hide = None
         if panel is not None:
             sub, kind = d / "assets" / "subject.png", "panel"
             cv2.imwrite(str(sub), panel)
@@ -735,7 +805,8 @@ def assemble(c, k: str, root: Path, cams, browser, variant: int, brief: dict, oc
     bg_rgb = cv2.cvtColor(cv2.GaussianBlur(bg, (0, 0), 12), cv2.COLOR_BGR2RGB)
     spec = build_spec(c, d, d / "assets" / "face.png", sub, kind if kind in ("art", "made") else "panel",
                       bg_rgb, seed=variant * 10 + "ABC".index(k),
-                      made_kind=(c.subject.made or {}).get("kind") if kind == "made" else None, hides=made_hides)
+                      made_kind=(c.subject.made or {}).get("kind") if kind == "made" else None, hides=made_hides,
+                      hide_box=hide if kind == "panel" else None)
     (d / "spec.json").write_text(json.dumps(spec, indent=1, ensure_ascii=False), encoding="utf-8")
     render.render(d / "spec.json", browser=browser)
     log(f"[thumb] {k} {c.type}: {' / '.join(c.hook.lines)}  (face q {info['q']}, subject {kind if sub else 'none'})")
