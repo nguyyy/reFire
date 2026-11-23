@@ -203,7 +203,9 @@ def _value(stat: str, val: str) -> str:
 def stat_card_svg(c: dict, piece: dict | None = None, height: float | None = None, max_h: float = 1e9) -> str:
     """the in-game card as one svg page (baselines exact). c = the director's stat_card spec;
     rows are [stat, value] or [stat, value, "unactivated"]; hidden row values become a pixel
-    mosaic + "???" (the strongbox ref's reveal)."""
+    mosaic + "???" (the strongbox ref's reveal). kind "result": the same card for a clear time,
+    a chamber result or an exploration %: no level badge or lock buttons, rows read "label: value",
+    "main" in hidden mosaics the header's big value (nguy: designed cards, not dark stream screens)."""
     from . import text
     fp = game_font()
     m = text.metrics(str(fp))
@@ -217,23 +219,28 @@ def stat_card_svg(c: dict, piece: dict | None = None, height: float | None = Non
     ix, iy, isz = K["icon"]
     if piece and piece.get("icon"):
         out.append(f'<image href="{_data_uri(Path(piece["icon"]))}" x="{ix}" y="{iy}" width="{isz}" height="{isz}"/>')
+    res = c.get("kind") == "result"
+    hidden = set(c.get("hidden") or [])
     main = c.get("main") or ["", ""]
+    mx, my, msz = x0, K["main"][1], K["main"][0]
+    big = (_mosaic_svg(0, mx + 2, my - 34, 9, 4, 9) + f'<text x="{mx + 2 + 9 * 9 + 6}" y="{my}" font-size="{msz}" '
+           f'fill="#FFFFFF">???</text>') if "main" in hidden else         f'<text x="{mx}" y="{my}" font-size="{msz}" fill="#FFFFFF">{e(str(main[1]))}</text>'
     out += [f'<text x="{x0}" y="{K["title"][1]}" font-size="{ts:.1f}" fill="#FFFFFF">{e(title)}</text>',
             f'<text x="{x0}" y="{K["slot"][1]}" font-size="{K["slot"][0]}" fill="#F2EDEA">{e(c.get("subtitle", ""))}</text>',
             f'<text x="{x0}" y="{K["label"][1]}" font-size="{K["label"][0]}" fill="#FFFFFF" fill-opacity="0.6">{e(main[0])}</text>',
-            f'<text x="{x0}" y="{K["main"][1]}" font-size="{K["main"][0]}" fill="#FFFFFF">{e(str(main[1]))}</text>']
+            big]
     sx, sy, sp, sr = K["stars"]
-    out += [_star(sx + i * sp, sy, sr) for i in range(max(1, min(5, int(c.get("stars", 5)))))]
+    out += [_star(sx + i * sp, sy, sr) for i in range(max(0 if res else 1, min(5, int(c.get("stars", 0 if res else 5)))))]
     # body
-    bx, by, bh, bs, bb = K["badge"]
-    lv = str(c.get("level", "+0"))
-    bw = m.width(lv, bs, 0) + 25
-    out += [f'<rect x="{bx}" y="{by}" width="{bw:.1f}" height="{bh}" rx="3" fill="#3A434E"/>',
-            f'<text x="{bx + bw / 2:.1f}" y="{bb}" font-size="{bs}" fill="#FFFFFF" text-anchor="middle">{e(lv)}</text>',
-            f'<image href="{_data_uri(ASSETS / "artifact_buttons.png")}" x="{K["buttons"][0]}" y="{K["buttons"][1]}" '
-            f'width="116" height="58"/>']
-    hidden = set(c.get("hidden") or [])
-    y, size, tr = K["row0"], K["size"], K["track"]
+    if not res:
+        bx, by, bh, bs, bb = K["badge"]
+        lv = str(c.get("level", "+0"))
+        bw = m.width(lv, bs, 0) + 25
+        out += [f'<rect x="{bx}" y="{by}" width="{bw:.1f}" height="{bh}" rx="3" fill="#3A434E"/>',
+                f'<text x="{bx + bw / 2:.1f}" y="{bb}" font-size="{bs}" fill="#FFFFFF" text-anchor="middle">{e(lv)}</text>',
+                f'<image href="{_data_uri(ASSETS / "artifact_buttons.png")}" x="{K["buttons"][0]}" y="{K["buttons"][1]}" '
+                f'width="116" height="58"/>']
+    y, size, tr = K["row0"] - (55 if res else 0), K["size"], K["track"]
     ls = f' letter-spacing="{tr}"'
     for i, row in enumerate((c.get("rows") or [])[:4]):
         stat, val = row[0], row[1] if len(row) > 1 else ""
@@ -241,7 +248,7 @@ def stat_card_svg(c: dict, piece: dict | None = None, height: float | None = Non
         col = K["unact"] if dim else K["text"]
         dot = f'<text x="{x0}" y="{y:.1f}" font-size="{size}" fill="{col}">·</text>'
         if i in hidden:
-            lead = f"{stat}+"
+            lead = f"{stat}: " if res else f"{stat}+"
             lx = x0 + 24 + m.width(lead, size, tr / size) + tr
             out += [dot, f'<text x="{x0 + 24}" y="{y:.1f}" font-size="{size}" fill="{col}"{ls}>{e(lead)}</text>',
                     _mosaic_svg(i + 1, lx + 2, y - 18, 7, 2, 9),
@@ -249,7 +256,7 @@ def stat_card_svg(c: dict, piece: dict | None = None, height: float | None = Non
         else:
             tail = "  (unactivated)" if dim else ""
             out += [dot, f'<text x="{x0 + 24}" y="{y:.1f}" font-size="{size}" fill="{col}"{ls} xml:space="preserve">'
-                         f'{e(_value(stat, val) + tail)}</text>']
+                         f'{e((f"{stat}: {val}" if res else _value(stat, val)) + tail)}</text>']
         y += K["pitch"]
     if piece and piece.get("set"):
         out.append(f'<text x="{x0}" y="{y:.1f}" font-size="{size}" fill="{K["green"]}"{ls}>{e(piece["set"])}:</text>')
@@ -276,6 +283,19 @@ def _mosaic_svg(seed: int, x: float, y: float, cols: int, rows: int, cell: float
                    for j in range(rows) for i in range(cols) for g in [rnd.randint(120, 225)])
 
 
+def result_piece(c: dict, icon_fn=icon) -> dict | None:
+    """the result card's header icon: c["icon"] = an exact in-game name; a character's avatar,
+    else the thing's wiki image cut out (a boss, an item)."""
+    name = c.get("icon")
+    if not name:
+        return None
+    try:
+        p = icon_fn(name) or art.item(name)
+    except art.ArtError:
+        return None
+    return {"icon": p} if p else None
+
+
 def tierlist_html(rows: list[dict], icon_fn=icon, hidden=()) -> str:
     """hidden = [[row, col], ...]: those icons drawn as a coarse pixel mosaic (the reveal)."""
     out, hide = [], {tuple(h) for h in hidden or []}
@@ -298,8 +318,12 @@ def tierlist_html(rows: list[dict], icon_fn=icon, hidden=()) -> str:
 def render(kind: str, data: dict, out: Path, browser=None, icon_fn=icon, piece_fn=artifact) -> Path:
     """made graphic -> transparent PNG cropped to its pixels (2x for crisp edges)."""
     from PIL import Image
-    html = (tierlist_html(data.get("rows", []), icon_fn, data.get("hidden")) if kind == "tierlist"
-            else stat_card_svg(data, piece_fn(data), max_h=CARD_MAX_H))
+    if kind == "tierlist":
+        html = tierlist_html(data.get("rows", []), icon_fn, data.get("hidden"))
+    elif kind == "result":
+        html = stat_card_svg({**data, "kind": "result"}, result_piece(data, icon_fn), max_h=CARD_MAX_H)
+    else:
+        html = stat_card_svg(data, piece_fn(data), max_h=CARD_MAX_H)
 
     def shoot(b):
         pg = b.new_page(viewport={"width": 1400, "height": 1000}, device_scale_factor=2)

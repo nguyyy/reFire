@@ -3,8 +3,8 @@
 context (outline beats + the cut's loudest/exclamatory moments) -> ONE Claude call writing
 the brief and three concepts (spec: two calls; merged to halve subscription use, both files
 still written) -> per concept: best facecam frame near its moment, zy0x cutout, subject
-(stream UI region or official art), layout in the 3D scene, accent auto-fixed against the
-background hue -> render -> deterministic checks -> report.md. Each run lands in
+(official art or a designed card; nguy: never a stream screen), a real in-game backdrop (the
+place's wiki screenshot), layout in the 3D scene, accent auto-fixed against the background hue -> render -> deterministic checks -> report.md. Each run lands in
 <run_dir>/thumb/v<k>/ so repeated runs sit side by side; later runs are told the earlier
 hooks so they bet differently.
 """
@@ -18,9 +18,6 @@ import numpy as np
 
 TYPES = ("reaction", "subject", "reveal")
 LINE_MAX = 13         # hook characters per line, spaces included (refs: 6-13, ~10; nguy: "around 10")
-REGIONS = {"full": (0, 0, 1, 1), "left-half": (0, 0, 0.5, 1), "right-half": (0.5, 0, 1, 1),
-           "center": (0.2, 0.08, 0.8, 0.92), "right-panel": (0.64, 0.06, 0.99, 0.94),
-           "left-panel": (0.01, 0.06, 0.36, 0.94), "top-half": (0, 0, 1, 0.5), "bottom-half": (0, 0.5, 1, 1)}
 PALETTE_THEMES = "gold: artifacts/rewards; sky: Cryo/Snezhnaya; green or mint: easy/right/wins; cyan: people/reviews; blue: series/lists"
 
 SYSTEM = f"""You direct thumbnails for zy0x's Genshin Impact stream edits (YouTube channel). You pick
@@ -42,8 +39,8 @@ recognizes in a second, usually what the stream title and the central idea are a
 character, a boss or mode like Stygian Onslaught, the artifact that dropped, a tier list, a
 region at 100%). EVERY concept's left element shows that thing or its sharpest evidence (the
 character he built or pulled, the boss he fought, the artifact that dropped), never a character
-only mentioned in passing. The three concepts may show it differently (official art / a designed
-in-game card / the stream's own panel) but all sell this video. What makes a fan click: novelty
+only mentioned in passing. The three concepts may show it differently (official art / the team /
+a designed in-game card) but all sell this video. What makes a fan click: novelty
 (a new character, boss, area), value (5-star, max roll, #1, C6, 100%), stakes or mystery (hidden
 behind the mosaic). Show what is chased or named (the stream title's "C6 VALERIY" -> Valeriy),
 not the banner or menu around it. The three left elements must look different from each other
@@ -57,26 +54,26 @@ Concept types, use each exactly once:
   "???" bubble; the hook is a question.
 
 When frame sheets are given, Read every one before you plan: they show the gameplay at each beat,
-labelled "b<beat> <source seconds>". Plan the left element from what was actually on screen: a panel
-must be one you saw (its t = that label's seconds), an art query names a thing you saw (the
-character he played, the boss he fought, the item that dropped). For a team video (Spiral Abyss,
+labelled "b<beat> <source seconds>". Plan the left element from what was actually on screen: an art
+query names a thing you saw (the character he played, the boss he fought, the item that dropped),
+a designed card carries the exact values you read off a frame. For a team video (Spiral Abyss,
 Stygian Onslaught, Imaginarium Theater) the team he cleared with is the strongest left element:
 an art query of up to 3 names, comma separated, becomes one group (his EASIEST ABYSS? shows the
-team's art); name first the one the hook is about: it stands in the middle, in front. It must read at phone size: bright, colorful official art or a designed card beats a
-dark or text-only screen; use a stream screen only when it is bright and readable in a glance.
-A reveal on a stream screen lists in subject.hide_text every piece of on-screen text that gives
-the answer away, copied EXACTLY as it reads on screen, never described ("Challenge Completed",
-"100%", "117s"; not "the percentage under the map label"); each is found by reading the screen and
-mosaicked. Nothing left visible may answer the hook. An artifact you saw is ALWAYS a
-designed stat_card with the exact name, set, main stat and substats you read off the frame (a
-cropped stream card looks worse); a panel is only for screens that can't be designed (a wish
-result, a clear-time screen, an exploration %, a ranking). Names are spelled as in the game
-(the given character list), never as the transcript heard them.
+team's art); name first the one the hook is about: it stands in the middle, in front. It must read at phone size: bright, colorful official art or a designed card, NEVER a stream
+screen (dark and busy at phone size). A reveal hides its answer inside a designed card (a result
+card's "main" or rows, a stat_card's rows, a tier list's cells); nothing left visible may answer
+the hook. An artifact you saw is ALWAYS a designed stat_card with the exact name, set, main stat and
+substats you read off the frame; a clear time, a chamber result, an exploration %, a ranking is a
+designed result card with the values you read off the frame. Names are spelled as in the game (the
+given character list), never as the transcript heard them.
+The background behind everything is a real in-game place, never the stream frame: brief.backdrop =
+the exact wiki page name of the place the video happens in ("Spiral Abyss", "Land of Lower Setekh",
+a region, an area, a domain), then after a comma the region it belongs to as a fallback (a mode or
+boss without a place of its own, like Stygian Onslaught, has no screenshot: name where it is fought,
+then its region, e.g. "Spiral Abyss, Mondstadt"); null only when nothing fits.
 
 Pick face.t ONLY from the given moments (source seconds) and say the expression. The subject
-must be deliberate, one item: either a game UI panel that was on screen (source "panel": t = source
-seconds when the panel (artifact card, tier list, wish result, character grid) is showing, region =
-where it sits: {", ".join(REGIONS)}), or official art of ONE thing (source "art": query = one exact
+must be deliberate, one item: either official art of ONE thing (source "art": query = one exact
 in-game name: a character, weapon, material, enemy or boss, e.g. "Skirk", "Primogem", "Lord of the
 Hidden Depths: Whisperer of Nightmares"), or a graphic you design (source "made": made =
 {{"kind": "tierlist", "rows": [{{"label": "GOD TIER", "color": "#FF7F7F", "chars": ["Furina", ...]}}, ...],
@@ -85,12 +82,17 @@ Hidden Depths: Whisperer of Nightmares"), or a graphic you design (source "made"
 piece name, "set": its artifact set, "subtitle": slot (Flower of Life / Plume of Death / Sands of Eon /
 Goblet of Eonothem / Circlet of Logos), "main": [stat, value], "stars": 5, "level": "+20",
 "rows": [[stat, value], ...] (4 substats), "hidden": [row indexes, the first rows: the lower ones sit
-behind the hook]}}: rendered one-to-one as the in-game artifact card with its icon). Design it from what was said on stream; prefer it when no
-clean panel was shown. Never chat, never a random shot.
+behind the hook]}}: rendered one-to-one as the in-game artifact card with its icon); or {{"kind": "result",
+"title": the boss, chamber or area ("Floor 12 - Chamber 3", "Wavebinder: Stormfang", "Land of Lower
+Setekh"), "subtitle": the mode ("Spiral Abyss", "Stygian Onslaught", "Exploration Progress"), "main":
+[label, value] (the headline number: ["Time Elapsed", "117s"]), "stars": 0-3 (abyss stars, else 0),
+"icon": one exact in-game name pictured in the header (the character he played or the boss), "rows":
+up to 4 [label, value] facts you read off the screen, "hidden": ["main" and/or row indexes]}}: the same
+in-game card look. Never chat, never a stream screen, never a random shot.
 Title <= 60 characters, paired with the hook.
 
 Reply with ONLY JSON:
-{{"brief": {{"about": "...", "about_art": "one exact in-game name whose art shows it",
+{{"brief": {{"about": "...", "about_art": "one exact in-game name whose art shows it", "backdrop": "a place or null",
   "promise": "...", "entities": ["..."], "reveal": {{"what": "...", "t": 0, "beat_id": 0}} or null,
   "moments": [{{"t": 0, "kind": "reaction|subject|reveal", "why": "..."}}], "hook_ideas": ["..."]}},
  "concepts": [{{"type": "reaction|subject|reveal",
@@ -100,9 +102,9 @@ Reply with ONLY JSON:
   "hook": {{"lines": ["LINE ONE", "LINE TWO"], "accent_phrase": "...", "accent_color": "gold|sky|green|mint|blue|cyan",
             "annotation": null}},
   "face": {{"t": 0, "expression": "shock|deadpan|skeptical|hype|laughing"}},
-  "subject": {{"source": "panel|art|made", "t": 0, "region": "right-panel", "query": null,
+  "subject": {{"source": "art|made", "query": null,
                "alt_query": "a second exact name showing the same thing, used if the first has no art",
-               "hide_text": null, "made": null}},
+               "made": null}},
   "title": "...", "payoff_beats": [0]}}]}}"""
 
 
@@ -163,13 +165,9 @@ def _models():
         expression: str = "shock"
 
     class Subject(BaseModel):
-        source: str = "video"
-        t: float | None = None
-        region: str = "right-panel"
+        source: str = "art"
         query: str | None = None
         alt_query: str | None = None
-        hide: list[float] | None = None
-        hide_text: list[str] | None = None
         made: dict | None = None
 
     class Concept(BaseModel):
@@ -215,6 +213,8 @@ def validate(out, n_beats: int) -> list[str]:
             errs.append(f"payoff beat out of range: {c.payoff_beats}")
         if len(c.title) > 60:
             errs.append(f"title over 60 chars: {c.title}")
+        if c.subject.source not in ("art", "made"):
+            errs.append(f"subject source {c.subject.source!r}: only art or made (never a stream screen)")
     return errs
 
 
@@ -388,15 +388,15 @@ ART_MAX_H = 920                 # the figure's upper half (its face) stays above
 LEFT_CENTER = (390, 310)
 # per element: a tall card a bit higher so its top rows clear the hook; a cutout figure lower (it
 # stands behind the hook and may run off the bottom)
-CENTERS = {"stat_card": (390, 305), "tierlist": (420, 300), "panel": (420, 300), "art": (380, 380)}
+CENTERS = {"stat_card": (390, 305), "result": (390, 305), "tierlist": (420, 300), "art": (380, 380)}
 # his strongbox card is drawn ~0.85 as tall as the game's proportions (header 235 px for a 513 px
 # wide card vs 283:492 in game): the free-transform squash every editor does, so the rows clear the hook
-SQUASH = {"stat_card": 0.86}
+SQUASH = {"stat_card": 0.86, "result": 0.86}
 LEFT_MAX = (840, 620)
 LEFT_AREA = LEFT_MAX[0] * LEFT_MAX[1]   # = as big as fits: the cap decides
 LEFT_RIGHT = 860          # right edge limit: runs behind zy0x's near side like his tier lists
 CARD_MARGIN = (-40, 10)   # a card's soft left fade bleeds off the frame so its solid part hugs the edge
-FADES = {"panel": (0.08, 0.08, 0.08, 0.14), "stat_card": (0.05, 0.02, 0.03, 0.18),
+FADES = {"stat_card": (0.05, 0.02, 0.03, 0.18), "result": (0.05, 0.02, 0.03, 0.18),
          "tierlist": (0.05, 0.03, 0.04, 0.16), "art": (0.05, 0.03, 0.05, 0.18)}
 
 
@@ -490,12 +490,12 @@ def cards_for(c, subject, kind: str, made_kind: str | None = None) -> tuple[list
     p = subject[0] if isinstance(subject, list) else subject
     if not p:
         return [], None
-    fk = "art" if kind == "art" else (made_kind or "panel") if kind == "made" else "panel"
+    fk = "art" if kind == "art" else made_kind or "stat_card"
     soft = p.with_name(p.stem + "_soft.png")
     im = Image.open(p)
     if kind == "art":                   # the cut edge fades out behind the hook
         im = body(head_to_thigh(im))
-    fx.fade(im, FADES.get(fk, FADES["panel"])).save(soft)
+    fx.fade(im, FADES.get(fk, FADES["stat_card"])).save(soft)
     w, h = im.size
     aspect = w / h / SQUASH.get(fk, 1.0)
     if kind == "art":       # a cutout figure: nearly flat on, may run behind the hook
@@ -519,8 +519,9 @@ def cards_for(c, subject, kind: str, made_kind: str | None = None) -> tuple[list
 
 
 def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rgb, seed: int,
-               made_kind: str | None = None, hides: bool = False, hide_boxes=None) -> dict:
-    """subject_kind: art | made | panel. hides: a made graphic that already hides its own values."""
+               made_kind: str | None = None, hides: bool = False, backdrop: bool = False) -> dict:
+    """subject_kind: art | made. hides: a made graphic that already hides its own values.
+    backdrop: bg.jpg is a real in-game screenshot (BACKDROP grade), not the stream frame."""
     from PIL import Image
 
     from . import compose
@@ -540,8 +541,8 @@ def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rg
             "shade": SHADE,
             "layers": [{"kind": "face", "src": f"assets/{face_png.name}", "x": f["x"], "y": f["y"], "w": f["w"],
                         "glow": "#ffffff", "face_box": f["face"]}],
-            "scene": {"seed": seed, "fov": FOV, "bg": {"raw": "assets/bg.jpg", "blur": 12, "brightness": 0.6,
-                                                       "saturate": 1.15, "z": -400},
+            "scene": {"seed": seed, "fov": FOV, "bg": {"raw": "assets/bg.jpg", "z": -400,
+                                                       **(BACKDROP if backdrop else STREAM_BG)},
                       # nguy's editing-pack speed lines, 50% opacity, converging on zy0x's face
                       "overlays": [{"src": "assets/speedlines.png", "cx": fx + fw / 2, "cy": fy + fh / 2,
                                     "w": 1800, "z": -150, "opacity": 0.5}],
@@ -553,9 +554,11 @@ def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rg
             "text": {"lines": [ln.upper() for ln in c.hook.lines], "accent_phrase": (c.hook.accent_phrase or "").upper() or None,
                      "accent": _accent(c.hook.accent_color, bg_rgb), "annotation": c.hook.annotation,
                      "cap_frac": CAP_FRAC, "width_frac": WIDTH_FRAC, "plane": T.PLANE}}   # no skew: the slant is the 3D plane
-    if c.type == "reveal" and cards and subject_kind != "art":
-        # a made graphic hides its own values; a stream panel gets the mosaic band
-        compose.reveal(spec, d, boxes=None if hides else (hide_boxes or [(0.06, 0.30, 0.94, 0.62)]),
+    # a card that hides its own values already reads "???" beside its mosaic (his strongbox ref: no
+    # bubble, which would sit on the card's title); a tier list's pixelated icons still get the bubble
+    if c.type == "reveal" and cards and subject_kind != "art" and not (hides and made_kind in ("stat_card", "result")):
+        # a made graphic hides its own values; one that doesn't gets the mosaic band
+        compose.reveal(spec, d, boxes=None if hides else [(0.06, 0.30, 0.94, 0.62)],
                        bubble_at=(round(min(sbox[2] - 70, 560)), round(max(12, sbox[1] - 40))))
     return spec
 
@@ -605,50 +608,30 @@ def frame_sheets(cams, times: list[tuple[int, float]], root: Path, sid: int = 0)
     return names
 
 
-def text_boxes(img, phrases: list[str], ocr=None, pad: float = 0.012) -> list[tuple]:
-    """0-1 boxes of the on-screen text lines that match any phrase: a reveal's giveaways, found by
-    reading the screen (the director's guessed coordinates off a 480 px tile missed)."""
-    from difflib import SequenceMatcher
-    want = [p.lower().strip() for p in phrases or [] if p and p.strip()]
-    if not want:
-        return []
-    res = (ocr or _ocr())(img)[0] or []
+STREAM_BG = {"blur": 12, "brightness": 0.6, "saturate": 1.15}      # the stream frame: pushed back hard
+BACKDROP = {"blur": 4, "brightness": 0.85, "saturate": 1.1}          # a real game screenshot stays readable
+
+
+def backdrop(names: str | None, log=print):
+    """the first of the comma-separated places with a wiki screenshot (BGR, 16:9), or None (none
+    named, none found, offline)."""
+    import cv2
+
+    from . import art
+    for name in [n.strip() for n in (names or "").split(",") if n.strip()]:
+        try:
+            return cv2.imread(str(art.backdrop(name)))
+        except art.ArtError as e:
+            log(f"[thumb] backdrop {name!r}: {str(e)[:100]}")
+    return None
+
+
+def cover(img, aspect: float = 16 / 9):
+    """center crop to the canvas aspect: the scene stretches its plate to 16:9."""
     h, w = img.shape[:2]
-    out = []
-    for pts, txt, _ in res:
-        t = txt.lower().strip()
-        if any(p in t or (len(t) > 3 and t in p) or SequenceMatcher(None, p, t).ratio() >= 0.7 for p in want):
-            xs, ys = [q[0] for q in pts], [q[1] for q in pts]
-            out.append((max(0.0, min(xs) / w - pad), max(0.0, min(ys) / h - pad),
-                        min(1.0, max(xs) / w + pad), min(1.0, max(ys) / h + pad)))
-    return out
-
-
-PANEL_MEAN = 95            # a stream screen darker than this is lifted toward it (gamma): dark menus
-                           # read as nothing at phone size (critic, every run)
-
-
-def lift(img):
-    """brighten a dark stream screen (gamma on luminance terms, colors kept): its mean toward PANEL_MEAN."""
-    m = float(img.mean())
-    if m >= PANEL_MEAN or m <= 1:
-        return img
-    g = np.log(PANEL_MEAN / 255) / np.log(m / 255)
-    return (255 * (img.astype(np.float32) / 255) ** g).clip(0, 255).astype(np.uint8)
-
-
-def seen_screen(cams, sid: int, t: float, cam_box, region: str, root: Path, slack: float = 3.0):
-    """the gameplay frame at t (stream cam cropped off, cut to `region`) when t is a frame the
-    director looked at on its sheet, else None: a screen it chose by sight, never a blind crop."""
-    f = Path(root) / "frames.json"
-    if not f.exists() or not any(abs(t - s) <= slack for s in json.loads(f.read_text(encoding="utf-8"))):
-        return None
-    got = cams.frames(sid, [t], width=0)
-    if not got:
-        return None
-    x0, y0, x1, y1 = gameplay(REGIONS.get(region, REGIONS["full"]), cam_box)
-    h, w = got[0].shape[:2]
-    return got[0][int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)]
+    cw, ch = min(w, round(h * aspect)), min(h, round(w / aspect))
+    x, y = (w - cw) // 2, (h - ch) // 2
+    return img[y:y + ch, x:x + cw]
 
 
 def gameplay(region: tuple, cam_box) -> tuple:
@@ -670,79 +653,6 @@ def snap(cams, sid: int, t: float) -> float:
         return t
     a, b = min(spans, key=lambda r: min(abs(t - r[0]), abs(t - r[1])))
     return min(max(t, a + 0.05), b - 0.05)
-
-
-def _ocr():
-    from rapidocr_onnxruntime import RapidOCR
-    return RapidOCR()
-
-
-def _clusters(boxes: list[list[float]], gap: float) -> list[list[list[float]]]:
-    """group text boxes (x0, y0, x1, y1) whose gap-padded rects overlap (union-find)."""
-    parent = list(range(len(boxes)))
-
-    def root(i):
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-    for i, a in enumerate(boxes):
-        for j in range(i + 1, len(boxes)):
-            b = boxes[j]
-            if a[0] - gap < b[2] and b[0] - gap < a[2] and a[1] - gap < b[3] and b[1] - gap < a[3]:
-                parent[root(i)] = root(j)
-    groups: dict[int, list] = {}
-    for i, bx in enumerate(boxes):
-        groups.setdefault(root(i), []).append(bx)
-    return list(groups.values())
-
-
-def find_panel(cams, sid: int, t: float, cam_box, hint: str | None = None, window: float = 2.0, n: int = 5,
-               ocr=None):
-    """the game UI panel on screen near t (artifact card, tier list, character grid), or None.
-    text boxes (rapidocr detection) right of the stream's cam/chat column, grouped into blocks;
-    the densest block is the panel; the sharpest frame wins. never a blind region crop."""
-    import cv2
-    eng = ocr or _ocr()
-    gx0, _, gx1, _ = gameplay((0, 0, 1, 1), cam_box)
-    hx = None
-    if hint in REGIONS:
-        r = REGIONS[hint]
-        hx = (r[0] + r[2]) / 2
-    best = None
-    for tt in np.linspace(t - window, t + window, n):
-        fr = cams.frames(sid, [snap(cams, sid, float(tt))], width=0)
-        if not fr:
-            continue
-        f = fr[0]
-        H, W = f.shape[:2]
-        sw, sh = 960, 540
-        res = eng(cv2.resize(f, (sw, sh)), use_det=True, use_cls=False, use_rec=False)[0] or []
-        boxes = []
-        for q in res:
-            xs, ys = [pt[0] / sw for pt in q], [pt[1] / sh for pt in q]
-            bx = [min(xs), min(ys), max(xs), max(ys)]
-            if gx0 <= (bx[0] + bx[2]) / 2 <= gx1:
-                boxes.append(bx)
-        if len(boxes) < 5:
-            continue
-        for g in _clusters(boxes, 0.035):
-            if len(g) < 5:
-                continue
-            x0, y0 = min(b[0] for b in g), min(b[1] for b in g)
-            x1, y1 = max(b[2] for b in g), max(b[3] for b in g)
-            m = 0.03
-            x0, y0, x1, y1 = max(gx0, x0 - m), max(0, y0 - m), min(gx1, x1 + m), min(1, y1 + m)
-            w, h = x1 - x0, y1 - y0
-            if w * h < 0.06 or not 0.3 <= (w * W) / (h * H) <= 3.2:
-                continue
-            crop = f[int(y0 * H):int(y1 * H), int(x0 * W):int(x1 * W)]
-            sharp = float(cv2.Laplacian(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
-            near = 1.0 if hx is None else 1.0 - min(1.0, abs((x0 + x1) / 2 - hx))
-            score = len(g) * np.sqrt(sharp) * (0.5 + 0.5 * near)
-            if best is None or score > best[0]:
-                best = (score, crop, len(g))
-    return None if best is None else best[1]
 
 
 def _figure(q: str, log=print):
@@ -850,7 +760,7 @@ def left_queries(c, brief: dict) -> list[str]:
     return list(dict.fromkeys(q for q in (c.subject.query, c.subject.alt_query, brief.get("about_art")) if q))
 
 
-def assemble(c, k: str, root: Path, cams, browser, variant: int, brief: dict, ocr=None, log=print) -> None:
+def assemble(c, k: str, root: Path, cams, browser, variant: int, brief: dict, log=print) -> None:
     """one concept -> <root>/<k>/{assets, spec.json, thumb.png}."""
     import cv2
 
@@ -860,60 +770,37 @@ def assemble(c, k: str, root: Path, cams, browser, variant: int, brief: dict, oc
     d = root / k
     (d / "assets").mkdir(parents=True, exist_ok=True)
     c.face.t = snap(cams, sid, c.face.t)
-    if c.subject.t is not None:
-        c.subject.t = snap(cams, sid, c.subject.t)
     crop, info = best_face(cams, sid, c.face.t, c.face.expression)
     cv2.imwrite(str(d / "assets" / "face.png"), cutout(crop))
     cam_box = cams.detect(sid).box
-    sub, kind, hide = None, c.subject.source, None
+    sub, kind = None, c.subject.source
     if kind == "made" and c.subject.made:
         from . import made
         try:
             sub = made.render(c.subject.made.get("kind", "tierlist"), c.subject.made, d / "assets" / "made.png",
                               browser=browser)
-            kind = "made"
         except Exception as e:                           # a bad made spec falls back to art
             log(f"[thumb] {k}: made graphic failed ({e}); trying character art")
-            kind = "art"
-    if kind in ("video", "panel") and c.subject.t is not None:
-        # a reveal that says where its answer sits takes the whole screen it saw, so the box lands
-        box = c.subject.hide if c.type == "reveal" and c.subject.hide and len(c.subject.hide) == 4 else None
-        words = c.subject.hide_text if c.type == "reveal" else None
-        whole = bool(box or words)
-        panel = None if whole else find_panel(cams, sid, c.subject.t, cam_box, c.subject.region, ocr=ocr)
-        if panel is None:                                # a whole screen (clear time, party setup) it saw
-            panel = seen_screen(cams, sid, c.subject.t, cam_box, "full" if whole else c.subject.region, root)
-        if panel is not None and whole:
-            hide = (text_boxes(panel, words, ocr) if words else []) or ([box] if box else None)
-            if words and not hide:
-                (d / "assets" / "off_plan.txt").write_text(f"reveal: none of {words} found on screen",
-                                                           encoding="utf-8")
-        if panel is not None:
-            sub, kind = d / "assets" / "subject.png", "panel"
-            cv2.imwrite(str(sub), lift(panel))
-        else:
-            log(f"[thumb] {k}: no UI panel near {c.subject.t:.0f}s; trying character art")
-            kind = "art"
     if sub is None:                                      # nguy: there is always a left element
         kind = "art"
-    if kind == "art":
         for q in left_queries(c, brief):
             if (sub := art_card(q, d, log)) is not None:
                 break
         else:                                            # ponytail: off-plan last resort, flagged in the report
             sub = art_card(next(iter(characters_in(brief.get("entities", []))), ""), d, log)
             (d / "assets" / "off_plan.txt").write_text(f"none of {left_queries(c, brief)} had art", encoding="utf-8")
-    t_bg = c.subject.t if c.subject.t is not None and kind == "panel" else c.face.t
-    made_hides = kind == "made" and bool((c.subject.made or {}).get("hidden"))
-    bg = cams.frames(sid, [t_bg], width=0)[0]
-    gx0, _, gx1, _ = gameplay((0, 0, 1, 1), cam_box)
-    bg = bg[:, int(gx0 * bg.shape[1]):int(gx1 * bg.shape[1])]
+    bg = backdrop(brief.get("backdrop"), log)
+    real = bg is not None
+    if not real:                                         # no place named / no screenshot: the stream frame
+        bg = cams.frames(sid, [c.face.t], width=0)[0]
+        gx0, _, gx1, _ = gameplay((0, 0, 1, 1), cam_box)
+        bg = cover(bg[:, int(gx0 * bg.shape[1]):int(gx1 * bg.shape[1])])
     cv2.imwrite(str(d / "assets" / "bg.jpg"), bg, [cv2.IMWRITE_JPEG_QUALITY, 90])
     bg_rgb = cv2.cvtColor(cv2.GaussianBlur(bg, (0, 0), 12), cv2.COLOR_BGR2RGB)
-    spec = build_spec(c, d, d / "assets" / "face.png", sub, kind if kind in ("art", "made") else "panel",
-                      bg_rgb, seed=variant * 10 + "ABC".index(k),
-                      made_kind=(c.subject.made or {}).get("kind") if kind == "made" else None, hides=made_hides,
-                      hide_boxes=hide if kind == "panel" else None)
+    made_kind = (c.subject.made or {}).get("kind", "tierlist") if kind == "made" else None
+    spec = build_spec(c, d, d / "assets" / "face.png", sub, kind, bg_rgb, seed=variant * 10 + "ABC".index(k),
+                      made_kind=made_kind, hides=made_kind is not None and bool(c.subject.made.get("hidden")),
+                      backdrop=real)
     (d / "spec.json").write_text(json.dumps(spec, indent=1, ensure_ascii=False), encoding="utf-8")
     render.render(d / "spec.json", browser=browser)
     log(f"[thumb] {k} {c.type}: {' / '.join(c.hook.lines)}  (face q {info['q']}, subject {kind if sub else 'none'})")
@@ -924,13 +811,12 @@ def _render_all(run_dir: Path, root: Path, concepts: list, variant: int, brief: 
     from ..facecam import Facecams
     from . import render, report
     cams = Facecams(run_dir / "ae" / "manifest.json")
-    ocr = _ocr()
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         b = render.launch(p)
         try:
             for k, c in zip("ABC", concepts):
-                assemble(c, k, root, cams, b, variant, brief, ocr, log)
+                assemble(c, k, root, cams, b, variant, brief, log)
             if critic:                                   # one cheap look at placement, moves applied
                 from . import critic as crit
                 crit.review(root, browser=b, log=log)

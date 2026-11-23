@@ -35,7 +35,8 @@ MISTAKES = [
     ("cutout flaws: his head sliced flat by the facecam edge, chunks of wall or chair kept", "issue: another frame"),
     ("a reveal whose answer is still readable (\"Challenge Completed\" under \"did he clear it?\")",
      "issue: hide it"),
-    ("a dark or unreadable stream screen as the left element", "issue: bright art or a designed card"),
+    ("a dark left element or background (a stream screen, a dark gameplay frame)",
+     "issue: bright art, a designed card, a real game backdrop"),
     ("the left element isn't what the hook is about (the banner instead of the character chased)",
      "issue: the subject"),
 ]

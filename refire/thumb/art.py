@@ -189,17 +189,7 @@ def item(query: str, f: Fetcher | None = None, cache: Path = CACHE, cutout_fn=No
     out = cache / f"{slug(query)}_item.png"
     if out.exists():
         return out
-    q = urllib.parse.urlencode({"action": "query", "generator": "search", "gsrsearch": query, "gsrlimit": 3,
-                                "gsrnamespace": 0, "prop": "pageimages", "piprop": "original", "format": "json"})
-    meta, _, _ = f.get(f"{FANDOM_API}?{q}", accept=("application/json",))
-    pages = sorted(((json.loads(meta).get("query") or {}).get("pages") or {}).values(), key=lambda p: p.get("index", 0))
-    page = next((p for p in pages if p.get("original") and _names(query, p.get("title", ""))), None)
-    if not page:                                    # best-ranked hit that has an image and IS the thing
-        raise ArtError(f"no wiki image for {query!r}")
-    body, _, final = f.get(page["original"]["source"], accept=IMAGES)
-    from PIL import Image
-    im = Image.open(io.BytesIO(body))
-    im.load()
+    page, im, final = _lead(query, f)
     if max(im.size) < ITEM_MIN_EDGE:
         raise ArtError(f"wiki image for {query!r} too small ({im.size})")
     alpha = im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info)
@@ -215,6 +205,48 @@ def item(query: str, f: Fetcher | None = None, cache: Path = CACHE, cutout_fn=No
     out.with_suffix(".json").write_text(json.dumps(
         {"name": page.get("title"), "query": query, "source": "fandom", "url": final,
          "fetched": date.today().isoformat(), "size": list(im.size), "had_alpha": alpha}, indent=1), encoding="utf-8")
+    return out
+
+
+def _lead(query: str, f: Fetcher):
+    """the lead image of the wiki page that IS the asked thing -> (page, PIL image, final url)."""
+    q = urllib.parse.urlencode({"action": "query", "generator": "search", "gsrsearch": query, "gsrlimit": 3,
+                                "gsrnamespace": 0, "prop": "pageimages", "piprop": "original", "format": "json"})
+    meta, _, _ = f.get(f"{FANDOM_API}?{q}", accept=("application/json",))
+    pages = sorted(((json.loads(meta).get("query") or {}).get("pages") or {}).values(), key=lambda p: p.get("index", 0))
+    page = next((p for p in pages if p.get("original") and _names(query, p.get("title", ""))), None)
+    if not page:                                    # best-ranked hit that has an image and IS the thing
+        raise ArtError(f"no wiki image for {query!r}")
+    body, _, final = f.get(page["original"]["source"], accept=IMAGES)
+    from PIL import Image
+    im = Image.open(io.BytesIO(body))
+    im.load()
+    return page, im, final
+
+
+BACKDROP_MIN_W = 1280
+BACKDROP_ASPECT = (1.3, 2.1)        # a screenshot; the wiki's event banners (1080x390, text on them) are wider
+
+
+def backdrop(query: str, f: Fetcher | None = None, cache: Path = CACHE) -> Path:
+    """a real in-game background for the scene: the lead screenshot of a place's wiki page (the
+    Spiral Abyss entrance, Land of Lower Setekh), center-cropped to 16:9 -> cached JPG.
+    nguy: real game backgrounds, not the dark stream frame."""
+    f = f or Fetcher()
+    out = cache / f"{slug(query)}_backdrop.jpg"
+    if out.exists():
+        return out
+    _, im, final = _lead(query, f)
+    w, h = im.size
+    cut = im.mode in ("RGBA", "LA", "P") and im.convert("RGBA").getchannel("A").getextrema()[0] < 250
+    if w < BACKDROP_MIN_W or not BACKDROP_ASPECT[0] <= w / h <= BACKDROP_ASPECT[1] or cut:
+        raise ArtError(f"wiki image for {query!r} isn't a background ({im.size}, {im.mode})")
+    cw, ch = min(w, round(h * 16 / 9)), min(h, round(w * 9 / 16))
+    x, y = (w - cw) // 2, (h - ch) // 2
+    cache.mkdir(parents=True, exist_ok=True)
+    im.convert("RGB").crop((x, y, x + cw, y + ch)).resize((1920, 1080)).save(out, "JPEG", quality=90)
+    out.with_suffix(".json").write_text(json.dumps({"query": query, "url": final, "size": [w, h],
+                                                    "fetched": date.today().isoformat()}, indent=1), encoding="utf-8")
     return out
 
 

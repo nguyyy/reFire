@@ -7,7 +7,7 @@ from refire.thumb import pipeline
 def concepts(types=("reaction", "subject", "reveal"), lines=("BIG", "HOOK?"), payoff=(1,)):
     Out = pipeline._models()
     return Out.model_validate({"brief": {"promise": "x"}, "concepts": [
-        {"type": t, "hook": {"lines": list(lines)}, "face": {"t": 10}, "subject": {"source": "none"},
+        {"type": t, "hook": {"lines": list(lines)}, "face": {"t": 10}, "subject": {"source": "art"},
          "title": "t", "payoff_beats": list(payoff)} for t in types]})
 
 
@@ -16,6 +16,9 @@ def test_validate_house_rules():
     assert any("one of each type" in e for e in pipeline.validate(concepts(types=("reaction",) * 3), 5))
     assert any("too long" in e for e in pipeline.validate(concepts(lines=("ONE TWO THREE", "FOUR FIVE SIX")), 5))
     assert any("out of range" in e for e in pipeline.validate(concepts(payoff=(9,)), 5))
+    out = concepts()
+    out.concepts[2].subject.source = "panel"                  # nguy: never a stream screen
+    assert any("never a stream screen" in e for e in pipeline.validate(out, 5))
 
 
 def test_concept_without_payoff_is_rejected():
@@ -178,19 +181,6 @@ def test_annotation_may_not_repeat_the_hook():
     assert pipeline.validate(out, 5) == []
 
 
-def test_seen_screen_only_for_a_frame_the_director_saw(tmp_path):
-    import json
-
-    class Cams:
-        def frames(self, sid, ts, width=0):
-            return [np.full((720, 1280, 3), 77, np.uint8)]
-    (tmp_path / "frames.json").write_text(json.dumps([100.0, 250.0]), encoding="utf-8")
-    cam = (0.0, 0.0, 0.2, 0.4)                                  # stream cam on the left
-    got = pipeline.seen_screen(Cams(), 0, 101.5, cam, "full", tmp_path)
-    assert got is not None and got.shape[1] < 1280 * 0.8 + 2      # cam column cropped off
-    assert pipeline.seen_screen(Cams(), 0, 180.0, cam, "full", tmp_path) is None    # never blind
-
-
 def test_team_puts_the_first_named_in_the_middle_in_front_and_larger():
     from PIL import Image
     figs = [Image.new("RGBA", (300, 400), c) for c in ((255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255))]
@@ -200,17 +190,6 @@ def test_team_puts_the_first_named_in_the_middle_in_front_and_larger():
     assert px[g.height - 5, g.width // 2, 0] == 255           # red stands in the middle, drawn over the others
     assert px[g.height - 5, 5, 1] == 255 and px[g.height - 5, g.width - 5, 2] == 255
     assert px[2, 5, 3] == 0                                   # the smaller side figures stand lower
-
-
-def test_text_boxes_find_a_reveals_giveaways():
-    img = np.zeros((100, 200, 3), np.uint8)
-
-    def ocr(im):                                              # rapidocr's shape: [[pts, text, score]], elapse
-        return [[[[20, 10], [120, 10], [120, 30], [20, 30]], "Challenge Completed", 0.99],
-                [[[20, 60], [80, 60], [80, 70], [20, 70]], "Leave for Now", 0.98]], 0.1
-    got = pipeline.text_boxes(img, ["challenge completed"], ocr)
-    assert len(got) == 1 and abs(got[0][0] - (0.1 - 0.012)) < 1e-9 and got[0][3] < 0.35
-    assert pipeline.text_boxes(img, ["143,229"], ocr) == [] and pipeline.text_boxes(img, None, ocr) == []
 
 
 def test_head_to_thigh_skips_thin_effects_above_the_head():
@@ -239,12 +218,37 @@ def test_art_grows_from_the_top_left_until_it_covers_its_share():
     assert pipeline.art_size(tall, 300)[0] <= 300             # never past the width cap
 
 
-def test_dark_stream_screens_are_lifted_bright_ones_kept():
-    dark = np.full((10, 10, 3), 40, np.uint8)
-    out = pipeline.lift(dark)
-    assert abs(float(out.mean()) - pipeline.PANEL_MEAN) < 3
-    bright = np.full((10, 10, 3), 150, np.uint8)
-    assert (pipeline.lift(bright) == bright).all()
+def test_stream_frame_fallback_is_cropped_to_the_canvas_aspect():
+    assert pipeline.cover(np.zeros((720, 950, 3), np.uint8)).shape[:2] == (534, 950)    # cam column cut off
+    assert pipeline.cover(np.zeros((1000, 3000, 3), np.uint8)).shape[:2] == (1000, 1778)
+    assert pipeline.backdrop(None) is None                                             # no place named
+
+
+def test_backdrop_falls_back_to_the_next_place(monkeypatch, tmp_path):
+    import cv2
+    from refire.thumb import art
+    cv2.imwrite(str(tmp_path / "m.jpg"), np.full((90, 160, 3), 200, np.uint8))
+
+    def fake(name):
+        if name == "Stygian Onslaught":
+            raise art.ArtError("banner")
+        return tmp_path / "m.jpg"
+    monkeypatch.setattr(art, "backdrop", fake)
+    seen = []
+    assert pipeline.backdrop("Stygian Onslaught, Mondstadt", seen.append).shape == (90, 160, 3)
+    assert len(seen) == 1 and "Stygian" in seen[0]
+
+
+def test_result_card_hides_its_headline_and_drops_the_artifact_bits():
+    import pytest
+    from refire.thumb import made, text
+    if not text._installed(made.GAME_FONT).exists():
+        pytest.skip("game font not installed")
+    c = made.stat_card_svg({"kind": "result", "title": "Wavebinder: Stormfang", "subtitle": "Stygian Onslaught",
+                            "main": ["Time Elapsed", "117s"], "rows": [["Team", "Sucrose"], ["Swirls", "1"]],
+                            "hidden": ["main", 1]}, None)
+    assert "117s" not in c and c.count("???") == 2 and "Team: Sucrose" in c and "Swirls: " in c
+    assert 'width="116" height="58"' not in c and "<polygon" not in c and "#3A434E" not in c   # no lock, stars, level
 
 
 def test_body_drops_a_thin_ribbon_at_the_side():

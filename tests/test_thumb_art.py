@@ -146,6 +146,31 @@ def test_item_takes_the_wiki_lead_image(tmp_path):
         art.item("X", f2, cache=tmp_path)
 
 
+def test_backdrop_takes_a_screenshot_and_refuses_a_banner(tmp_path):
+    def api(q):
+        return ("https://genshin-impact.fandom.com/api.php?action=query&generator=search&gsrsearch=" + q +
+                "&gsrlimit=3&gsrnamespace=0&prop=pageimages&piprop=original&format=json")
+    shot, banner = "https://static.wikia.nocookie.net/a.png", "https://static.wikia.nocookie.net/b.png"
+    routes = {api("Spiral+Abyss"): (json.dumps({"query": {"pages": {"1": {"title": "Spiral Abyss",
+                                                                     "original": {"source": shot}}}}}).encode(),
+                                    "application/json"),
+              api("Stygian+Onslaught"): (json.dumps({"query": {"pages": {"1": {"title": "Stygian Onslaught",
+                                                                          "original": {"source": banner}}}}}).encode(),
+                                         "application/json"),
+              shot: (png(2560, 1600), "image/png"),                       # opaque RGBA, 16:10
+              banner: (png(1080, 390, alpha=False), "image/png")}         # the event banner
+    f = art.Fetcher(delay=0, opener=opener(routes, []))
+    with pytest.raises(art.ArtError, match="transparent|isn't a background"):
+        art.backdrop("Spiral Abyss", f, cache=tmp_path)              # png() is fully transparent: a cutout
+    b = io.BytesIO()
+    Image.new("RGBA", (2560, 1600), (90, 140, 200, 255)).save(b, "PNG")
+    routes[shot] = (b.getvalue(), "image/png")
+    p = art.backdrop("Spiral Abyss", f, cache=tmp_path)
+    assert Image.open(p).size == (1920, 1080)
+    with pytest.raises(art.ArtError, match="isn't a background"):
+        art.backdrop("Stygian Onslaught", f, cache=tmp_path)
+
+
 def test_figure_keeps_only_what_the_model_calls_foreground(tmp_path):
     im = Image.new("RGBA", (400, 300), (200, 50, 50, 255))          # an opaque painted backdrop
     im.save(tmp_path / "s.png")
