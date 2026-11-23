@@ -54,6 +54,11 @@ Concept types, use each exactly once:
 - reveal: hide the answer (a stat, a tier placement, a pull result) behind a pixel mosaic with a
   "???" bubble; the hook is a question.
 
+When frame sheets are given, Read every one before you plan: they show the gameplay at each beat,
+labelled "b<beat> <source seconds>". Plan the left element from what was actually on screen: a panel
+must be one you saw (its t = that label's seconds), an art query names a thing you saw (the
+character he played, the boss he fought, the item that dropped).
+
 Pick face.t ONLY from the given moments (source seconds) and say the expression. The subject
 must be deliberate, one item: either a game UI panel that was on screen (source "panel": t = source
 seconds when the panel (artifact card, tier list, wish result, character grid) is showing, region =
@@ -189,13 +194,15 @@ def validate(out, n_beats: int) -> list[str]:
 
 
 def direct(ctx: dict, previous_hooks: list[str], variant: int, backend: str = "cli",
-           model: str = "claude-opus-5", effort: str = "medium", ask=None):
-    """one call (plus one corrective retry) -> validated Out."""
+           model: str = "claude-opus-5", effort: str = "medium", ask=None, sheets=None, cwd=None):
+    """one call (plus one corrective retry) -> validated Out. sheets: frame sheet file names in
+    `cwd` the model Reads first (cli only; ponytail: the api fallback goes without them)."""
     from .. import director
     Out = _models()
     note = (f"\n\nThis is run {variant}. Bet differently from these earlier hooks: {previous_hooks}"
             if previous_hooks else "")
-    user = json.dumps(ctx, ensure_ascii=False) + note
+    look = f"\n\nFrame sheets (Read them first): {', '.join(sheets)}" if sheets else ""
+    user = json.dumps(ctx, ensure_ascii=False) + note + look
 
     def call(text):
         if ask:
@@ -206,7 +213,8 @@ def direct(ctx: dict, previous_hooks: list[str], variant: int, backend: str = "c
             for _ in range(2):          # the cli now and then returns unparseable json: one more try first
                 try:
                     return director._complete_cli(model, SYSTEM, content, Out, tag="thumb director", effort=effort,
-                                                  live=False)
+                                                  live=False, tools="Read" if sheets else "",
+                                                  cwd=cwd if sheets else None)
                 except (RuntimeError, OSError) as e:
                     err = e
             director._api_fallback("thumb director", err)
@@ -469,6 +477,47 @@ def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rg
 
 # --------------------------------------------------------------------------- run
 
+SHEET_COLS, SHEET_ROWS, SHEET_TILE = 4, 3, (480, 270)
+
+
+def beat_times(run_dir: Path) -> list[tuple[int, float]]:
+    """(beat id, source s) worth a look: the middle of every segment of every outline beat."""
+    beats = json.loads((Path(run_dir) / "outline.json").read_text(encoding="utf-8")).get("beats", [])
+    return [(i, round((a + e) / 2, 1)) for i, b in enumerate(beats)
+            for a, e in (b.get("segments") or [[b.get("start", 0), b.get("end", 0)]])]
+
+
+def frame_sheets(cams, times: list[tuple[int, float]], root: Path, sid: int = 0) -> list[str]:
+    """the gameplay at each beat, labelled "b<beat> <source s>", 12 to a sheet -> file names in
+    root. what the director looks at before planning the left element: the transcript can't
+    say what was on screen."""
+    import cv2
+    cam = cams.detect(sid)
+    gx0, _, gx1, _ = gameplay((0, 0, 1, 1), cam.box if cam else None)
+    tw, th = SHEET_TILE
+    tiles = []
+    for b, t in times:
+        got = cams.frames(sid, [t], width=0)
+        if not got:
+            continue
+        f = got[0][:, int(gx0 * got[0].shape[1]):int(gx1 * got[0].shape[1])]
+        w = min(tw, round(f.shape[1] * th / f.shape[0]))
+        tile = np.zeros((th, tw, 3), np.uint8)
+        tile[:, (tw - w) // 2:(tw - w) // 2 + w] = cv2.resize(f, (w, th), interpolation=cv2.INTER_AREA)
+        label = f"b{b} {t:.0f}s"
+        for color, thick in (((0, 0, 0), 5), ((255, 255, 255), 2)):
+            cv2.putText(tile, label, (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, thick, cv2.LINE_AA)
+        tiles.append(tile)
+    per = SHEET_COLS * SHEET_ROWS
+    names = []
+    for k in range(0, len(tiles), per):
+        chunk = tiles[k:k + per] + [np.zeros((th, tw, 3), np.uint8)] * (per - len(tiles[k:k + per]))
+        sheet = np.vstack([np.hstack(chunk[r * SHEET_COLS:(r + 1) * SHEET_COLS]) for r in range(SHEET_ROWS)])
+        names.append(f"frames_{k // per + 1}.jpg")
+        cv2.imwrite(str(Path(root) / names[-1]), sheet, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return names
+
+
 def gameplay(region: tuple, cam_box) -> tuple:
     """keep a crop off the stream's own facecam + the chat stacked above it: a left cam trims
     the region's left edge to the cam's right edge (a right cam, the other way)."""
@@ -695,8 +744,11 @@ def run(run_dir, variant: int = 1, previous_hooks: list[str] | None = None, back
     t0 = time.monotonic()
     ctx = context(run_dir)
     log(f"[thumb] context: {len(ctx['beats'])} beats, {len(ctx['moments'])} moments ({time.monotonic() - t0:.0f}s)")
+    from ..facecam import Facecams
+    sheets = frame_sheets(Facecams(run_dir / "ae" / "manifest.json"), beat_times(run_dir), root)
+    log(f"[thumb] frame sheets: {sheets}")
     t1 = time.monotonic()
-    out = direct(ctx, previous_hooks or [], variant, backend, model, ask=ask)
+    out = direct(ctx, previous_hooks or [], variant, backend, model, ask=ask, sheets=sheets, cwd=root)
     log(f"[thumb] director: {[c.hook.lines for c in out.concepts]} ({time.monotonic() - t1:.0f}s)")
     (root / "brief.json").write_text(json.dumps(out.brief, indent=1, ensure_ascii=False), encoding="utf-8")
     order = sorted(out.concepts, key=lambda c: TYPES.index(c.type))

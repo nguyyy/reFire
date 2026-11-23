@@ -135,3 +135,25 @@ def test_left_element_lookups_stay_on_plan():
     assert pipeline.left_queries(c, {"about_art": "Escoffier", "entities": ["Qiqi"]}) == ["Skirk", "Escoffier"]
     c.subject.query = c.subject.alt_query = None
     assert pipeline.left_queries(c, {"entities": ["Qiqi"]}) == []        # never a passing mention
+
+
+def test_frame_sheets_label_every_beat_frame(tmp_path):
+    import json
+
+    import cv2
+    (tmp_path / "outline.json").write_text(json.dumps({"beats": [
+        {"segments": [[0, 10], [20, 30]]}, {"start": 40, "end": 50}]}), encoding="utf-8")
+    times = pipeline.beat_times(tmp_path)
+    assert times == [(0, 5.0), (0, 25.0), (1, 45.0)]
+
+    class Cams:
+        def detect(self, sid):
+            return None
+
+        def frames(self, sid, ts, width=0):
+            return [] if ts[0] == 25.0 else [np.full((720, 1280, 3), 90, np.uint8)]   # 25 s: outside the cut
+    names = pipeline.frame_sheets(Cams(), times * 5, tmp_path)                    # 10 frames found -> 1 sheet
+    assert names == ["frames_1.jpg"]
+    sheet = cv2.imread(str(tmp_path / names[0]))
+    assert sheet.shape == (3 * 270, 4 * 480, 3)
+    assert sheet[200, 240].mean() > 60 and sheet[800, 1800].mean() < 10        # tiles filled, the rest black
