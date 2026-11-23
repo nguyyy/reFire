@@ -367,7 +367,10 @@ TEAM_STEP = 0.5                 # each team figure starts this far into the prev
 # nguy: the left element fills the left AND the middle so little background shows; the hook may
 # cover part of it. his run from the left edge into the middle and behind zy0x (more tier lists to
 # x ~770, the best tier list past 1000), from the top down behind the hook
-ART_FILL = 0.8                  # a figure's opaque pixels cover ~80% of the left half
+ART_COVER = 0.32                # a figure's VISIBLE opaque pixels / frame (his left elements 24-42%)
+ART_AT = (-30, 10)              # a figure hangs from the top-left, a little off the left edge (his bleed off
+ART_MAX_W = 1100                # the edges) and may run on behind zy0x and off the bottom
+ART_MAX_H = 920                 # the figure's upper half (its face) stays above the hook (~y 470)
 LEFT_CENTER = (390, 310)
 # per element: a tall card a bit higher so its top rows clear the hook; a cutout figure lower (it
 # stands behind the hook and may run off the bottom)
@@ -436,6 +439,25 @@ def fit_card(src: str, aspect: float, box: tuple, z: float, rot: list, canvas=(1
     return card
 
 
+def art_size(mask: np.ndarray, max_w: float, canvas=(1280, 720)) -> tuple[float, float]:
+    """on-screen (w, h) for a cutout hung at ART_AT: grown until the part inside the frame covers
+    ART_COVER of it (the rest runs off the bottom behind the hook), capped by max_w."""
+    W, H = canvas
+    mh, mw = mask.shape
+    rows = mask.mean(axis=1)
+    best = None
+    for sh in range(300, ART_MAX_H + 1, 10):
+        sw = sh * mw / mh
+        if sw > max_w:
+            break
+        vis = min(sh, H - ART_AT[1])
+        k = max(1, int(mh * vis / sh))
+        best = (sw, sh)
+        if rows[:k].mean() * sw * vis >= ART_COVER * W * H:
+            break
+    return best or (max_w, max_w * mh / mw)
+
+
 def left_box(sw: float, sh: float, center=LEFT_CENTER, margin=(40, 30), canvas=(1280, 720),
              right: float = LEFT_RIGHT) -> tuple:
     """the element's screen box: sw x sh around `center`, pushed inside the frame margins."""
@@ -458,15 +480,15 @@ def cards_for(c, subject, kind: str, made_kind: str | None = None) -> tuple[list
     im = Image.open(p)
     if kind == "art":                   # the cut edge fades out behind the hook
         im = head_to_thigh(im)
+        # hang it by its solid pixels: a splash's faint wisps would otherwise push it toward the middle
+        im = im.crop(im.getchannel("A").point(lambda v: 255 if v > 128 else 0).getbbox() or (0, 0, *im.size))
     fx.fade(im, FADES.get(fk, FADES["panel"])).save(soft)
     w, h = im.size
     aspect = w / h / SQUASH.get(fk, 1.0)
     if kind == "art":       # a cutout figure: nearly flat on, may run behind the hook
         # sized by what the figure covers, not its box: a cutout is mostly transparent
-        cov = max(0.25, float((np.asarray(im.getchannel("A")) > 128).mean()))
-        wide = aspect > 1.4             # a team / an action pose: may run on behind zy0x like his tier lists
-        sw, sh = screen_size((aspect, 1), area=ART_FILL * 640 * 720 / cov, max_wh=(LEFT_RIGHT, 720))
-        box = left_box(sw, sh, CENTERS["art"], margin=(10, 0), right=LEFT_RIGHT + (60 if wide else 0))
+        sw, sh = art_size(np.asarray(im.getchannel("A")) > 128, ART_MAX_W)
+        box = (ART_AT[0], ART_AT[1], ART_AT[0] + sw, ART_AT[1] + sh)
         rot = [0, 8, 0]
     else:
         if fk == "tierlist":    # his tier lists run on behind zy0x (only ~4 icons per row show)
@@ -494,7 +516,7 @@ def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rg
     box = compose.face_box(arr)
     if box is None:
         raise ValueError("no face in the cutout")
-    target = 0.80 if c.type == "subject" else compose.FIGURE_TARGET
+    target = compose.FIGURE_TARGET                     # every layout: the 80-90 rule (was 0.80 for subject)
     import shutil
     shutil.copy(SPEEDLINES, d / "assets" / "speedlines.png")
     f = compose.place_face(im.size, box, compose.head_top(arr), target=target)

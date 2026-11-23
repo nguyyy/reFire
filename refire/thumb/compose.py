@@ -12,7 +12,10 @@ import numpy as np
 
 CANVAS = (1280, 720)
 FIGURE = (0.80, 0.90)           # head top -> frame bottom / canvas height (Nguy, T6)
-FIGURE_TARGET = 0.88
+FIGURE_TARGET = 0.90             # head top -> frame bottom (refs 88-93%; nguy: the 80-90 rule)
+SHOULDER_K = 1.15                # face center -> frame edge in face widths: his far shoulder touches the
+                                 # edge (refs, same detector: 0.9-2.2, median 1.15; face centers 917-1008)
+FACE_SPAN = (0.70, 0.84)         # the face center stays within this share of the width (refs 0.72-0.79)
 FACE_MAX = 0.62                 # never let a tight cam crop blow the face past this
 BADGE = (0.16, 0.12)            # youtube duration badge: bottom-right width x height
 
@@ -39,14 +42,19 @@ def head_top(cut_bgra: np.ndarray, frac: float = 0.02) -> int:
 def place_face(cut_wh: tuple[int, int], box: list[float], top: float, canvas=CANVAS, side: str = "right",
                target: float = FIGURE_TARGET) -> dict:
     """zy0x fills `target` of the frame from the top of his head down, running off the bottom
-    (refs, Nguy: ~80-90%); face centered on the right (or left) third."""
+    (refs, Nguy: ~80-90%), placed so his far shoulder (estimated from his face: the cutout's own
+    edges are chairs and mic stands as often as shoulders) touches the frame edge, the face kept
+    within FACE_SPAN."""
     W, H = canvas
     cw, ch = cut_wh
     fx, fy, fw, fh = box
     s = target * H / max(1.0, ch - top)
     s = min(s, FACE_MAX * H / fh)
     y = H - ch * s                                           # the cam crop's cut edge sits on the frame bottom
-    cx = (0.74 if side == "right" else 0.26) * W
+    reach = SHOULDER_K * fw * s
+    cx = W - reach if side == "right" else reach
+    lo, hi = FACE_SPAN if side == "right" else (1 - FACE_SPAN[1], 1 - FACE_SPAN[0])
+    cx = min(max(cx, lo * W), hi * W)
     x = cx - (fx + fw / 2) * s
     return {"x": round(x, 1), "y": round(y, 1), "w": round(cw * s, 1),
             "face": [round(x + fx * s, 1), round(y + fy * s, 1), round(fw * s, 1), round(fh * s, 1)]}

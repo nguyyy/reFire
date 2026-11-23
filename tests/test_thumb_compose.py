@@ -4,13 +4,12 @@ import pytest
 from refire.thumb import compose
 
 
-def test_figure_fills_88_percent_from_head_to_frame_bottom():
+def test_figure_fills_90_percent_from_head_to_frame_bottom():
     # cutout 480x420, head starts at row 30, face box 120x150 at (180, 90)
     f = compose.place_face((480, 420), [180, 90, 120, 150], top=30, side="right")
     s = f["w"] / 480
     assert f["y"] + 420 * s == pytest.approx(720, abs=0.5)                  # cut edge on the frame bottom
-    assert 720 - (f["y"] + 30 * s) == pytest.approx(0.88 * 720, abs=0.5)    # head top -> bottom = 88%
-    assert f["face"][0] + f["face"][2] / 2 == pytest.approx(0.74 * 1280, abs=0.5)
+    assert 720 - (f["y"] + 30 * s) == pytest.approx(compose.FIGURE_TARGET * 720, abs=0.5)   # head top -> bottom
 
 
 def test_tight_crop_caps_the_face():
@@ -20,7 +19,8 @@ def test_tight_crop_caps_the_face():
 
 def test_left_side_mirrors():
     f = compose.place_face((480, 420), [180, 90, 120, 150], top=30, side="left")
-    assert f["face"][0] + f["face"][2] / 2 == pytest.approx(0.26 * 1280, abs=0.5)
+    r = compose.place_face((480, 420), [180, 90, 120, 150], top=30, side="right")
+    assert f["face"][0] + f["face"][2] / 2 == pytest.approx(1280 - (r["face"][0] + r["face"][2] / 2), abs=0.5)
 
 
 def test_head_top_reads_the_alpha():
@@ -91,3 +91,11 @@ def test_bake_plate_grades_like_css(tmp_path):
     out = render.bake_plate(tmp_path / "f.png", tmp_path / "p.jpg", blur=4, brightness=0.5, saturate=1.0)
     r, g, b = Image.open(out).getpixel((32, 18))
     assert abs(r - 100) <= 3 and abs(g - 50) <= 3 and abs(b - 25) <= 3
+
+
+def test_far_shoulder_touches_the_frame_edge_face_stays_in_span():
+    f = compose.place_face((480, 420), [180, 90, 120, 150], top=30)
+    s = f["w"] / 480
+    cx = f["face"][0] + f["face"][2] / 2
+    assert cx + compose.SHOULDER_K * 120 * s == pytest.approx(1280, abs=0.5) or         cx == pytest.approx(compose.FACE_SPAN[1] * 1280, abs=0.5)
+    assert compose.FACE_SPAN[0] * 1280 - 0.5 <= cx <= compose.FACE_SPAN[1] * 1280 + 0.5

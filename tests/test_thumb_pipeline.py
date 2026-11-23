@@ -223,3 +223,18 @@ def test_head_to_thigh_skips_thin_effects_above_the_head():
     out = np.asarray(pipeline.head_to_thigh(im).getchannel("A"))
     assert (out[0] > 0).sum() > 150                           # starts at the body, not the ribbon
     assert out.shape[0] <= round(800 * 0.6) + 1
+
+
+def test_art_grows_from_the_top_left_until_it_covers_its_share():
+    def cover(m, sw, sh):
+        vis = min(sh, 720 - pipeline.ART_AT[1])
+        return m[:max(1, int(m.shape[0] * vis / sh))].mean() * sw * vis / (1280 * 720)
+    wide = np.zeros((500, 900), bool)
+    wide[:, 100:800] = True                                   # wide and dense: reaches its share
+    sw, sh = pipeline.art_size(wide, 1100)
+    assert pipeline.ART_COVER <= cover(wide, sw, sh) < pipeline.ART_COVER + 0.02
+    tall = np.zeros((900, 450), bool)
+    tall[:, 100:350] = True                                   # tall and thin: stops at the height cap,
+    sw, sh = pipeline.art_size(tall, 1100)                    # its face stays above the hook
+    assert sh <= pipeline.ART_MAX_H and cover(tall, sw, sh) < pipeline.ART_COVER
+    assert pipeline.art_size(tall, 300)[0] <= 300             # never past the width cap
