@@ -264,8 +264,10 @@ EDGE = 0.04          # a face box this close to the cam's side or top edge is cu
 
 def best_face(cams, sid: int, t: float, expression: str, window: float = 1.5, fps: float = 6.0):
     """score facecam frames around t (spec q = .35 sharp + .35 expression + .15 size + .15 open);
-    -> (crop BGR, info). expression proxy: mouth-open darkness from yunet's mouth corners.
-    ponytail: MediaPipe blendshapes would score expression properly (needs the opencv override)."""
+    -> (crop BGR, info). expression + open = mediapipe blendshapes (expression.py: the spec's recipes;
+    open = eyes open, on the camera, head not tilted far); without mediapipe the old proxy
+    (mouth-open darkness, yunet confidence)."""
+    from . import expression as X
     import cv2
     cam = cams.detect(sid)
     if cam is None:
@@ -306,13 +308,20 @@ def best_face(cams, sid: int, t: float, expression: str, window: float = 1.5, fp
     def norm(k):
         v = np.array([c[k] for c in keep], float)
         return (v - v.min()) / (v.max() - v.min()) if v.max() > v.min() else np.ones_like(v)
-    S, O, M = norm("sharp"), norm("conf"), norm("mouth")
+    reads = [X.read(c["crop"]) for c in keep] if X.landmarker() is not None else []
+    if reads and all(r is not None for r in reads):
+        for c, r in zip(keep, reads):
+            c["exp"], c["facing"] = X.score(expression, r["bs"]), X.facing(r)
+        S, M, Op = norm("sharp"), norm("exp"), np.array([c["facing"] for c in keep])
+    else:                                                # no mediapipe: the darkness proxy
+        S, Op, M = norm("sharp"), norm("conf"), norm("mouth")
+        if expression in ("deadpan", "skeptical"):
+            M = 1.0 - M
     # his usual size in the window, not the biggest: leaning into the cam blows the face up and
     # breaks the 80-90 framing (the cap then leaves him short of the frame top)
     sz = np.array([c["size"] for c in keep], float)
     A = 1.0 - np.minimum(1.0, np.abs(sz - np.median(sz)) / max(1.0, np.median(sz)))
-    E = 1.0 - M if expression in ("deadpan", "skeptical") else M
-    q = 0.35 * S + 0.35 * E + 0.15 * A + 0.15 * O
+    q = 0.35 * S + 0.35 * M + 0.15 * A + 0.15 * Op
     i = int(np.argmax(q))
     return keep[i]["crop"], {"q": round(float(q[i]), 3), "frames": len(cand)}
 
