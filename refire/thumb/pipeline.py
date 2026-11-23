@@ -496,8 +496,7 @@ def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rg
                                 else {"strength": 0.5, "radius": 0.4, "threshold": 0.82})},
             "text": {"lines": [ln.upper() for ln in c.hook.lines], "accent_phrase": (c.hook.accent_phrase or "").upper() or None,
                      "accent": _accent(c.hook.accent_color, bg_rgb), "annotation": c.hook.annotation,
-                     "cap_frac": CAP_FRAC, "width_frac": WIDTH_FRAC, "plane": T.PLANE,
-                     **({"skew": -10} if c.type == "reveal" else {})}}
+                     "cap_frac": CAP_FRAC, "width_frac": WIDTH_FRAC, "plane": T.PLANE}}   # no skew: the slant is the 3D plane
     if c.type == "reveal" and cards and subject_kind != "art":
         # a made graphic hides its own values; a stream panel gets the mosaic band
         compose.reveal(spec, d, boxes=None if hides else [hide_box or (0.06, 0.30, 0.94, 0.62)],
