@@ -19,6 +19,8 @@ def _warnings(d: Path, spec: dict) -> list[str]:
         m = json.loads(meta.read_text(encoding="utf-8"))
         if m.get("source") != "yatta":
             out.append(f"art for {m.get('name')} came from a fallback source ({m.get('source')})")
+    if (d / "assets" / "off_plan.txt").exists():
+        out.append("left element is off-plan: " + (d / "assets" / "off_plan.txt").read_text(encoding="utf-8"))
     face = next((L for L in spec.get("layers", []) if L.get("kind") == "face"), None)
     if face and (d / face["src"]).exists():
         from PIL import Image
@@ -61,6 +63,7 @@ def build(run_dir, ocr=None, root=None) -> Path:
         c = r["concept"]
         L += [f"## {r['id']}: {checks.hook_text(r['spec']) or '(no hook)'}", "",
               f"- **Bet:** {c.get('bet') or c.get('type') or r['spec'].get('layout', '—')}",
+              *[f"- **Plan, {k}:** {v}" for k, v in (c.get("plan") or {}).items()],
               f"- **Title:** {c.get('title', '—')}",
               f"- **Paid off by:** {', '.join(map(str, c.get('payoff_beats', []))) or '— (no payoff beats on file: concept step not run)'}",
               "- **Checks:** " + "; ".join(f"{x['name']} {'ok' if x['ok'] else 'FAIL'} ({x['value']}, need {x['need']})"

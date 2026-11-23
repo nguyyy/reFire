@@ -110,3 +110,22 @@ def test_shine_ramps_from_dark_edges_to_a_light_middle():
         assert stops[peak][0] == pytest.approx(st.shine_peak, abs=0.07)
         assert all(a <= b + 1e-3 for a, b in zip(L[:peak], L[1:peak + 1]))                  # rises to the peak
         assert max(L) - (L[0] + L[-1]) / 2 > 0.25                                           # a real shine
+
+
+def test_keystone_keeps_width_and_anchor_and_scales_the_far_end(m):
+    import numpy as np
+    lines = T.layout(["MORE", "TIER LISTS"], m, (1280, 720), T.Style())
+    x0, x1 = min(ln.x for ln in lines), max(ln.x + ln.width for ln in lines)
+    yt, yb = lines[0].baseline - lines[0].cap(m), lines[-1].baseline
+
+    def at(H, x, y):
+        u, v, w = H @ np.array([x, y, 1.0])
+        return u / w, v / w
+    for anchor, near, far in (("bottom-left", x0, x1), ("bottom-right", x1, x0)):
+        H = T.keystone(lines, 1.2, anchor)
+        for y in (yt, yb):
+            assert np.allclose(at(H, near, y), (near, y))                  # anchored edge untouched
+        (fx, ft), (_, fb) = at(H, far, yt), at(H, far, yb)
+        assert abs(fx - far) < 1e-6 and abs((fb - ft) - 1.2 * (yb - yt)) < 1e-6   # width kept, far end x1.2
+    assert "matrix3d(" in T.page({"lines": ["MORE", "TIER LISTS"], "keystone": 0.88}, (1280, 720))
+    assert "matrix3d(" not in T.page({"lines": ["MORE", "TIER LISTS"]}, (1280, 720))

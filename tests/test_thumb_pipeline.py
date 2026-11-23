@@ -127,3 +127,11 @@ def test_fit_card_lands_its_projected_corners_on_the_box():
     assert abs((got[0] + got[2]) - (box[0] + box[2])) < 2 and abs((got[1] + got[3]) - (box[1] + box[3])) < 2
     assert abs((got[2] - got[0]) - (box[2] - box[0])) < 2 or abs((got[3] - got[1]) - (box[3] - box[1])) < 2
     assert got[0] >= box[0] - 1 and got[1] >= box[1] - 1 and got[2] <= box[2] + 1 and got[3] <= box[3] + 1
+
+
+def test_left_element_lookups_stay_on_plan():
+    c = concepts().concepts[0]
+    c.subject.query, c.subject.alt_query = "Skirk", "Skirk"
+    assert pipeline.left_queries(c, {"about_art": "Escoffier", "entities": ["Qiqi"]}) == ["Skirk", "Escoffier"]
+    c.subject.query = c.subject.alt_query = None
+    assert pipeline.left_queries(c, {"entities": ["Qiqi"]}) == []        # never a passing mention

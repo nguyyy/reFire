@@ -37,6 +37,17 @@ zy0x's face is huge on the right (shock, deadpan, skeptical, hype, laughing). Th
 ONE clear item that says what the video is about, big: whatever conveys it best, not only
 characters or artifacts (a weapon, a boss, a wish result, a tier list, an artifact card, ...).
 
+Think before you design. First name what the video is about (brief.about): the one thing a fan
+recognizes in a second, usually what the stream title and the central idea are about (a new
+character, a boss or mode like Stygian Onslaught, the artifact that dropped, a tier list, a
+region at 100%). EVERY concept's left element shows that thing or its sharpest evidence (the
+character he built or pulled, the boss he fought, the artifact that dropped), never a character
+only mentioned in passing. The three concepts may show it differently (official art / a designed
+in-game card / the stream's own panel) but all sell this video. What makes a fan click: novelty
+(a new character, boss, area), value (5-star, max roll, #1, C6, 100%), stakes or mystery (hidden
+behind the mosaic). The hook and the left element work as a pair: the hook asks about or names
+what the left shows, never repeats it word for word. Write each concept's plan before its fields.
+
 Concept types, use each exactly once:
 - reaction: the strongest asset is his face at a moment.
 - subject: the video is about a thing (an artifact, a character, a tier list); subject big.
@@ -60,13 +71,18 @@ clean panel was shown. Never chat, never a random shot.
 Title <= 60 characters, paired with the hook.
 
 Reply with ONLY JSON:
-{{"brief": {{"promise": "...", "entities": ["..."], "reveal": {{"what": "...", "t": 0, "beat_id": 0}} or null,
+{{"brief": {{"about": "...", "about_art": "one exact in-game name whose art shows it",
+  "promise": "...", "entities": ["..."], "reveal": {{"what": "...", "t": 0, "beat_id": 0}} or null,
   "moments": [{{"t": 0, "kind": "reaction|subject|reveal", "why": "..."}}], "hook_ideas": ["..."]}},
- "concepts": [{{"type": "reaction|subject|reveal", "bet": "the one-line reason to click",
+ "concepts": [{{"type": "reaction|subject|reveal",
+  "plan": {{"left": "what the left element shows and why a fan clicks it", "hook": "how hook and left pair up",
+            "face": "why this face moment"}},
+  "bet": "the one-line reason to click",
   "hook": {{"lines": ["LINE ONE", "LINE TWO"], "accent_phrase": "...", "accent_color": "gold|sky|green|mint|blue|cyan",
             "annotation": null}},
   "face": {{"t": 0, "expression": "shock|deadpan|skeptical|hype|laughing"}},
-  "subject": {{"source": "panel|art|made", "t": 0, "region": "right-panel", "query": null, "made": null}},
+  "subject": {{"source": "panel|art|made", "t": 0, "region": "right-panel", "query": null,
+               "alt_query": "a second exact name showing the same thing, used if the first has no art", "made": null}},
   "title": "...", "payoff_beats": [0]}}]}}"""
 
 
@@ -98,7 +114,10 @@ def context(run_dir: Path) -> dict:
               "turn": b.get("turn"), "energy": b.get("energy"), "start": b.get("start"), "end": b.get("end"),
               "text": (b.get("text") or "")[:320]} for i, b in enumerate(out.get("beats", []))]
     gloss = sorted({t for g in vod.glob("glossary_*.json") for t in json.loads(g.read_text(encoding="utf-8"))})
-    return {"central_idea": out.get("central_idea"), "viewer_promise": out.get("viewer_promise"),
+    from ..auto import vod_info
+    src = json.loads(mp.read_text(encoding="utf-8")).get("source") or ""
+    title = vod_info(Path(src).with_suffix(".chat.json")).get("title", "") if src else ""
+    return {"stream_title": title, "central_idea": out.get("central_idea"), "viewer_promise": out.get("viewer_promise"),
             "beats": beats, "moments": moments, "glossary": gloss}
 
 
@@ -122,10 +141,12 @@ def _models():
         t: float | None = None
         region: str = "right-panel"
         query: str | None = None
+        alt_query: str | None = None
         made: dict | None = None
 
     class Concept(BaseModel):
         type: str
+        plan: dict = {}
         bet: str = ""
         hook: Hook
         face: Face
@@ -281,6 +302,9 @@ def _accent(name: str, bg_rgb: np.ndarray) -> str:
 
 
 CAP_FRAC = 0.152  # hook cap height / frame height: the refs' lines sit at 90-117 px caps (avg ~108)
+# the hook block is one plane in 3D: far end / anchored end height (refs: strongbox 0.87, artifacts
+# 0.9, abyss 0.97 recede; tier list 1.18, skirk ~1.3 come at you). one per candidate, by seed
+KEYSTONES = (0.88, 1.16, 0.93)
 FOV = 50          # a wider lens than 30 so a tilted card actually reads as 3D (nguy: fix the focal length)
 SPEEDLINES = Path(__file__).with_name("assets") / "speedlines.png"
 
@@ -434,7 +458,8 @@ def build_spec(c, d: Path, face_png: Path, subject_png, subject_kind: str, bg_rg
                                 else {"strength": 0.5, "radius": 0.4, "threshold": 0.82})},
             "text": {"lines": [ln.upper() for ln in c.hook.lines], "accent_phrase": (c.hook.accent_phrase or "").upper() or None,
                      "accent": _accent(c.hook.accent_color, bg_rgb), "annotation": c.hook.annotation,
-                     "cap_frac": CAP_FRAC, "width_frac": 0.74, **({"skew": -10} if c.type == "reveal" else {})}}
+                     "cap_frac": CAP_FRAC, "width_frac": 0.74, "keystone": KEYSTONES[seed % 3],
+                     **({"skew": -10} if c.type == "reveal" else {})}}
     if c.type == "reveal" and cards and subject_kind != "art":
         # a made graphic hides its own values; a stream panel gets the mosaic band
         compose.reveal(spec, d, boxes=None if hides else [(0.06, 0.30, 0.94, 0.62)],
@@ -582,7 +607,13 @@ def characters_in(names: list[str]) -> list[str]:
     return [r for r in (art.resolve(n, roster) for n in names) if r]
 
 
-def assemble(c, k: str, root: Path, cams, browser, variant: int, entities: list[str], ocr=None, log=print) -> None:
+def left_queries(c, brief: dict) -> list[str]:
+    """the art lookups that still show what the plan meant: its query, its backup, then the
+    video's own subject (brief.about_art). never a character only mentioned in passing."""
+    return list(dict.fromkeys(q for q in (c.subject.query, c.subject.alt_query, brief.get("about_art")) if q))
+
+
+def assemble(c, k: str, root: Path, cams, browser, variant: int, brief: dict, ocr=None, log=print) -> None:
     """one concept -> <root>/<k>/{assets, spec.json, thumb.png}."""
     import cv2
 
@@ -618,9 +649,12 @@ def assemble(c, k: str, root: Path, cams, browser, variant: int, entities: list[
     if sub is None:                                      # nguy: there is always a left element
         kind = "art"
     if kind == "art":
-        sub = art_card(c.subject.query or next(iter(characters_in(entities)), ""), d, log)
-        if sub is None and c.subject.query:
-            sub = art_card(next(iter(characters_in(entities)), ""), d, log)
+        for q in left_queries(c, brief):
+            if (sub := art_card(q, d, log)) is not None:
+                break
+        else:                                            # ponytail: off-plan last resort, flagged in the report
+            sub = art_card(next(iter(characters_in(brief.get("entities", []))), ""), d, log)
+            (d / "assets" / "off_plan.txt").write_text(f"none of {left_queries(c, brief)} had art", encoding="utf-8")
     t_bg = c.subject.t if c.subject.t is not None and kind == "panel" else c.face.t
     made_hides = kind == "made" and bool((c.subject.made or {}).get("hidden"))
     bg = cams.frames(sid, [t_bg], width=0)[0]
@@ -636,7 +670,7 @@ def assemble(c, k: str, root: Path, cams, browser, variant: int, entities: list[
     log(f"[thumb] {k} {c.type}: {' / '.join(c.hook.lines)}  (face q {info['q']}, subject {kind if sub else 'none'})")
 
 
-def _render_all(run_dir: Path, root: Path, concepts: list, variant: int, entities: list[str], log=print) -> Path:
+def _render_all(run_dir: Path, root: Path, concepts: list, variant: int, brief: dict, log=print) -> Path:
     from ..facecam import Facecams
     from . import render, report
     cams = Facecams(run_dir / "ae" / "manifest.json")
@@ -646,7 +680,7 @@ def _render_all(run_dir: Path, root: Path, concepts: list, variant: int, entitie
         b = render.launch(p)
         try:
             for k, c in zip("ABC", concepts):
-                assemble(c, k, root, cams, b, variant, entities, ocr, log)
+                assemble(c, k, root, cams, b, variant, brief, ocr, log)
         finally:
             b.close()
     return report.build(run_dir, root=root)
@@ -668,7 +702,7 @@ def run(run_dir, variant: int = 1, previous_hooks: list[str] | None = None, back
     order = sorted(out.concepts, key=lambda c: TYPES.index(c.type))
     concepts = [{"id": k, **c.model_dump()} for k, c in zip("ABC", order)]
     (root / "concepts.json").write_text(json.dumps({"concepts": concepts}, indent=1, ensure_ascii=False), encoding="utf-8")
-    rep = _render_all(run_dir, root, order, variant, out.brief.get("entities", []), log)
+    rep = _render_all(run_dir, root, order, variant, out.brief, log)
     log(f"[thumb] v{variant}: {rep}  ({time.monotonic() - t0:.0f}s)")
     return rep
 
@@ -682,4 +716,4 @@ def recompose(run_dir, variant: int, log=print) -> Path:
     concepts = [Concept.model_validate({k: v for k, v in c.items() if k != "id"})
                 for c in json.loads((root / "concepts.json").read_text(encoding="utf-8"))["concepts"]]
     brief = json.loads((root / "brief.json").read_text(encoding="utf-8"))
-    return _render_all(run_dir, root, concepts, variant, brief.get("entities", []), log)
+    return _render_all(run_dir, root, concepts, variant, brief, log)
