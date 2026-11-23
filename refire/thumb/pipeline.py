@@ -691,7 +691,7 @@ def head_to_thigh(im):
     return im
 
 
-def team(figs: list) -> "Image.Image":
+def team(figs: list):
     """2-3 figures as one group (his EASIEST ABYSS?): same height, overlapping, the middle one
     larger and in front."""
     from PIL import Image
