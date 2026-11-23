@@ -57,7 +57,11 @@ Concept types, use each exactly once:
 When frame sheets are given, Read every one before you plan: they show the gameplay at each beat,
 labelled "b<beat> <source seconds>". Plan the left element from what was actually on screen: a panel
 must be one you saw (its t = that label's seconds), an art query names a thing you saw (the
-character he played, the boss he fought, the item that dropped).
+character he played, the boss he fought, the item that dropped). An artifact you saw is ALWAYS a
+designed stat_card with the exact name, set, main stat and substats you read off the frame (a
+cropped stream card looks worse); a panel is only for screens that can't be designed (a wish
+result, a clear-time screen, an exploration %, a ranking). Names are spelled as in the game
+(the given character list), never as the transcript heard them.
 
 Pick face.t ONLY from the given moments (source seconds) and say the expression. The subject
 must be deliberate, one item: either a game UI panel that was on screen (source "panel": t = source
@@ -122,7 +126,13 @@ def context(run_dir: Path) -> dict:
     from ..auto import vod_info
     src = json.loads(mp.read_text(encoding="utf-8")).get("source") or ""
     title = vod_info(Path(src).with_suffix(".chat.json")).get("title", "") if src else ""
-    return {"stream_title": title, "central_idea": out.get("central_idea"), "viewer_promise": out.get("viewer_promise"),
+    try:
+        from . import art
+        names = sorted(art.characters(art.Fetcher()))          # canonical spellings (transcript: "Zabai")
+    except Exception:                                          # offline: the glossary still helps
+        names = []
+    return {"stream_title": title, "characters": names,
+            "central_idea": out.get("central_idea"), "viewer_promise": out.get("viewer_promise"),
             "beats": beats, "moments": moments, "glossary": gloss}
 
 
@@ -183,6 +193,8 @@ def validate(out, n_beats: int) -> list[str]:
         words = " ".join(c.hook.lines).split()
         if len(words) > 5:
             errs.append(f"hook too long ({len(words)} words): {c.hook.lines}")
+        if c.hook.annotation and set(c.hook.annotation.upper().strip("()").split()) & set(words):
+            errs.append(f"annotation repeats the hook: {c.hook.annotation} / {c.hook.lines}")
         long = [ln for ln in c.hook.lines if len(ln) > LINE_MAX]
         if long:
             errs.append(f"hook lines over {LINE_MAX} characters (aim for ~10): {long}")
@@ -326,6 +338,8 @@ def _fit(p: Path, max_w: float, max_h: float) -> float:
 
 # the left element (nguy): one clear item, ~50% of the left half, centered at mid-height, its
 # edges blended into the scene. screen px; the card is set back in depth and swung toward zy0x.
+FIG_TALL, FIG_KEEP = 1.2, 0.6   # a figure taller than 1.2x its width keeps its top 60%
+ART_FILL = 0.5                  # a figure's opaque pixels cover ~half the left half (nguy: ~50%)
 LEFT_CENTER = (300, 300)
 # per element: a tall card sits a bit higher so its top rows clear the hook; a wide tier list
 # higher still (his MORE TIER LISTS); a cutout figure lower (it can stand behind the hook)
@@ -413,12 +427,20 @@ def cards_for(c, subject, kind: str, made_kind: str | None = None) -> tuple[list
         return [], None
     fk = "art" if kind == "art" else (made_kind or "panel") if kind == "made" else "panel"
     soft = p.with_name(p.stem + "_soft.png")
-    fx.fade(Image.open(p), FADES.get(fk, FADES["panel"])).save(soft)
-    w, h = Image.open(p).size
+    im = Image.open(p)
+    if kind == "art" and im.height > FIG_TALL * im.width:
+        # a full-body splash reads tiny: head to thigh, like his (arlecchino, skirk); the cut
+        # edge fades out behind the hook
+        im = im.crop((0, 0, im.width, round(im.height * FIG_KEEP)))
+        im = im.crop(im.getchannel("A").point(lambda v: 255 if v > 24 else 0).getbbox() or (0, 0, *im.size))
+    fx.fade(im, FADES.get(fk, FADES["panel"])).save(soft)
+    w, h = im.size
     aspect = w / h / SQUASH.get(fk, 1.0)
-    if kind == "art":       # a cutout figure: taller, nearly flat on, may run behind the hook
-        sw, sh = screen_size((aspect, 1), area=640 * 720, max_wh=(560, 640))     # sized by height
-        box = left_box(sw, sh, CENTERS["art"], margin=(30, 20))
+    if kind == "art":       # a cutout figure: nearly flat on, may run behind the hook
+        # sized by what the figure covers, not its box: a cutout is mostly transparent
+        cov = max(0.25, float((np.asarray(im.getchannel("A")) > 128).mean()))
+        sw, sh = screen_size((aspect, 1), area=ART_FILL * 640 * 720 / cov, max_wh=(660, 680))
+        box = left_box(sw, sh, CENTERS["art"], margin=(20, 20))
         rot = [0, 8, 0]
     else:
         if fk == "tierlist":    # his tier lists run on behind zy0x (only ~4 icons per row show)

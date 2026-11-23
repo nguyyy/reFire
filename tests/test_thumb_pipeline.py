@@ -157,3 +157,11 @@ def test_frame_sheets_label_every_beat_frame(tmp_path):
     sheet = cv2.imread(str(tmp_path / names[0]))
     assert sheet.shape == (3 * 270, 4 * 480, 3)
     assert sheet[200, 240].mean() > 60 and sheet[800, 1800].mean() < 10        # tiles filled, the rest black
+
+
+def test_annotation_may_not_repeat_the_hook():
+    out = concepts(lines=("BIRTHDAY", "BEST PIECE?"))
+    out.concepts[0].hook.annotation = "(birthday)"
+    assert any("repeats the hook" in e for e in pipeline.validate(out, 5))
+    out.concepts[0].hook.annotation = "(day 3)"
+    assert pipeline.validate(out, 5) == []
