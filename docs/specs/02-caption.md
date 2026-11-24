@@ -103,19 +103,22 @@ For a block of length $L$:
 
 ### 4. Layering
 
-Inside `refire_captions`, use tracks V1–V4. In time order:
+Layers 1–4 (each becomes its own caption track, then its own graphics track above the nest's anchor on V1, decision R6). In time order:
 - If block $i$ doesn't overlap block $i-1$: track 1.
 - If it overlaps: track of block $i-1$ plus one (the newer caption sits on top).
 - If that would exceed 4: trim block $i-1$ to end at block $i$'s start and put block $i$ on block $i-1$'s track.
 
 ### 5. Ops
 
-`run/<vod_id>/ppro/ops_caption.json`, applied in chunks of 50 blocks per .jsx call (progress shown in the panel):
+`run/<vod_id>/ppro/ops_caption.json`, applied in chunks of 60 blocks per .jsx call (progress shown in the panel):
 
 1. `ensure_nest`: create `refire_captions` if missing, with the main sequence's settings (clone main and clear it, or create from a preset with no dialog; spike S5). Ensure exactly one V5 item on main referencing it, spanning the whole main sequence; extend its end if the main sequence grew.
 2. `style_nest`: only when the nest clip is newly created or `--restyle` is passed. QE-add Camera Shake, Drop Shadow, Edge Glow to the V5 nest clip in that order; set every named param from `ccStyle.prfpset`.
-3. `clear_nest`: remove all track items inside `refire_captions`.
-4. Per block: `insert_caption` (`importMGT` of that block's baked MOGRT at `t_in` on its track, set end to `t_out`; the text is already in the file, decision R5), then `add_transform` (QE-add Transform; static params from the preset; Use Composition's Shutter Angle **off**; Shutter Angle 360; Opacity and Position keys from step 2).
+3. `clear_nest`: remove every track item inside `refire_captions` except the anchor on V1, then the empty video tracks.
+4. `caption_tracks`: import `ppro/captions/layer_<k>.dfxp` (one TTML per layer, bottom first; font, size, color, outline and centering from the `caption:` keys) into a temp bin, `createCaptionTrack` each, delete the bin, lock the nest's video tracks (spike S8).
+5. `menu`: the applier stops; `refire/ppro/menu.py` focuses the nest's timeline, Select All, Graphics and Titles > Upgrade Caption to Graphic (decision R6), then focuses main again. The applier resumes.
+6. `after_upgrade`: unlock; the top `layers` video tracks must hold exactly one graphic per block; graphics from caption tracks the nest inherited from main are removed.
+7. Per block: `caption_fx` on its graphic (the block's index on its layer's track): text Position = `text_pos`, then QE-add Transform (static params from the preset; Use Composition's Shutter Angle **off**; Shutter Angle 360; Opacity and Position keys from step 2).
 
 ### 6. Review file
 
@@ -131,7 +134,7 @@ Inside `refire_captions`, use tracks V1–V4. In time order:
 | Key | Default |
 |---|---|
 | `mode` | `styled` |
-| `mogrt` | `refire/assets/premiere/captMograph.mogrt` (clean re-export; passes lint) |
+| `mogrt` | `refire/assets/premiere/captMograph.mogrt` (clean re-export; since R6 only the nest's empty anchor clip) |
 | `mogrt_text_param` | `TextLayer` |
 | `preset_in` | `refire/assets/premiere/captionIn.prfpset` |
 | `preset_style` | `refire/assets/premiere/ccStyle.prfpset` |
@@ -143,7 +146,9 @@ Paths are repo-relative by default and resolved to absolute paths before they go
 | `tail` | 0.0 s |
 | `max_tracks` | 4 |
 | `nest_track` | 5 |
-| `chunk` | 50 |
+| `chunk` | 60 |
+| `font`, `font_size`, `color`, `outline` | `Coolvetica`, 55, `#FFFFFF`, `#000000 3px` (the MOGRT's look, as TTML style) |
+| `text_pos` | [0.125, 0.9155] (S8: the MOGRT's text box) |
 
 ## Acceptance criteria
 

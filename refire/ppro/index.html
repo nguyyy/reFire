@@ -963,12 +963,31 @@ function applyOps(btn, ops, chunk, label, doneText) {
                 var r;
                 try { r = JSON.parse(res); } catch (e) { r = { error: res || NO_REPLY }; }
                 if (r.error) { log(res); busy(btn, false); return note("err", label + ": " + r.error); }
+                if (r.menu) { return menuStep(r, function () { step(r.next); }); }
                 if (r.next < r.total) { note("run", label + " " + r.next + "/" + r.total); return step(r.next); }
                 log(label + ": applied " + r.total + " ops");
                 busy(btn, false);
                 note("ok", doneText);
             });
         }, 30);
+    }
+    // a {"op": "menu"} paused the ops: ppro/menu.py clicks it in Premiere's menu bar, then resume
+    function menuStep(r, resume) {
+        var args = ["-m", "refire.ppro.menu", r.menu, r.seq, r.back || ""];
+        note("run", label + ": " + r.menu.replace(/_/g, " "));
+        log("> " + pyExe() + " " + args.join(" "));
+        var proc;
+        try {
+            proc = cp.spawn(pyExe(), args, { cwd: val("repo") || defaultRepo(),
+                                              env: Object.assign({}, process.env, { PYTHONIOENCODING: "utf-8" }) });
+        } catch (e) { return failed(btn, String(e)); }
+        var flush = [pipe(proc.stdout, log), pipe(proc.stderr, log)];
+        proc.on("error", function (e) { failed(btn, String(e)); });
+        proc.on("close", function (code) {
+            flush.forEach(function (f) { f(); });
+            if (code !== 0) { return failed(btn, label + ": " + r.menu + " failed (exit " + code + "). The log has the details."); }
+            resume();
+        });
     }
     note("run", label);
     step(0);
@@ -978,8 +997,9 @@ function applyPunch(btn, ops) {
     applyOps(btn, ops, 150, "Applying punch-ins", "Punch-ins on V2. Re-press after a re-cut.");
 }
 
-// Styled recaption: `refire caption` bakes one MOGRT per line and writes ops_caption.json;
-// the applier rebuilds the refire_captions nest (its V5 clip and ccStyle stay).
+// Styled recaption: `refire caption` writes the captions as TTML caption tracks + ops_caption.json;
+// the applier rebuilds the refire_captions nest (its V5 clip and ccStyle stay), Premiere's
+// Upgrade Caption to Graphic converts them all at once, then each graphic gets its animation.
 function runCaption(btn) {
     var py = pyExe(), runDir = manifest.replace(/[\\/]ae[\\/]manifest\.json$/i, "");
     var args = ["-m", "refire", "caption", runDir, "--words-per-line", val("wpl") || "3"];
@@ -998,8 +1018,8 @@ function runCaption(btn) {
     proc.on("close", function (code) {
         flush.forEach(function (f) { f(); });
         if (code !== 0) { return failed(btn, "Captions failed (exit " + code + "). The log has the details."); }
-        // 50 captions (2 ops each) per call, +3 so the nest setup shares the first call
-        applyOps(btn, runDir + "/ppro/ops_caption.json", 103, "Captions",
+        // 60 captions (one op each) per call; the upgrade step ends the setup call
+        applyOps(btn, runDir + "/ppro/ops_caption.json", 60, "Captions",
                  "Captions rebuilt in refire_captions (V5). Re-press after a re-cut.");
     });
 }

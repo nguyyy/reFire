@@ -127,6 +127,12 @@ def apply_ops(ops_path, chunk: int = 150, port: int = PORT) -> str:
             raise RuntimeError("apply %s: %s" % (Path(ops_path).name, out)) from None
         if "error" in res:
             raise RuntimeError("apply %s: %s" % (Path(ops_path).name, res["error"]))
+        if "menu" in res:                   # the one step scripting can't do (S8)
+            try:
+                from refire.ppro import menu
+            except ImportError:             # run as a script from refire/ppro
+                import menu
+            menu.COMMANDS[res["menu"]](res["seq"], res.get("back", ""))
         start, total = res["next"], res["total"]
     return "applied %d ops from %s" % (total, Path(ops_path).name)
 

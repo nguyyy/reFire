@@ -3,7 +3,8 @@
 // because python always starts the list with a clear of the items reFire tagged. ES3.
 // Spike findings baked in (docs/spikes.md): QE only on the active sequence, QE items matched
 // by start ticks (its lists include gaps), effects verified by matchName after adding,
-// project items matched by trimmed name.
+// project items matched by trimmed name. A {"op": "menu"} stops the chunk: the caller runs it
+// through ppro/menu.py (scripting has no Upgrade Caption to Graphic, S8) and resumes after it.
 
 var reFireOps = (function () {
 
@@ -14,8 +15,9 @@ var reFireOps = (function () {
     function S(sec) { var t = new Time(); t.seconds = sec; return t; }
     function seq() { return app.project.activeSequence; }
 
-    // per apply() call: the sequence that was active (= main), nests whose V5 clip was just placed
-    var MAIN = null, FRESH = {};
+    // per apply() call: the sequence that was active (= main), nests whose V5 clip was just placed,
+    // QE item index by start ticks per (sequence, video track)
+    var MAIN = null, FRESH = {}, QIDX = {};
     function byName(name) {
         for (var i = 0; i < app.project.sequences.numSequences; i++) {
             if (app.project.sequences[i].name === name) { return app.project.sequences[i]; }
@@ -85,6 +87,31 @@ var reFireOps = (function () {
             if (it && it.type !== "Empty" && Number(it.start.ticks) === Number(ticks)) { return it; }
         }
         return null;
+    }
+    function qeIndexed(v, ticks) {
+        app.enableQE();
+        var tr = qe.project.getActiveSequence().getVideoTrackAt(v), key = seq().sequenceID + ":" + v, i, it;
+        if (!QIDX[key]) {                 // one pass per track per chunk, not one per op (S6 slowed as it filled)
+            QIDX[key] = {};
+            for (i = 0; i < tr.numItems; i++) {
+                it = tr.getItemAt(i);
+                if (it && it.type !== "Empty") { QIDX[key][String(it.start.ticks)] = i; }
+            }
+        }
+        i = QIDX[key][String(ticks)];
+        return i === undefined ? null : tr.getItemAt(i);
+    }
+    // QE locks act on the active sequence: activate s first
+    function lockVideo(s, on) {
+        app.enableQE();
+        var qs = qe.project.getActiveSequence();
+        for (var v = 0; v < s.videoTracks.numTracks; v++) { qs.getVideoTrackAt(v).setLock(on); }
+    }
+    function prop(c, name) {
+        for (var i = 0; c && i < c.properties.numItems; i++) {
+            if (c.properties[i].displayName === name) { return c.properties[i]; }
+        }
+        throw new Error("no '" + name + "' param" + (c ? " in " + c.matchName : " (component missing)"));
     }
     function component(ti, match) {
         for (var i = ti.components.numItems - 1; i >= 0; i--) {   // newest instance last
@@ -185,6 +212,7 @@ var reFireOps = (function () {
             var m = activate(MAIN), i, g, t;
             if (m.name === op.nest) { throw new Error("open your main sequence, not " + op.nest); }
             var nest = byName(op.nest);
+            if (nest) { activate(nest); lockVideo(nest, false); activate(m); }   // a failed run can leave them locked
             if (!nest) {
                 var before = {};
                 for (i = 0; i < app.project.sequences.numSequences; i++) { before[app.project.sequences[i].sequenceID] = 1; }
@@ -221,6 +249,9 @@ var reFireOps = (function () {
                 FRESH[op.nest] = true;
             }
             clip.end = T(end);
+            // its linked audio on main too: left long, it stretched main past the cut (smoke, Nov 23)
+            var linked = clip.getLinkedItems();
+            for (i = 0; linked && i < linked.numItems; i++) { linked[i].end = T(end); }
             return 1;
         },
         // ccStyle on the nest clip, only when that clip was just placed (new nest or restyle)
@@ -234,16 +265,57 @@ var reFireOps = (function () {
             }
             return 1;
         },
+        // everything but the anchor on V1 goes, then the empty tracks (last run's graphics, older layouts)
         clear_nest: function (op) {
-            var nest = byName(op.nest);
-            for (var v = 0; v < op.tracks && v < nest.videoTracks.numTracks; v++) { clearClips(nest.videoTracks[v]); }
+            var nest = activate(byName(op.nest));
+            for (var v = nest.videoTracks.numTracks - 1; v >= 1; v--) { clearClips(nest.videoTracks[v]); }
+            qe.project.getActiveSequence().removeEmptyVideoTracks();
             return 1;
         },
-        insert_caption: function (op) {
-            var s = byName(op.seq);                          // importMGT works on a non-active sequence (S5)
-            var ti = importAt(s, op.mogrt, op.start, op.v);
-            ti.end = T(op.end);
+        // one caption track per file, bottom layer first; video tracks locked so the menu's
+        // Select All takes only captions (S8). The imports go once their tracks exist.
+        caption_tracks: function (op) {
+            var s = activate(byName(op.seq)), old = findItem(op.bin), i, k;
+            if (old && old.type === ProjectItemType.BIN) { old.deleteBin(); }
+            var bin = app.project.rootItem.createBin(op.bin);
+            app.project.importFiles(op.files, true, bin, false);
+            for (i = 0; i < op.files.length; i++) {
+                var base = op.files[i].replace(/^.*[\\\/]/, ""), item = null;
+                for (k = 0; k < bin.children.numItems; k++) { if (trimmed(bin.children[k].name) === base) { item = bin.children[k]; } }
+                if (!item) { throw new Error("caption file did not import: " + op.files[i]); }
+                if (!s.createCaptionTrack(item, 0, Sequence.CAPTION_FORMAT_SUBTITLE)) { throw new Error("no caption track from " + base); }
+            }
+            bin.deleteBin();
+            lockVideo(s, true);
+            return 1;
+        },
+        // the upgrade added one video track per non-empty caption track, ours on top. Lower new
+        // tracks hold captions the nest inherited from main's caption track when it was cloned.
+        after_upgrade: function (op) {
+            var s = activate(byName(op.seq)), v, got = 0;
+            lockVideo(s, false);
+            var n = s.videoTracks.numTracks;
+            if (n - 1 < op.layers) { throw new Error("Upgrade Caption to Graphic made no graphics in " + op.seq); }
+            for (v = n - op.layers; v < n; v++) { got += s.videoTracks[v].clips.numItems; }
+            if (got !== op.want) { throw new Error("upgrade made " + got + " graphics, expected " + op.want); }
+            for (v = n - op.layers - 1; v >= 1; v--) { clearClips(s.videoTracks[v]); }
+            qe.project.getActiveSequence().removeEmptyVideoTracks();
+            return 1;
+        },
+        // the block's graphic: index-th clip of its layer's track (upgrade keeps them in time order)
+        caption_fx: function (op) {
+            var s = onSeq(op), v = s.videoTracks.numTracks - op.layers + op.layer - 1, tr = s.videoTracks[v];
+            var ti = op.index < tr.clips.numItems ? tr.clips[op.index] : null;
+            if (!ti || Math.abs(Number(ti.start.ticks) - Number(op.start)) > Number(s.timebase)) {
+                throw new Error("caption graphic " + op.index + " on V" + (v + 1) + " is not at " + op.start);
+            }
+            var qi = qeIndexed(v, ti.start.ticks);
+            if (!qi) { throw new Error("no QE item at " + ti.start.ticks + " on V" + (v + 1)); }
             if (op.name) { ti.name = op.name; }
+            prop(component(ti, "AE.ADBE Text"), "Position").setValue(op.pos, true);
+            var c = addEffect(ti, qi, op.effect, op.match);
+            setParams(c, op.params || []);
+            if (op.keys) { setKeys(c, ti, op.keys, op.interp); }
             return 1;
         }
     };
@@ -254,8 +326,10 @@ var reFireOps = (function () {
         if (!seq()) { return '{"error": "no active sequence"}'; }
         MAIN = seq();
         FRESH = {};
-        var all = readJson(path).ops, end = Math.min(all.length, from + count), done = 0, i, err = null;
+        QIDX = {};
+        var all = readJson(path).ops, end = Math.min(all.length, from + count), done = 0, i, err = null, menu = null;
         for (i = from; i < end; i++) {
+            if (all[i].op === "menu") { menu = all[i]; done++; end = i + 1; break; }
             try {
                 OPS[all[i].op](all[i]);
                 done++;
@@ -266,7 +340,8 @@ var reFireOps = (function () {
         }
         try { activate(MAIN); } catch (e2) {}               // nest work leaves the nest active
         if (err) { return '{"done": ' + done + ', "total": ' + all.length + ', "error": ' + q(err) + '}'; }
-        return '{"done": ' + done + ', "next": ' + end + ', "total": ' + all.length + '}';
+        var ask = menu ? ', "menu": ' + q(menu["do"]) + ', "seq": ' + q(menu.seq) + ', "back": ' + q(MAIN.name) : "";
+        return '{"done": ' + done + ', "next": ' + end + ', "total": ' + all.length + ask + '}';
     }
 
     // never throw out of here: CEP turns that into a blank "EvalScript error."

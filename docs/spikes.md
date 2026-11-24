@@ -16,6 +16,7 @@ Spec: `docs/specs/00-shared.md` (Phase 0). Driven by `tests/smoke/spikes.py` +
 | S5 | Caption nest on V5 + ccStyle effects | **Pass** | Nguy confirmed Effect Controls order Camera Shake, Drop Shadow, Edge Glow (DOM component order is not the UI order). The nest clip showed no text because the nest's 0-46 s window held only the anchor; S6's captions sat at 200 s+ and had no text set. |
 | S6 | 300 MOGRT captions in chunks of 50 | **Pass**: 114 s total (budget 300 s) | Each block = import + stretch + Transform + 6 Bezier keys + checkbox. Chunk time grows as the nest fills (11 s -> 21 s per 50). `importMGT` fails ~15% of calls in bursts; verify + retry fixes it (7 retries / 300, 0 failures). Text set not included (S3). |
 | S7 | Transform checkbox params by index | **Pass** | QE adds the old Transform (see below), whose 12 params match the preset's `Params Index` order exactly **and carry display names**: 0 Anchor Point, 1 Position, 2 Uniform Scale, 3 Scale Height, 4 Scale Width, 5 Skew, 6 Skew Axis, 7 Rotation, 8 Opacity, 9 Use Composition's Shutter Angle, 10 Shutter Angle, 11 Sampling. Film Impact effects have unnamed params -> map by preset index (step 2 parser). |
+| S8 | Caption track + Upgrade Caption to Graphic | **Pass** (2026-11-23) | `Sequence.createCaptionTrack(item, 0, Sequence.CAPTION_FORMAT_SUBTITLE)` makes a caption track from an imported caption file; scripting has no upgrade, but the Windows menu bar is a native HMENU, so WM_COMMAND runs Graphics and Titles > Upgrade Caption to Graphic: ~1180 captions became graphic clips in under 3 s. Details below. |
 
 ## Findings the applier must follow
 
@@ -103,3 +104,30 @@ against this fixture). Fade-in differs less (opacity 24/84 vs 27/65 at 0.02/0.04
    (decision R5, Nov 21).
 3. Run `tests/smoke/caption.py` in Premiere (ensure/style/clear nest, insert, keyed Transform
    untested live) and time a real-size apply: exact easing is ~22 keys/block vs S6's 6.
+
+## S8: captions in one go (2026-11-23, Nguy: "select the whole captions track then convert all of them")
+
+Replaces S3b's baked MOGRT per block (one `importMGT` per caption, ~15% retries, the nest
+filling one clip at a time). Premiere 26.3.0, `makeovertest.prproj`, throwaway sequence.
+
+- **Upgrade**: Edit > Select All + Graphics and Titles > Upgrade Caption to Graphic, sent as
+  WM_COMMAND to the `Premiere Pro` window (ids found by label; they change per session). Each
+  non-empty caption track becomes a graphic clip track (`isMGT()` true, component `AE.ADBE Text`)
+  on a **new video track on top**, in caption-track order; the caption tracks are left empty.
+- **Focus**: menu commands hit the focused panel. Select All went to the Project panel once
+  (bin items selected, nothing upgraded); Window > Timelines > <sequence> focuses that timeline
+  (and makes it the active sequence). If clips are selected along with captions, the upgrade
+  does nothing: lock the video tracks first (QE `setLock`), locked clips aren't selected.
+- **Style**: an SRT gets Premiere's default caption look (`<font color>` works, `face`/`size`
+  don't). A TTML (`.dfxp`) style honors `fontFamily`, `fontSize`, `color`, `textOutline` and
+  `textAlign` **when set on the referenced `<style>`**; regions, `tts:origin`, `displayAlign`
+  and region-level `textAlign` are ignored, and every TTML graphic lands at text Position
+  (0.05, 0.05) in a 1440 px box. Coolvetica 55 / outline 3 px renders the same glyph box as the
+  caption MOGRT (x 822-1096 for "compare me" on both).
+- **Position**: the MOGRT's text box is (0.125, 0.65), bottom-aligned; the TTML box is
+  top-aligned. Text component Position = (0.125, 0.9155) puts the TTML glyphs on the MOGRT's
+  (top edge equal, bottom within 2 px). Text Anchor Point is in frame units (0.5 moved the text
+  half a frame), so it can't center by itself.
+- **Clean-up**: a caption track keeps its captions after its source item's bin is deleted;
+  QE `removeEmptyVideoTracks()` drops empty video tracks only.
+

@@ -1,10 +1,13 @@
 """`refire caption`: Nguy's caption look in Premiere (docs/specs/02-caption.md).
 
-Every caption block is its own copy of the caption MOGRT with the text baked in (R5), with
-a Transform carrying captionIn's animation, all inside the `refire_captions` nest on main
-V5, which carries ccStyle (shake, shadow, glow) once. Intro/outro keep the preset's
-durations anchored to each block's start/end. Python decides everything here; the .jsx
-(ppro/applyOps.jsx) only applies ops_caption.json. Times are timeline seconds.
+The blocks go in as caption tracks (one TTML file per overlap layer, styled like the caption
+MOGRT), and Premiere's own Upgrade Caption to Graphic turns them all into graphic clips in one
+go (decision R6, spike S8). Each graphic then gets its text position and a Transform carrying
+captionIn's animation, all inside the `refire_captions` nest on main V5, which carries ccStyle
+(shake, shadow, glow) once. Intro/outro keep the preset's durations anchored to each block's
+start/end. Python decides everything here; the .jsx (ppro/applyOps.jsx) only applies
+ops_caption.json, and ppro/menu.py runs the one menu command scripting lacks. Times are
+timeline seconds.
 """
 from __future__ import annotations
 
@@ -16,9 +19,15 @@ DEFAULTS = {
     "mode": "styled", "mogrt": str(ASSETS / "captMograph.mogrt"), "mogrt_text_param": "TextLayer",
     "preset_in": str(ASSETS / "captionIn.prfpset"), "preset_style": str(ASSETS / "ccStyle.prfpset"),
     "easing": "exact", "motion_blur": True, "shutter_angle": 360, "tail": 0.0, "max_tracks": 4,
-    "nest_track": 5, "chunk": 50,
+    "nest_track": 5, "chunk": 60,
+    # the caption MOGRT's look as TTML (S8: CoolveticaRg-Regular 55, stroke 3, centered in a
+    # 1440 box). Premiere drops TTML regions, so every graphic lands at (0.05, 0.05) and gets
+    # text_pos: the MOGRT's box measured on screen, its glyphs within 2 px.
+    "font": "Coolvetica", "font_size": 55, "color": "#FFFFFF", "outline": "#000000 3px",
+    "text_pos": [0.125, 0.9155],
 }
 NEST = "refire_captions"
+SRC_BIN = "refire_caption_files"       # the imported TTML items, deleted once their tracks exist
 TRANSFORM = "AE.ADBE Geometry"      # what QE's "Transform" adds; same params as the preset's Geometry2 (S7)
 QE_NAMES = {"AE.ADBE Geometry2": "Transform", "AE.ADBE Geometry": "Transform",
             "AE.Impact_Camera_Shake_FX": "Camera Shake", "AE.ADBE Drop Shadow": "Drop Shadow",
@@ -222,29 +231,59 @@ def transform_statics(effect, cfg: dict) -> list:
     return out
 
 
-def ops(blocks: list[dict], tmap, cfg: dict, effect, style_effects, restyle: bool = False,
+def ttml(blocks: list[dict], tmap, cfg: dict) -> str:
+    """one caption track's blocks (no overlaps) as TTML. Premiere honors font, size, color,
+    outline and textAlign from a referenced style; regions, origin and displayAlign are ignored
+    (S8). Times go through the timeline's frame grid, rounded UP to the ms: Premiere floors them
+    to frames (0.633 for frame 38 at 60 fps landed on 37)."""
+    import math
+    from xml.sax.saxutils import escape, quoteattr
+
+    from .timeline_map import TICKS
+
+    def clock(t: float) -> str:
+        ms = math.ceil(round(tmap.ticks(t) / TICKS * 1000, 6))
+        return f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d}.{ms % 1000:03d}"
+    style = " ".join(f"tts:{k}={quoteattr(str(v))}" for k, v in (
+        ("fontFamily", cfg["font"]), ("fontSize", f"{cfg['font_size']}px"), ("color", cfg["color"]),
+        ("textOutline", cfg["outline"]), ("textAlign", "center")))
+    body = "\n".join(f'<p begin="{clock(b["t_in"])}" end="{clock(b["t_out"])}" style="s">{escape(b["text"])}</p>'
+                     for b in blocks)
+    return ('<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling" xml:lang="en">\n'
+            f'<head><styling><style xml:id="s" {style}/></styling></head>\n'
+            f'<body><div>\n{body}\n</div></body></tt>\n')
+
+
+def ops(blocks: list[dict], tmap, cfg: dict, effect, style_effects, files: list[str], restyle: bool = False,
         anchor: str = "") -> dict:
+    """nest + ccStyle, caption tracks from `files` (one per layer, bottom first), the menu's
+    upgrade, then per block: text position + keyed Transform on its graphic. Upgrade puts layer
+    k's graphics on the k-th of the top `layers` video tracks; `index` is the block's place on it."""
     v_nest = int(cfg["nest_track"]) - 1
-    out = [{"op": "ensure_nest", "nest": NEST, "v": v_nest, "anchor": anchor,
-            "tracks": int(cfg["max_tracks"]) + 1, "fresh": restyle},
+    layers = max((b["track"] for b in blocks), default=0)
+    out = [{"op": "ensure_nest", "nest": NEST, "v": v_nest, "anchor": anchor, "tracks": 1, "fresh": restyle},
            {"op": "style_nest", "nest": NEST, "v": v_nest, "effects": style_ops(style_effects)},
-           {"op": "clear_nest", "nest": NEST, "tracks": int(cfg["max_tracks"])}]
-    statics = transform_statics(effect, cfg)
-    for b in blocks:
-        a, e = str(tmap.ticks(b["t_in"])), str(tmap.ticks(b["t_out"]))
-        out += [{"op": "insert_caption", "id": b["id"], "seq": NEST, "v": b["track"] - 1, "mogrt": b["mogrt"],
-                 "start": a, "end": e, "name": f"refire:caption:{b['id']}"},
-                {"op": "add_effect", "seq": NEST, "v": b["track"] - 1, "start": a, "effect": "Transform",
-                 "match": TRANSFORM, "params": statics, "interp": b["interp"],
-                 "keys": [[j, ks] for j, ks in sorted(b["keys"].items())]}]
-    return {"version": 1, "feature": "caption", "ticks_per_frame": tmap.ticks_per_frame, "ops": out}
+           {"op": "clear_nest", "nest": NEST}]
+    if blocks:
+        out += [{"op": "caption_tracks", "seq": NEST, "files": files, "bin": SRC_BIN},
+                {"op": "menu", "do": "upgrade_captions", "seq": NEST},
+                {"op": "after_upgrade", "seq": NEST, "layers": layers, "want": len(blocks)}]
+    statics, seen = transform_statics(effect, cfg), {}
+    for b in sorted(blocks, key=lambda b: b["t_in"]):
+        idx = seen[b["track"]] = seen.get(b["track"], -1) + 1
+        out.append({"op": "caption_fx", "id": b["id"], "seq": NEST, "layer": b["track"], "layers": layers,
+                    "index": idx, "start": str(tmap.ticks(b["t_in"])), "name": f"refire:caption:{b['id']}",
+                    "pos": cfg["text_pos"], "effect": "Transform", "match": TRANSFORM, "params": statics,
+                    "interp": b["interp"], "keys": [[j, ks] for j, ks in sorted(b["keys"].items())]})
+    return {"version": 2, "feature": "caption", "ticks_per_frame": tmap.ticks_per_frame, "ops": out}
 
 
 # --------------------------------------------------------------------------- run
 
 def run(run_dir, timeline=None, overrides: dict | None = None, words_per_line: int = 3, game: str = "",
         corrections_dir="run", dry_run: bool = False, restyle: bool = False, log=print) -> dict:
-    """live timeline -> caption blocks -> baked MOGRTs + ops_caption.json + caption_review.tsv."""
+    """live timeline -> caption blocks -> one TTML per layer + ops_caption.json + caption_review.tsv."""
     import csv
     import json
 
@@ -257,9 +296,8 @@ def run(run_dir, timeline=None, overrides: dict | None = None, words_per_line: i
     cfg = config(overrides)
     tmap = TimelineMap.load(mp, timeline)
     fps = TICKS / tmap.ticks_per_frame
-    tpl = mogrt.load(cfg["mogrt"], cfg["mogrt_text_param"])
-    for w in mogrt.lint(tpl, seq_fps=fps):          # raises on a MOGRT with baked animation
-        log(f"[caption] warning: {w}")
+    if not mogrt._font_installed(cfg["font"]):          # premiere would quietly substitute
+        log(f"[caption] warning: font {cfg['font']!r} isn't installed")
     (effect,) = [e for e in prfpset.load(cfg["preset_in"]) if "Geometry" in e.match_name]
     style = prfpset.load(cfg["preset_style"])
     rs, t_intro, t_outro = ramps(effect)
@@ -275,12 +313,18 @@ def run(run_dir, timeline=None, overrides: dict | None = None, words_per_line: i
     blocks = layer(blocks, int(cfg["max_tracks"]))
 
     out_dir = run_dir / "ppro" / "captions"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    files = []
+    for k in range(1, max((b["track"] for b in blocks), default=0) + 1):
+        f = out_dir / f"layer_{k}.dfxp"
+        f.write_text(ttml([b for b in blocks if b["track"] == k], tmap, cfg), encoding="utf-8")
+        files.append(str(f.resolve()).replace("\\", "/"))
     for b in blocks:
-        b["mogrt"] = str(mogrt.bake(tpl, b["text"], out_dir).resolve()).replace("\\", "/")
         L = (tmap.ticks(b["t_out"]) - tmap.ticks(b["t_in"])) / TICKS     # what Premiere will play
         b["keys"], b["interp"], b["k"] = block_keys(L, rs, t_intro, t_outro, effect.duration, fps,
                                                     cfg["easing"])
-    anchor = str(mogrt.bake(tpl, " ", out_dir).resolve()).replace("\\", "/")
+    # the nest's end marker: an empty-text graphic (an empty nest can't be placed, S5)
+    anchor = str(mogrt.bake(mogrt.load(cfg["mogrt"], cfg["mogrt_text_param"]), " ", out_dir).resolve()).replace("\\", "/")
     scaled = sum(b["k"] < 1 for b in blocks)
     if scaled:
         log(f"[caption] {scaled} short block(s) got a squeezed intro/outro (anim_scaled in the review)")
@@ -294,7 +338,7 @@ def run(run_dir, timeline=None, overrides: dict | None = None, words_per_line: i
     if not dry_run:
         (run_dir / "ppro").mkdir(exist_ok=True)
         (run_dir / "ppro" / "ops_caption.json").write_text(
-            json.dumps(ops(blocks, tmap, cfg, effect, style, restyle, anchor), indent=1), encoding="utf-8")
+            json.dumps(ops(blocks, tmap, cfg, effect, style, files, restyle, anchor), indent=1), encoding="utf-8")
     log(f"[caption] {len(blocks)} blocks on {max((b['track'] for b in blocks), default=0)} track(s), "
         f"easing {cfg['easing']}")
     return {"blocks": blocks}

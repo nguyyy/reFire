@@ -505,9 +505,8 @@ def main(argv: list[str] | None = None) -> None:
                     dry_run=args.dry_run, restyle=args.restyle)
         if args.apply and not args.dry_run:
             from .ppro import remote
-            # 2 ops per block; chunk blocks per jsx call (S6), +3 so the nest ops share chunk 1
-            print(remote.apply_ops(Path(args.run_dir) / "ppro" / "ops_caption.json",
-                                   chunk=2 * int(cfg["chunk"]) + 3))
+            # one op per block, `chunk` blocks per jsx call (S6); the menu op ends its chunk anyway
+            print(remote.apply_ops(Path(args.run_dir) / "ppro" / "ops_caption.json", chunk=int(cfg["chunk"])))
         return
 
     if args.cmd == "punch":

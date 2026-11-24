@@ -112,11 +112,8 @@ def test_layering_drops_blocks_trimmed_to_nothing():
     assert all(b["t_out"] > b["t_in"] for b in out)
 
 
-def test_run_bakes_blocks_and_writes_ops(tmp_path):
-    import base64
-    import re
-
-    from refire.ppro import mogrt
+def test_run_writes_ttml_caption_tracks_and_ops(tmp_path):
+    import xml.etree.ElementTree as ET
     vod = tmp_path / "run" / "123"
     ae = vod / "cut" / "ae"
     ae.mkdir(parents=True)
@@ -132,21 +129,29 @@ def test_run_bakes_blocks_and_writes_ops(tmp_path):
     blocks = res["blocks"]
     assert [b["text"] for b in blocks] == ["faruzan is cracked", "NO way"]     # caps-on-excitement kept
     assert [b["track"] for b in blocks] == [1, 1] and all(b["k"] == 1.0 for b in blocks)
-    for b in blocks:                                            # the baked file renders that text
-        t = mogrt.load(b["mogrt"])
-        assert t.default_text == b["text"]
-        blobs = [base64.b64decode(m) for m in re.findall(r'Encoding="base64"[^>]*>([^<]+)<', t.xml)]
-        assert any(b["text"].encode() in blob for blob in blobs)
+    # one caption file per layer, styled like the MOGRT, times on the frame grid
+    tt = ET.parse(vod / "cut" / "ppro" / "captions" / "layer_1.dfxp").getroot()
+    ns = {"t": "http://www.w3.org/ns/ttml"}
+    ps = tt.findall(".//t:p", ns)
+    assert [x.text for x in ps] == ["faruzan is cracked", "NO way"] and ps[0].get("begin") == "00:00:00.000"
+    style = tt.find(".//t:style", ns).attrib
+    sty = {k.split("}")[1]: v for k, v in style.items() if "}" in k and "styling" in k}
+    assert sty == {"fontFamily": "Coolvetica", "fontSize": "55px", "color": "#FFFFFF",
+                   "textOutline": "#000000 3px", "textAlign": "center"}
     o = json.loads((vod / "cut" / "ppro" / "ops_caption.json").read_text())["ops"]
-    assert [x["op"] for x in o[:3]] == ["ensure_nest", "style_nest", "clear_nest"]
-    assert o[0]["v"] == 4 and o[0]["tracks"] == 5 and o[0]["anchor"].endswith(".mogrt")
+    assert [x["op"] for x in o[:6]] == ["ensure_nest", "style_nest", "clear_nest", "caption_tracks", "menu",
+                                        "after_upgrade"]
+    assert o[0]["v"] == 4 and o[0]["tracks"] == 1 and o[0]["anchor"].endswith(".mogrt")
     fx = o[1]["effects"]
     assert [e["match"] for e in fx] == ["AE.Impact_Camera_Shake_FX", "AE.ADBE Drop Shadow", "AE.Impact_Edge_Glow_FX"]
     assert [11, {"color": [255, 255, 223, 179]}] in fx[2]["params"] and [1, 165.75] in fx[1]["params"]
     assert not any(i == 42 for i, _ in fx[0]["params"])         # _ Applied Version skipped
-    ins, tr = o[3], o[4]
-    assert ins["op"] == "insert_caption" and ins["seq"] == "refire_captions" and ins["v"] == 0
-    assert int(ins["start"]) % 4233600000 == 0 and ins["name"] == "refire:caption:b001"
+    assert o[3]["files"][0].endswith("captions/layer_1.dfxp") and o[4]["do"] == "upgrade_captions"
+    assert o[5]["layers"] == 1 and o[5]["want"] == 2
+    tr, tr2 = o[6], o[7]
+    assert tr["op"] == "caption_fx" and tr["seq"] == "refire_captions" and (tr["layer"], tr["index"]) == (1, 0)
+    assert tr2["index"] == 1 and tr["pos"] == [0.125, 0.9155] and tr["name"] == "refire:caption:b001"
+    assert int(tr["start"]) % 4233600000 == 0
     assert tr["match"] == "AE.ADBE Geometry" and tr["interp"] == 0
     statics = dict((i, v) for i, v in tr["params"])
     assert statics[9] is False and statics[10] == 360 and statics[2] is True and statics[0] == [0.5, 0.5]
@@ -160,3 +165,31 @@ def test_run_bakes_blocks_and_writes_ops(tmp_path):
     (vod / "cut" / "ppro" / "ops_caption.json").unlink()
     caption.run(vod / "cut", dry_run=True, log=lambda *a: None)
     assert not (vod / "cut" / "ppro" / "ops_caption.json").exists()
+
+
+def test_overlaps_get_their_own_caption_track_and_index():
+    class TM:
+        ticks_per_frame = 4233600000
+
+        def ticks(self, t):
+            return round(t * 60) * 4233600000
+    blocks = caption.layer([B(0, 2), B(1, 3), B(4, 5)], max_tracks=4)
+    for b, t in zip(blocks, ("a", "b & <c>", "d")):
+        b.update(id=t, text=t, keys={}, interp=0)
+    assert [b["track"] for b in blocks] == [1, 2, 1]
+    assert "b &amp; &lt;c&gt;" in caption.ttml([blocks[1]], TM(), caption.config())
+    fx = type("E", (), {"params": []})()
+    o = caption.ops(blocks, TM(), caption.config(), fx, [], ["l1", "l2"])["ops"]
+    got = [(x["layer"], x["index"], x["layers"]) for x in o if x["op"] == "caption_fx"]
+    assert got == [(1, 0, 2), (2, 0, 2), (1, 1, 2)]
+    assert [x["op"] for x in caption.ops([], TM(), caption.config(), fx, [], [])["ops"]] ==         ["ensure_nest", "style_nest", "clear_nest"]           # nothing to upgrade
+
+
+def test_ttml_times_round_up_so_premiere_floors_onto_the_right_frame():
+    class TM:
+        ticks_per_frame = 4233600000
+
+        def ticks(self, t):
+            return round(t * 60) * 4233600000
+    x = caption.ttml([{"t_in": 38 / 60, "t_out": 3661.5, "text": "a"}], TM(), caption.config())
+    assert 'begin="00:00:00.634" end="01:01:01.500"' in x          # 0.633 landed on frame 37 (S8)
