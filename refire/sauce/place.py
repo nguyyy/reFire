@@ -194,13 +194,15 @@ def run(run_dir, timeline=None, overrides: dict | None = None, model: str = "cla
         raise FileNotFoundError(f"no {pp}: run `refire sauce mine` first")
     prof = json.loads(pp.read_text(encoding="utf-8"))
     exemplars = [json.loads(x) for x in xp.read_text(encoding="utf-8").splitlines()] if xp.exists() else []
-    from . import plan
+    from . import evaluate, plan
+    added, negatives = evaluate.load_corrections()          # his fixes on earlier runs (spec 7.4)
+    exemplars = exemplars + added
     data = plan.load(run_dir, timeline, log=log)
     lib = library(prof, exemplars)
     root = run_dir / "sauce"
     names = [] if ask else plan.sheets(run_dir, data["phrases"], plan.marked(data["phrases"]), root)
     evs = plan.direct(data, prof, lib, exemplars, model=model, backend=backend, ask=ask, sheet_names=names,
-                      cwd=root, log=log)
+                      cwd=root, negatives=negatives, log=log)
     kept, dropped = solve(evs, {p["id"]: p for p in data["phrases"]}, prof, cfg)
     (run_dir / "sauce.json").write_text(json.dumps({"version": 1, "params": cfg, "events": kept}, indent=1,
                                                    ensure_ascii=False), encoding="utf-8")

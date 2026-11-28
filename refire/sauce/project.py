@@ -157,10 +157,10 @@ def classify(it: dict) -> list[dict]:
     other = [k for k in fx if k not in ("AE.ADBE Geometry2", "AE.ADBE Geometry", "AE.ADBE Opacity", "AE.ADBE Motion")]
     segs = segments(p.get("k", []), float(p.get("v") or 100.0), dur)
     if other or not segs:
-        return [{"t": round(it["t"], 3), "end": round(it["end"], 3), "track": it["track"], "type": "fx",
+        return [{"t": round(it["t"], 3), "end": round(it["end"], 3), "track": it["track"], "name": it["name"], "type": "fx",
                  "asset": "+".join(k.replace("AE.", "") for k in fx) or "adjustment", "scale": p.get("v")}]
     corner = isinstance(anchor, list) and all(min(a, 1 - a) <= CORNER for a in anchor)
-    return [{"t": round(it["t"] + s["t0"], 3), "end": round(it["t"] + s["t1"], 3), "track": it["track"],
+    return [{"t": round(it["t"] + s["t0"], 3), "end": round(it["t"] + s["t1"], 3), "track": it["track"], "name": it["name"],
              "type": "punch" if corner else "zoom", "asset": "transform", "anchor": anchor,
              "scale": s["first"], "peak": s["peak"], "ramp_in": s["ramp_in"], "ramp_out": s["ramp_out"]}
             for s in segs]
@@ -168,7 +168,7 @@ def classify(it: dict) -> list[dict]:
 
 def _classify(it: dict) -> dict | None:
     """a non-adjustment item -> a polish event, or None (footage, music, captions)."""
-    base = {"t": round(it["t"], 3), "end": round(it["end"], 3), "track": it["track"]}
+    base = {"t": round(it["t"], 3), "end": round(it["end"], 3), "track": it["track"], "name": it["name"]}
     stem = Path(it["media"] or it["name"]).stem
     ext = Path(it["media"]).suffix.lower()
     if it["nested"] or PROXY.search(it["media"] or ""):

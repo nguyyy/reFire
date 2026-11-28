@@ -274,7 +274,8 @@ def main(argv: list[str] | None = None) -> None:
 
     sa = sub.add_parser("sauce", help="engagement layer (04-sauce.md): `sauce mine` learns the style, "
                         "`sauce <run_dir>` places booms + emotes")
-    sa.add_argument("args", nargs="+", help="mine | <run_dir>")
+    sa.add_argument("args", nargs="+", help="mine | <run_dir> | eval <run_dir>")
+    sa.add_argument("--project", default=None, help="eval: the saved .prproj (default: the newest using the run)")
     sa.add_argument("--timeline", default=None, help="timeline.tsv the panel dumped (default: the run's)")
     sa.add_argument("--tau", type=float, default=None, help="confidence an event needs (default 0.6)")
     sa.add_argument("--dry-run", action="store_true", help="sauce.json + sauce_log.md only, no ops file")
@@ -539,6 +540,10 @@ def main(argv: list[str] | None = None) -> None:
             from .sauce import mine
             print(f"Report: {mine.run(fetch=not args.no_fetch, labels=not args.no_labels).resolve()}")
             return
+        if args.args[0] == "eval" and len(args.args) == 2:
+            from .sauce import evaluate
+            evaluate.run(args.args[1], project=args.project)
+            return
         if len(args.args) == 1:
             from .sauce import place
             place.run(args.args[0], timeline=args.timeline, overrides={"tau": args.tau} if args.tau is not None else None,
@@ -547,7 +552,7 @@ def main(argv: list[str] | None = None) -> None:
                 from .ppro import remote
                 print(remote.apply_ops(Path(args.args[0]) / "ppro" / "ops_sauce.json"))
             return
-        p.error("sauce: mine | <run_dir>")
+        p.error("sauce: mine | <run_dir> | eval <run_dir>")
 
     if args.cmd == "caption":
         from . import caption

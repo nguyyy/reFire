@@ -199,6 +199,12 @@ Reference projects can't serve as held-out tests (they were cut from a different
 4. **Learning:** deletions and additions are written to `run/sauce_corrections.jsonl` and fed back as exemplars, with negatives ("Nguy deleted this") included. This is the same pattern as `corrections_<game>.json`.
 5. **Ship bar:** $A \ge 0.95$ on 3 consecutive fresh videos.
 
+Built (Nov 27), `refire sauce eval <run_dir> [--project x.prproj]`: reads the saved project read-only (the
+same data as a panel dump, no panel needed) and matches each placement by its `refire:sauce:<id>` clip name.
+Writes `sauce_eval.json`, appends to `run/sauce/eval.jsonl` (ship bar checked there) and to
+`run/sauce_corrections.jsonl`; the next `refire sauce` run shows the director his additions as exemplars and
+his deletions as "Nguy deleted these".
+
 ---
 
 ## 8. Open questions

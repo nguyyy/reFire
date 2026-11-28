@@ -236,9 +236,10 @@ def marked(phr: list[dict]) -> set:
 
 
 def direct(data: dict, prof: dict, library: list[dict], exemplars: list[dict], model: str = "claude-opus-5",
-           backend: str = "cli", ask=None, sheet_names=(), cwd=None, log=print) -> list[dict]:
+           backend: str = "cli", ask=None, sheet_names=(), cwd=None, negatives=(), log=print) -> list[dict]:
     """director (+ one corrective retry) then critic -> [{phrase, type, asset, confidence, reason, critic}].
-    sheet_names: frame sheets in cwd (sheets()) the director Reads first."""
+    sheet_names: frame sheets in cwd (sheets()) the director Reads first. negatives: placements Nguy
+    deleted on earlier runs (evaluate.load_corrections), shown to both calls."""
     Out, Critic = _models()
     phr = data["phrases"]
     mark = marked(phr)
@@ -247,7 +248,10 @@ def direct(data: dict, prof: dict, library: list[dict], exemplars: list[dict], m
                        + (f"  (why: {r['why']})" if r.get("why") else "") for r in ex if r["type"] in ("boom", "emote"))
     look = (f"\n\nFrame sheets (Read every one first; each row is one starred phrase at 1 s before its end, its end, "
             f"0.7 s after): {', '.join(sheet_names)}") if sheet_names else ""
-    user = (f"Video: {json.dumps(data['context'], ensure_ascii=False)}\n\nWhat Nguy did before:\n{ex_txt}\n\n"
+    neg = "\n".join(f"- [{r['type']}{':' + str(r['asset']) if r.get('asset') else ''}] {r['text']}"
+                    + (f"  (it was proposed because: {r['reason']})" if r.get("reason") else "") for r in negatives)
+    neg = f"\n\nNguy DELETED these on earlier videos (don't repeat the pattern):\n{neg}" if neg else ""
+    user = (f"Video: {json.dumps(data['context'], ensure_ascii=False)}\n\nWhat Nguy did before:\n{ex_txt}{neg}\n\n"
             f"The cut:\n{transcript(phr, mark)}{look}")
     sys_p = system(prof, library)
     ids, names = {p["id"] for p in phr}, {r["name"] for r in library}
@@ -271,7 +275,7 @@ def direct(data: dict, prof: dict, library: list[dict], exemplars: list[dict], m
 
     rev = "\n".join(f"{i}. [{e['type']}{':' + str(e['asset']) if e['type'] == 'emote' else ''}] "
                     f"{around(by[e['phrase']]['t1'])}  (proposed because: {e['reason']})" for i, e in enumerate(evs))
-    verdicts = {v.i: v for v in _call(CRITIC, rev, Critic, model, backend, "sauce critic", ask).verdicts}
+    verdicts = {v.i: v for v in _call(CRITIC, rev + neg, Critic, model, backend, "sauce critic", ask).verdicts}
     for i, e in enumerate(evs):
         v = verdicts.get(i)
         e["critic"] = v.note if v else ""
