@@ -52,6 +52,28 @@ var reFireOps = (function () {
         return clip.projectItem && item && clip.projectItem.nodeId === item.nodeId;
     }
     function trimmed(s) { return String(s).replace(/^\s+|\s+$/g, ""); }
+    // a media file as a project item in bin `binName`, imported the first time only
+    function importOnce(path, binName) {
+        var root = app.project.rootItem, bin = null, i;
+        for (i = 0; i < root.children.numItems; i++) {
+            if (root.children[i].type === ProjectItemType.BIN && root.children[i].name === binName) { bin = root.children[i]; }
+        }
+        if (!bin) { bin = root.createBin(binName); }
+        var want = String(new File(path).fsName).toLowerCase();
+        function find() {
+            for (var k = 0; k < bin.children.numItems; k++) {
+                var it = bin.children[k];
+                if (it.getMediaPath && String(new File(it.getMediaPath()).fsName).toLowerCase() === want) { return it; }
+            }
+            return null;
+        }
+        var got = find();
+        if (got) { return got; }
+        if (!app.project.importFiles([path], true, bin, false)) { throw new Error("could not import " + path); }
+        got = find();
+        if (!got) { throw new Error("imported " + path + " but cannot find it in " + binName); }
+        return got;
+    }
 
     function readJson(path) {
         var f = new File(path);
@@ -176,6 +198,50 @@ var reFireOps = (function () {
     }
 
     var OPS = {
+        // sauce (04-sauce): only items whose track-item name starts with op.prefix, on the listed tracks
+        sauce_clear: function (op) {
+            var s = activate(MAIN), n = 0, i, c, tr;
+            var lists = [[op.video || [], s.videoTracks], [op.audio || [], s.audioTracks]];
+            for (var g = 0; g < 2; g++) {
+                for (i = 0; i < lists[g][0].length; i++) {
+                    if (lists[g][0][i] >= lists[g][1].numTracks) { continue; }
+                    tr = lists[g][1][lists[g][0][i]];
+                    for (c = tr.clips.numItems - 1; c >= 0; c--) {
+                        if (String(tr.clips[c].name).indexOf(op.prefix) === 0) { tr.clips[c].remove(false, false); n++; }
+                    }
+                }
+            }
+            return n;
+        },
+        // one file on one track at op.start (op.end trims it), named, audio level set; it never
+        // overwrites a clip reFire didn't tag (a caption nest left on V5 from before the move, a hand edit)
+        place_media: function (op) {
+            var s = activate(MAIN), tr, i, c;
+            if (op.audio) {
+                if (s.audioTracks.numTracks <= op.track) { throw new Error("add audio tracks up to A" + (op.track + 1)); }
+                tr = s.audioTracks[op.track];
+            } else { tr = track(op.track); }
+            var a = Number(op.start), b = Number(op.end || op.start);
+            for (c = 0; c < tr.clips.numItems; c++) {
+                var cl = tr.clips[c];
+                if (Number(cl.start.ticks) < b && Number(cl.end.ticks) > a && String(cl.name).indexOf(op.prefix) !== 0) {
+                    throw new Error("'" + cl.name + "' is on " + (op.audio ? "A" : "V") + (op.track + 1) +
+                                    " where sauce goes; move it (captions: re-run Recaption, they go to V6 now)");
+                }
+            }
+            var item = importOnce(op.file, op.bin);
+            tr.overwriteClip(item, T(op.start));
+            var ti = itemAt(tr, op.start);
+            if (!ti) { throw new Error(op.name + " did not land at " + op.start); }
+            if (op.end) { ti.end = T(op.end); }
+            ti.name = op.name;
+            if (op.level !== undefined && op.level !== null) {
+                for (i = 0; i < ti.components.numItems; i++) {
+                    if (ti.components[i].displayName === "Volume") { prop(ti.components[i], "Level").setValue(op.level, true); }
+                }
+            }
+            return 1;
+        },
         clear_track: function (op) {
             var tr = track(op.v), n = 0;
             for (var c = tr.clips.numItems - 1; c >= 0; c--) {

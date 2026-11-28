@@ -377,7 +377,9 @@ fieldset:disabled .chk input:checked+.box{background:var(--mute);border-color:va
     <div class="row"><span class="k">Recaption</span>
       <button class="btn" id="recap" type="button" data-busy="Recaptioning">Recaption</button></div>
     <div class="row"><span class="k">Punch-ins</span>
-      <button class="btn" id="punch" type="button" data-busy="Punching" title="Facecam zooms on V2 from the current V1. Needs an adjustment layer named refire_punch_adj.">Punch-ins</button></div>
+      <button class="btn" id="punch" type="button" data-busy="Punching" title="Facecam zooms on V3 from the current V1. Needs an adjustment layer named refire_punch_adj.">Punch-ins</button></div>
+    <div class="row"><span class="k">Sauce</span>
+      <button class="btn" id="sauce" type="button" data-busy="Saucing" title="Vine booms on A3 and emotes on V5 from the current V1, in Nguy's style (run `refire sauce mine` once first).">Sauce</button></div>
     <div class="row"><span class="k"></span>
       <label class="chk" title="One Claude call over names this stream hasn't taught reFire yet">
         <input type="checkbox" id="cap_fix" data-k="cap_fix"><i class="box"></i><span>Fix names with Claude</span></label></div>
@@ -478,6 +480,7 @@ function setManifest(p) {
     $("#build").disabled = !manifest;
     $("#recap").disabled = !manifest;
     $("#punch").disabled = !manifest;
+    $("#sauce").disabled = !manifest;
     save();               // the manifest has to survive a reload -- see restore()
 }
 
@@ -912,27 +915,36 @@ function runRecap(btn) {
 // --- punch-ins ----------------------------------------------------------
 // Same handshake as recaption: dump V1, let `refire punch` decide, then apply the ops file
 // it wrote with the thin applyOps.jsx. Re-pressing after a re-cut replaces V2's reFire layers.
-function punchIns() {
+// Sauce (04-sauce) uses the same handshake: booms on A3 and emotes on V5 from `refire sauce`.
+function timelineThen(btn, what, next) {
     if (!manifest) { return; }
-    var btn = $("#punch");
-    if (!cp) { return note("err", "Punch-ins need Node, which this panel doesn't have. Rerun install.ps1."); }
+    if (!cp) { return note("err", what + " need Node, which this panel doesn't have. Rerun install.ps1."); }
     busy(btn, true); note("run", "Reading the timeline");
     evalScript(snippet('reFirePpro.timeline("' + esc(manifest) + '")'), function (res) {
         if (!res || res === "EvalScript error.") { res = "Error: " + NO_REPLY; }
         log(res);
         if (/^Error/.test(res)) { return failed(btn, res); }
-        runPunch(btn);
+        next(btn);
+    });
+}
+function punchIns() { timelineThen($("#punch"), "Punch-ins", runPunch); }
+function sauce() {
+    timelineThen($("#sauce"), "Sauce", function (btn) {
+        runPunch(btn, "sauce", "Finding booms and emotes", function (runDir) {
+            applyOps(btn, runDir + "/ppro/ops_sauce.json", 150, "Applying sauce",
+                     "Booms on A3, emotes on V5 (sauce_log.md says why). Re-press after a re-cut.");
+        });
     });
 }
 
-function runPunch(btn) {
+function runPunch(btn, sub, label, after) {
     var py = pyExe(), runDir = manifest.replace(/[\\/]ae[\\/]manifest\.json$/i, "");
-    var args = ["-m", "refire", "punch", runDir];
+    var args = ["-m", "refire", sub || "punch", runDir];
     var d = val("director");
     if (d === "api" || d === "cli") { args.push("--director-backend", d); }
-    if (d === "local") { args.push("--local-director"); if (val("model")) { args.push("--model", val("model")); } }
+    if (d === "local" && !sub) { args.push("--local-director"); if (val("model")) { args.push("--model", val("model")); } }
     if (val("claude_model")) { args.push("--claude-model", val("claude_model")); }
-    note("run", "Finding punch-ins");
+    note("run", label || "Finding punch-ins");
     log("> " + py + " " + args.join(" "));
     var proc;
     try {
@@ -945,7 +957,8 @@ function runPunch(btn) {
     proc.on("error", function (e) { failed(btn, String(e)); });
     proc.on("close", function (code) {
         flush.forEach(function (f) { f(); });
-        if (code !== 0) { return failed(btn, "Punch-ins failed (exit " + code + "). The log has the details."); }
+        if (code !== 0) { return failed(btn, (sub === "sauce" ? "Sauce" : "Punch-ins") + " failed (exit " + code + "). The log has the details."); }
+        if (after) { return after(runDir); }
         applyPunch(btn, runDir + "/ppro/ops_punch.json");
     });
 }
@@ -994,7 +1007,7 @@ function applyOps(btn, ops, chunk, label, doneText) {
 }
 
 function applyPunch(btn, ops) {
-    applyOps(btn, ops, 150, "Applying punch-ins", "Punch-ins on V2. Re-press after a re-cut.");
+    applyOps(btn, ops, 150, "Applying punch-ins", "Punch-ins on V3. Re-press after a re-cut.");
 }
 
 // Styled recaption: `refire caption` writes the captions as TTML caption tracks + ops_caption.json;
@@ -1020,7 +1033,7 @@ function runCaption(btn) {
         if (code !== 0) { return failed(btn, "Captions failed (exit " + code + "). The log has the details."); }
         // 60 captions (one op each) per call; the upgrade step ends the setup call
         applyOps(btn, runDir + "/ppro/ops_caption.json", 60, "Captions",
-                 "Captions rebuilt in refire_captions (V5). Re-press after a re-cut.");
+                 "Captions rebuilt in refire_captions (V6). Re-press after a re-cut.");
     });
 }
 
@@ -1030,6 +1043,7 @@ $("#cancel").onclick = function () { if (child) { child.kill(); } };
 $("#build").onclick = build;
 $("#recap").onclick = recaption;
 $("#punch").onclick = punchIns;
+$("#sauce").onclick = sauce;
 function nudge(step) {
     // round to the step so repeated clicks don't accumulate float dust in the field.
     // The value only takes effect on the next Build -- see the field's title.

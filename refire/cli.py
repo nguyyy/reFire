@@ -272,8 +272,15 @@ def main(argv: list[str] | None = None) -> None:
     th.add_argument("--director-backend", choices=["cli", "api"], default="cli")
     th.add_argument("--no-critic", action="store_true", help="skip the cheap vision pass over placement")
 
-    sa = sub.add_parser("sauce", help="engagement layer (04-sauce.md): `sauce mine` learns the style from his videos")
-    sa.add_argument("args", nargs="+", help="mine")
+    sa = sub.add_parser("sauce", help="engagement layer (04-sauce.md): `sauce mine` learns the style, "
+                        "`sauce <run_dir>` places booms + emotes")
+    sa.add_argument("args", nargs="+", help="mine | <run_dir>")
+    sa.add_argument("--timeline", default=None, help="timeline.tsv the panel dumped (default: the run's)")
+    sa.add_argument("--tau", type=float, default=None, help="confidence an event needs (default 0.6)")
+    sa.add_argument("--dry-run", action="store_true", help="sauce.json + sauce_log.md only, no ops file")
+    sa.add_argument("--apply", action="store_true", help="apply ppro/ops_sauce.json in the open Premiere project")
+    sa.add_argument("--claude-model", default="claude-opus-5")
+    sa.add_argument("--director-backend", choices=["cli", "api"], default="cli")
     sa.add_argument("--no-fetch", action="store_true", help="mine: don't download channel uploads missing on disk")
     sa.add_argument("--no-labels", action="store_true", help="mine: skip the one Claude call that labels exemplars")
 
@@ -532,7 +539,15 @@ def main(argv: list[str] | None = None) -> None:
             from .sauce import mine
             print(f"Report: {mine.run(fetch=not args.no_fetch, labels=not args.no_labels).resolve()}")
             return
-        p.error("sauce: mine")
+        if len(args.args) == 1:
+            from .sauce import place
+            place.run(args.args[0], timeline=args.timeline, overrides={"tau": args.tau} if args.tau is not None else None,
+                      model=args.claude_model, backend=args.director_backend, dry_run=args.dry_run)
+            if args.apply and not args.dry_run:
+                from .ppro import remote
+                print(remote.apply_ops(Path(args.args[0]) / "ppro" / "ops_sauce.json"))
+            return
+        p.error("sauce: mine | <run_dir>")
 
     if args.cmd == "caption":
         from . import caption

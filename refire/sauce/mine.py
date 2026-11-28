@@ -25,6 +25,7 @@ VIDEO_DIRS = [HOME / "Desktop" / "iphone" / "sf90" / "rendered out" / "zy0x rot"
 CHANNEL = "https://www.youtube.com/@fye_er/videos"
 OUT = Path("run/sauce")
 SAME = 2.0                   # s; two renders this close in length are the same video
+RECENT = "20260101"          # uploads on/after this set the density reference (today's style, not 2025's)
 POLISH = ("boom", "emote")   # a project with fewer than MIN_POLISH of these isn't one of his finished edits
 MIN_POLISH = 3
 WINDOW = 8.0                 # s of transcript either side of an event (spec 3.5)
@@ -37,15 +38,22 @@ def duration(p) -> float:
 
 
 def channel(out: Path = OUT, refresh: bool = False) -> list[dict]:
-    """[{id, duration, title}] of the channel's uploads (yt-dlp, cached)."""
+    """[{id, duration, title, date (YYYYMMDD)}] of the channel's uploads (yt-dlp, cached)."""
     p = out / "channel.json"
-    if p.exists() and not refresh:
-        return json.loads(p.read_text(encoding="utf-8"))
-    r = subprocess.run(["yt-dlp", "--flat-playlist", "--print", "%(id)s|%(duration)s|%(title)s", CHANNEL],
-                       capture_output=True, text=True, encoding="utf-8")
-    rows = [dict(zip(("id", "duration", "title"), ln.split("|", 2))) for ln in r.stdout.splitlines() if ln.count("|") >= 2]
-    for x in rows:
-        x["duration"] = float(x["duration"] or 0)
+    rows = json.loads(p.read_text(encoding="utf-8")) if p.exists() and not refresh else None
+    if rows is None:
+        r = subprocess.run(["yt-dlp", "--flat-playlist", "--print", "%(id)s|%(duration)s|%(title)s", CHANNEL],
+                           capture_output=True, text=True, encoding="utf-8")
+        rows = [dict(zip(("id", "duration", "title"), ln.split("|", 2))) for ln in r.stdout.splitlines() if ln.count("|") >= 2]
+        for x in rows:
+            x["duration"] = float(x["duration"] or 0)
+    todo = [x["id"] for x in rows if not x.get("date")]
+    if todo:                                         # the flat listing has no dates: one full pass for them
+        r = subprocess.run(["yt-dlp", "--skip-download", "--no-warnings", "--print", "%(id)s|%(upload_date)s", *todo],
+                           capture_output=True, text=True, encoding="utf-8")
+        got = dict(ln.split("|", 1) for ln in r.stdout.splitlines() if "|" in ln)
+        for x in rows:
+            x["date"] = x.get("date") or got.get(x["id"])
     out.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(rows, indent=1, ensure_ascii=False), encoding="utf-8")
     return rows
@@ -96,7 +104,8 @@ def corpus(out: Path = OUT, video_dirs=VIDEO_DIRS, project_dirs=PROJECT_DIRS, fe
         pr = next((m for m in projs if abs(m["duration"] - d) <= SAME), None)
         c = next((c for c in ch if abs(c["duration"] - d) <= SAME), {})
         rows.append({"key": c.get("id") or p.stem, "video": str(p), "duration": round(d, 2),
-                     "title": c.get("title", p.stem), "channel_id": c.get("id"), "project": pr})
+                     "title": c.get("title", p.stem), "channel_id": c.get("id"), "date": c.get("date"),
+                     "project": pr})
     return rows
 
 
@@ -191,11 +200,13 @@ def overlaps(v: dict, a: str, b: str, slack: float = 0.3) -> tuple[int, int]:
 def profile(vids: list[dict]) -> dict:
     types = ["boom", "emote", "punch", "zoom", "sfx", "fx"]
     proj = [v for v in vids if v["project"]]
+    # the density reference is today's style (Nguy, Nov 27): uploads since RECENT only
+    recent = [v for v in vids if (v.get("date") or "") >= RECENT] or vids
     by = {ty: [e for v in vids for e in v["events"] if kind(e) == ty] for ty in types}
     body = lambda v: max(0.0, v["duration"] - 60) / 60             # noqa: E731
     rates = {}
     for ty in types:
-        src = proj if ty in ("punch", "zoom", "sfx", "fx") else vids          # detect only finds booms + emotes
+        src = [v for v in recent if v["project"]] if ty in ("punch", "zoom", "sfx", "fx") else recent   # detect: booms + emotes only
         cold = sum(1 for v in src for e in v["events"] if kind(e) == ty and e["t"] < 60)
         bod = sum(1 for v in src for e in v["events"] if kind(e) == ty and e["t"] >= 60)
         rates[ty] = {"videos": len(src), "cold_open_per_min": round(cold / max(1e-9, len(src)), 3),
@@ -239,7 +250,9 @@ def profile(vids: list[dict]) -> dict:
         sfx[e["type"][4:]] = sfx.get(e["type"][4:], 0) + 1
     return {
         "videos": len(vids), "with_project": len(proj),
-        "rates": rates, "curve": rate_curve(vids, ["boom", "emote"]) | rate_curve(proj, ["punch", "zoom"]),
+        "recent_since": RECENT, "recent": [v["key"] for v in recent],
+        "rates": rates, "curve": rate_curve(recent, ["boom", "emote"])
+                                 | rate_curve([v for v in recent if v["project"]], ["punch", "zoom"]),
         "gaps": gaps, "gap_any": q(anyg),
         "boom": {"delta": q([b["delta"] for b in bt if b["delta"] <= 3]),
                  "over_speech": round(sum(b["over_speech"] for b in bt) / max(1, len(bt)), 3),
@@ -354,6 +367,8 @@ def report(vids: list[dict], prof: dict, ex: list[dict], val: dict) -> str:
                  f"{c('sfx') if v['project'] else '-'} |")
     L += ["", "Detected videos only show booms and emotes; punches, zooms and other SFX come from the "
           f"{prof['with_project']} videos whose project is on disk.", "", "## How often", "",
+          f"From the {len(prof['recent'])} uploads since {prof['recent_since'][:4]}-{prof['recent_since'][4:6]} "
+          "(today's style; sauce targets 1.5x these):", "",
           "| Event | Cold open (first 60 s), per min | Body, per min | From videos |", "|---|---|---|---|"]
     for ty, r in prof["rates"].items():
         L.append(f"| {ty} | {r['cold_open_per_min']} | {r['body_per_min']} | {r['videos']} |")
