@@ -54,7 +54,7 @@ def test_ops_tag_every_item_and_set_his_boom_level(tmp_path):
             return round(t * 60) * self.ticks_per_frame
     kept = [{"id": "b01", "type": "boom", "t": 1.0, "end": 2.25}, {"id": "e01", "type": "emote", "asset": "huhcat", "t": 1.0, "end": 2.4}]
     o = place.ops(kept, TM(), {"huhcat": tmp_path / "huhcat.mov"}, place.config())["ops"]
-    assert o[0] == {"op": "sauce_clear", "prefix": "refire:sauce:", "video": [1, 4], "audio": [2]}
+    assert o[0] == {"op": "sauce_clear", "prefix": "refire:sauce:", "video": [1, 3, 4], "audio": [2]}
     assert o[1]["audio"] and o[1]["track"] == 2 and abs(o[1]["level"] - 0.035481) < 1e-5 and o[1]["name"] == "refire:sauce:b01"
     assert not o[2]["audio"] and o[2]["track"] == 4 and o[2]["file"].endswith("huhcat.mov") and int(o[2]["start"]) == 60 * 4233600000
 
@@ -102,14 +102,29 @@ def test_log_lists_placed_and_dropped_with_reasons():
 ZPROF = PROF | {"rates": {**PROF["rates"], "zoom": {"body_per_min": 0.12}}, "curve": {**PROF["curve"], "zoom": []}}
 
 
-def test_zooms_start_on_the_phrase_hold_2_to_7_s_stop_at_a_cut_and_skip_punches():
+def test_zooms_start_on_the_phrase_hold_2_to_7_s_and_stop_at_a_cut():
     ph = {0: phrase(0, 100.0, 101.0), 1: phrase(1, 200.0, 201.0), 2: phrase(2, 300.0, 301.0)}
     z = lambda i, d: {**ev(i, "zoom"), "target": "the boss", "duration": d}           # noqa: E731
     kept, dropped = place.solve([z(0, 10.0), z(1, 3.0), z(2, 3.0)], ph, ZPROF, place.config({"density": 99}),
                                 total=400.0, cuts=[201.5], punches=[(299.0, 302.0)])
-    assert [(e["t"], e["end"]) for e in kept] == [(100.0, 107.0)]                    # clamped to 7 s
-    why = {d["phrase"]: d["why"] for d in dropped}
-    assert "cut 1.5s in" in why[1] and "punch" in why[2]
+    assert [(e["t"], e["end"]) for e in kept] == [(100.0, 107.0), (300.0, 303.0)]   # clamped to 7 s; a punch is fine
+    assert "cut 1.5s in" in {d["phrase"]: d["why"] for d in dropped}[1]
+
+
+def test_a_zoom_meeting_a_punch_becomes_a_split_over_the_overlap_only():
+    from refire.sauce import split
+    z = {"id": "z01", "t": 10.0, "end": 15.0, "anchor": [0.6, 0.4], "scale": 1.8, "confidence": 0.8}
+    s = split.overlaps([z], [(12.0, 20.0), (14.6, 14.9)])                             # the 0.3 s overlap is too short
+    assert [(e["id"], e["t"], e["end"], e["zoom"]) for e in s] == [("s01", 12.0, 15.0, "z01")]
+
+
+def test_split_crops_keep_each_panes_aspect_and_stay_on_screen():
+    from refire.sauce import split
+    game, face = split.crops([0.9, 0.1], 2.0, [0.0, 0.6, 0.3, 1.0], 1920, 1080)
+    gx, gy, gw, gh = game
+    assert abs(gw / gh - 1280 / 1080) < 0.01 and gx + gw <= 1920 and gy >= 0                # 2/3 pane, clamped
+    fx, fy, fw, fh = face
+    assert abs(fw / fh - 640 / 1080) < 0.01 and fx >= 0 and fx + fw <= 0.3 * 1920 + 1 and fy >= 0.6 * 1080 - 1
 
 
 def test_rare_types_get_a_whole_video_budget_not_one_per_bin():

@@ -180,8 +180,12 @@ ease, and matching his preset would mean hand-built dense keyframes, so neither 
 2-7 s like his, start at the phrase start, stop at the next V1 cut, and are capped by a whole-video budget
 (1.5x his rate). Targeting is OWLv2 ONNX on the CPU (spike S9) with a static window clamped inside the
 frame, plus one Claude look at every zoomed view, because detector scores don't separate right from wrong.
-No tracking yet: a target that leaves the window skips the zoom. A zoom overlapping a facecam punch is
-skipped until split-screen (P5).
+No tracking yet: a target that leaves the window skips the zoom.
+
+Split-screen (P5, `refire/sauce/split.py`): where a placed zoom overlaps a facecam punch from `punch.json`
+by ≥ 0.75 s, that stretch becomes one ffmpeg-rendered comp on V4: the zoom's window on the left 2/3, his
+face (cropped tall from the facecam box, centered on his face) on the right 1/3. Hard cut in and out, video
+only. The side is a setting (`GAME_SIDE`).
 
 ---
 

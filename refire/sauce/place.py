@@ -23,7 +23,7 @@ DEFAULTS = {"tau": 0.6, "density": 1.5, "cold_open": 60.0, "soft_cap": 3, "soft_
             "boom_len": 1.25, "boom_db": -14.0, "min_emote": 0.6, "size": [1920, 1080], "max_emote_h": 700,
             "zoom_len": [2.0, 7.0], "zoom_gap": 0.5}   # Nguy: zooms like his, 2-7 s; >= 0.5 s at 100% between (spec)
 PREFIX = "refire:sauce:"
-V_ZOOM, V_EMOTE, A_BOOM = 1, 4, 2   # V2, V5, A3 (00-shared track contract)
+V_ZOOM, V_SPLIT, V_EMOTE, A_BOOM = 1, 3, 4, 2   # V2, V4, V5, A3 (00-shared track contract)
 MAX_WORD_S = mine.MAX_WORD_S
 
 
@@ -118,9 +118,7 @@ def solve(evs: list[dict], phrases: dict, prof: dict, cfg: dict, total: float | 
             if any(o["t"] - g < e["end"] and e["t"] < o["end"] + g for o in same):
                 dropped.append({**e, "why": f"another zoom within {g}s (no zoom on zoom)"})
                 continue
-            if any(a < e["end"] and e["t"] < b for a, b in punches):
-                dropped.append({**e, "why": "overlaps a facecam punch (split-screen comes in P5)"})
-                continue
+            # a facecam punch overlapping it is fine: that stretch becomes a split-screen (split.overlaps)
         else:
             if e["phrase"] in boom_at:
                 e["t"] = boom_at[e["phrase"]]
@@ -234,6 +232,36 @@ def localize(kept: list[dict], dropped: list[dict], run_dir: Path, tmap, log=pri
         e["id"] = f"z{i:02d}"
 
 
+def splits(kept: list[dict], punches, run_dir: Path, tmap, log=print) -> list[dict]:
+    """zoom x facecam punch overlaps -> split-screen events with their comp rendered (P5)."""
+    from . import split
+    evs = split.overlaps([e for e in kept if e["type"] == "zoom" and e.get("anchor")], punches)
+    if not evs:
+        return []
+    from ..facecam import Facecams
+    cams = Facecams(run_dir / "ae" / "manifest.json")
+    fps = TICKS / tmap.ticks_per_frame
+    out = []
+    for e in evs:
+        src = tmap.timeline_to_source(e["t"])
+        hit = next(((media, src[1] - off) for sid, media, a, b, off in cams._ranges
+                    if src and sid == src[0] and a <= src[1] < b), None) if src else None
+        cam = cams.detect(src[0]) if src else None
+        if not hit or not cam:
+            log(f"[sauce] split {e['t']:.1f}s skipped: no {'footage' if not hit else 'facecam'} there")
+            continue
+        import cv2
+        cap = cv2.VideoCapture(hit[0])
+        W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+        game, face = split.crops(e["anchor"], e["scale"], cam.box, W, H, face_center=cam.face_center)
+        e["file"] = str(split.render(hit[0], hit[1], e["end"] - e["t"], game, face,
+                                     run_dir / "sauce" / f"split_{e['id']}.mov", fps))
+        log(f"[sauce] split {e['id']} {e['t']:.1f}-{e['end']:.1f}s rendered")
+        out.append(e)
+    return out
+
+
 # --------------------------------------------------------------------------- assets
 
 def library(prof: dict, exemplars: list[dict]) -> list[dict]:
@@ -290,7 +318,7 @@ def render_emote(src: Path, out: Path, height: int, hold: float, fade_end: float
 def ops(kept: list[dict], tmap, emote_files: dict, cfg: dict) -> dict:
     from ..punch import ADJ_ITEM, TRANSFORM
     level = round(VOL_0DB * 10 ** (cfg["boom_db"] / 20), 6)
-    out = [{"op": "sauce_clear", "prefix": PREFIX, "video": [V_ZOOM, V_EMOTE], "audio": [A_BOOM]}]
+    out = [{"op": "sauce_clear", "prefix": PREFIX, "video": [V_ZOOM, V_SPLIT, V_EMOTE], "audio": [A_BOOM]}]
     for e in kept:
         a, b = tmap.ticks(e["t"]), tmap.ticks(e["end"])
         base = {"op": "place_media", "bin": "refire_sauce", "prefix": PREFIX, "name": f"{PREFIX}{e['id']}",
@@ -302,6 +330,8 @@ def ops(kept: list[dict], tmap, emote_files: dict, cfg: dict) -> dict:
                     {"op": "add_effect", "v": V_ZOOM, "start": str(a), "effect": "Transform", "match": TRANSFORM,
                      "params": [[0, e["anchor"]], [1, [0.5, 0.5]], [2, True], [3, s100], [4, s100], [5, 0], [6, 0],
                                 [7, 0], [8, 100], [9, True], [10, 0], [11, 0]]}]
+        elif e["type"] == "split":                 # the pre-rendered comp over the zoom + punch overlap
+            out.append({**base, "file": str(Path(e["file"]).resolve()), "audio": False, "track": V_SPLIT})
         elif e["type"] == "boom":
             out.append({**base, "file": str(detect.BOOM_FILE.resolve()), "audio": True, "track": A_BOOM, "level": level})
         else:
@@ -310,13 +340,14 @@ def ops(kept: list[dict], tmap, emote_files: dict, cfg: dict) -> dict:
 
 
 def counts(kept: list[dict]) -> str:
-    return ", ".join(f"{sum(e['type'] == ty for e in kept)} {ty}s" for ty in ("boom", "emote", "zoom"))
+    return ", ".join(f"{sum(e['type'] == ty for e in kept)} {ty}s" for ty in ("boom", "emote", "zoom", "split"))
 
 
 def log_md(kept: list[dict], dropped: list[dict], cfg: dict) -> str:
     stamp = lambda t: f"{int(t // 60):02d}:{t % 60:05.2f}"       # noqa: E731
     what = lambda e: (f"+{e['asset']}" if e["type"] == "emote" else                  # noqa: E731
-                      f" on {e.get('target')!r}" + (f" {e['scale']:.2f}x" if e.get("scale") else "") if e["type"] == "zoom" else "")
+                      f" on {e.get('target')!r}" + (f" {e['scale']:.2f}x" if e.get("scale") else "") if e["type"] == "zoom" else
+                      f" (zoom {e.get('zoom')} + a facecam punch)" if e["type"] == "split" else "")
     L = ["# sauce log", "", f"{counts(kept)} (tau {cfg['tau']}, density {cfg['density']}x)", "", "## Placed", ""]
     L += [f"- {stamp(e['t'])} {e['type']}{what(e)} ({e['confidence']:.2f}) "
           f"\"{e['text']}\" - {e['reason']}" + (f" / critic: {e['critic']}" if e.get("critic") else "") for e in kept]
@@ -350,6 +381,8 @@ def run(run_dir, timeline=None, overrides: dict | None = None, model: str = "cla
                           cuts=data["tmap"].cuts(), punches=punches)
     if not dry_run:
         localize(kept, dropped, run_dir, data["tmap"], log, model=model, backend=backend, ask=ask)
+        kept += splits(kept, punches, run_dir, data["tmap"], log)
+        kept.sort(key=lambda e: e["t"])
     (run_dir / "sauce.json").write_text(json.dumps({"version": 1, "params": cfg, "events": kept}, indent=1,
                                                    ensure_ascii=False), encoding="utf-8")
     (run_dir / "sauce_log.md").write_text(log_md(kept, dropped, cfg), encoding="utf-8")
