@@ -141,7 +141,7 @@ def test_run_writes_ttml_caption_tracks_and_ops(tmp_path):
     o = json.loads((vod / "cut" / "ppro" / "ops_caption.json").read_text())["ops"]
     assert [x["op"] for x in o[:6]] == ["ensure_nest", "style_nest", "clear_nest", "caption_tracks", "menu",
                                         "after_upgrade"]
-    assert o[0]["v"] == 4 and o[0]["tracks"] == 1 and o[0]["anchor"].endswith(".mogrt")
+    assert o[0]["v"] == 5 and o[0]["tracks"] == 1 and o[0]["anchor"].endswith(".mogrt")
     fx = o[1]["effects"]
     assert [e["match"] for e in fx] == ["AE.Impact_Camera_Shake_FX", "AE.ADBE Drop Shadow", "AE.Impact_Edge_Glow_FX"]
     assert [11, {"color": [255, 255, 223, 179]}] in fx[2]["params"] and [1, 165.75] in fx[1]["params"]

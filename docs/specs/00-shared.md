@@ -74,16 +74,22 @@ Settled with Nguy unless marked *assumed* (Claude's call, veto-able).
 | Track | Content | Owner |
 |---|---|---|
 | V1 | Gameplay clips | reFire `make` / user re-cuts |
-| V2 | Punch adjustment layers | `refire punch` |
-| V3–V4 | Memes, SFX visuals | User only. reFire never touches these. |
-| V5 | Caption nest (`refire_captions` sequence) | `refire caption` |
+| V2 | Gameplay punch-zoom adjustment layers | `refire sauce` |
+| V3 | Facecam punch adjustment layers | `refire punch` |
+| V4 | Split-screen comp (zoom + punch overlap) | `refire sauce` |
+| V5 | Emotes | `refire sauce` |
+| V6 | Caption nest (`refire_captions` sequence) | `refire caption` |
+| A3 | Vine booms | `refire sauce` |
 
-Anything on V1 is zoomed by a punch; V3–V5 are not. reFire edits only V2 and V5, and only items it tagged.
+Moved to the 04-sauce layout on Nov 27 (Nguy): punch was V2 and the caption nest V5; a re-run of punch also
+clears its old V2 items, and Recaption removes a nest clip left on another track. Anything on V1 is zoomed by
+V2/V3; V5 and V6 are not. reFire edits only items it tagged.
 
 ### Tagging
 
 - Punch layers: project item named `refire_punch_adj` (one shared adjustment-layer project item, many track items).
-- Caption nest: sequence named `refire_captions`; its project item is the only V5 item reFire touches.
+- Caption nest: sequence named `refire_captions`; its project item is the only V6 item reFire touches.
+- Sauce items: track items named `refire:sauce:<id>` (V2, V4, V5, A3).
 - If track-item names are writable in the spike, also name each track item `refire:<feature>:<id>`.
 
 ## Shared module: facecam detector (`refire/facecam.py`)

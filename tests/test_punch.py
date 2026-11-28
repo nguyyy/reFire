@@ -223,13 +223,14 @@ def test_run_writes_outputs_and_tick_exact_ops(tmp_path, monkeypatch):
     rows = (vod / "cut" / "punch_review.tsv").read_text(encoding="utf-8").splitlines()
     assert rows[0].startswith("id\tt0\tt1\tstatus\tdrop_reason") and len(rows) == 4
     o = json.loads((vod / "cut" / "ppro" / "ops_punch.json").read_text())
-    assert [x["op"] for x in o["ops"]] == ["clear_track", "insert_adjustment", "add_effect", "add_effect"]
-    ins = o["ops"][1]
-    assert ins["v"] == 1 and int(ins["start"]) % 4233600000 == 0 and int(ins["end"]) % 4233600000 == 0
+    assert [x["op"] for x in o["ops"]] == ["clear_track", "clear_track", "insert_adjustment", "add_effect", "add_effect"]
+    assert [x["v"] for x in o["ops"][:2]] == [2, 1]          # V3 now; the legacy V2 punches cleared too
+    ins = o["ops"][2]
+    assert ins["v"] == 2 and int(ins["start"]) % 4233600000 == 0 and int(ins["end"]) % 4233600000 == 0
     assert int(ins["start"]) == round(9.9 * 60) * 4233600000                     # 60 fps frame grid
-    tr = o["ops"][2]
+    tr = o["ops"][3]
     assert tr["match"] == "AE.ADBE Geometry" and [0, [0.0, 1.0]] in tr["params"] and [3, 210.0] in tr["params"]
-    assert o["ops"][3]["params"] == [[1, 50], [2, 1.0], [3, 0]]
+    assert o["ops"][4]["params"] == [[1, 50], [2, 1.0], [3, 0]]
     # dry run: no ops file
     (vod / "cut" / "ppro" / "ops_punch.json").unlink()
     punch.run(vod / "cut", facecam_override={"box": CAM.box}, judge=judge, dry_run=True, log=lambda *a: None)

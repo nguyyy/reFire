@@ -23,7 +23,7 @@ DEFAULTS = {
     "merge_gap": 2.0, "min_gap": 4.0, "min_len": 0.5, "laugh_min_len": 1.0, "soft_long": 6.0,
     "coverage_window": 60.0, "coverage_window_max": 0.25, "coverage_total_max": 0.20,
     "threshold": 0.60, "weights": {"judge": 0.5, "loud": 0.2, "chat": 0.15, "flags": 0.15},
-    "ocr": "auto", "sharpen": {"amount": 50, "radius": 1.0, "threshold": 0}, "track": 2,
+    "ocr": "auto", "sharpen": {"amount": 50, "radius": 1.0, "threshold": 0}, "track": 3,   # 04-sauce layout
     # not in the spec table, tunable per game: laugh score cut, ocr crop boxes (x0, y0, x1, y1)
     "laugh_threshold": 0.3,
     "ocr_regions": [[0.15, 0.70, 0.85, 0.97], [0.66, 0.08, 0.99, 0.92]],   # genshin dialogue box, item panel
@@ -625,6 +625,9 @@ def ops(punches: list[dict], tmap, cfg: dict) -> dict:
     v = int(cfg["track"]) - 1
     sh = cfg["sharpen"]
     out = [{"op": "clear_track", "v": v, "item": ADJ_ITEM}]
+    if v != 1:      # punches lived on V2 before 04-sauce moved them to V3: a re-run clears the old ones too
+        # ponytail: sauce's gameplay zooms take V2 (P4); they must use another project item than ADJ_ITEM
+        out.append({"op": "clear_track", "v": 1, "item": ADJ_ITEM})
     for p in punches:
         a, b = tmap.ticks(p["t_in"]), tmap.ticks(p["t_out"])
         s100 = round(p["scale"] * 100, 2)

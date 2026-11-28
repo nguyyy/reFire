@@ -1,10 +1,10 @@
 """Premiere smoke test for `refire caption` ops (docs/specs/02-caption.md acceptance).
 
-Needs Premiere open on a scratch MAIN sequence (>= 20 s on V1, >= 5 video tracks) with the
+Needs Premiere open on a scratch MAIN sequence (>= 20 s on V1, >= 6 video tracks) with the
 reFire panel. Builds ops for three fixed blocks (one overlap) on the active sequence's frame
 grid, applies them twice (caption tracks + Upgrade Caption to Graphic, decision R6), and checks:
 the refire_captions nest exists with exactly the blocks (names, times, one graphics track per
-layer above the anchor on V1), one nest clip on V5 spanning main with ccStyle applied once, each
+layer above the anchor on V1), one nest clip on V6 spanning main with ccStyle applied once, each
 block's Transform keyed with the shutter flag off, the nest rebuilt identically on re-apply,
 and frames mid-slide vs at rest (motion blur) exported for a look.
 
@@ -40,7 +40,7 @@ for (v = 0; v < nest.videoTracks.numTracks; v++) for (c = 0; c < nest.videoTrack
     try { keys = g.properties[1].getKeys().length + g.properties[8].getKeys().length; } catch (e) {} }
   out.blocks.push({name: ti.name, v: v, start: ti.start.ticks, end: ti.end.ticks, keys: keys, shutter_flag: flag});
 }
-var m = app.project.activeSequence, tr = m.videoTracks[4];
+var m = app.project.activeSequence, tr = m.videoTracks[5];
 for (c = 0; c < tr.clips.numItems; c++) if (tr.clips[c].projectItem && tr.clips[c].projectItem.nodeId === nest.projectItem.nodeId) {
   var cl = tr.clips[c], n = 0;
   for (var k2 = 0; k2 < cl.components.numItems; k2++) if (/Impact|Drop Shadow/.test(cl.components[k2].matchName)) n++;
@@ -94,7 +94,7 @@ def main() -> int:
                   and int(x["end"]) == tm.ticks(b["t_out"]) and x["v"] == b["track"], x)
             check(f"{b['id']} keyed, motion blur on", x["keys"] == sum(len(v) for v in b["keys"].values())
                   and x["shutter_flag"] is False, (x["keys"], x["shutter_flag"]))
-        check(f"round {rnd}: one nest clip on V5 spanning main", len(d["v5"]) == 1 and int(d["v5"][0]["start"]) == 0
+        check(f"round {rnd}: one nest clip on V6 spanning main", len(d["v5"]) == 1 and int(d["v5"][0]["start"]) == 0
               and int(d["v5"][0]["end"]) == int(d["main_end"]), d["v5"])
         check(f"round {rnd}: ccStyle applied once", d["v5"] and d["v5"][0]["fx"] == 3, d["v5"])
     strip = lambda d: [(x["name"], x["start"], x["end"], x["v"]) for x in d["blocks"]]   # noqa: E731

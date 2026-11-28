@@ -3,7 +3,7 @@
 The blocks go in as caption tracks (one TTML file per overlap layer, styled like the caption
 MOGRT), and Premiere's own Upgrade Caption to Graphic turns them all into graphic clips in one
 go (decision R6, spike S8). Each graphic then gets its text position and a Transform carrying
-captionIn's animation, all inside the `refire_captions` nest on main V5, which carries ccStyle
+captionIn's animation, all inside the `refire_captions` nest on main V6, which carries ccStyle
 (shake, shadow, glow) once. Intro/outro keep the preset's durations anchored to each block's
 start/end. Python decides everything here; the .jsx (ppro/applyOps.jsx) only applies
 ops_caption.json, and ppro/menu.py runs the one menu command scripting lacks. Times are
@@ -19,7 +19,7 @@ DEFAULTS = {
     "mode": "styled", "mogrt": str(ASSETS / "captMograph.mogrt"), "mogrt_text_param": "TextLayer",
     "preset_in": str(ASSETS / "captionIn.prfpset"), "preset_style": str(ASSETS / "ccStyle.prfpset"),
     "easing": "exact", "motion_blur": True, "shutter_angle": 360, "tail": 0.0, "max_tracks": 4,
-    "nest_track": 5, "chunk": 60,
+    "nest_track": 6, "chunk": 60,      # 04-sauce layout: V5 is emotes now
     # the caption MOGRT's look as TTML (S8: CoolveticaRg-Regular 55, stroke 3, centered in a
     # 1440 box). Premiere drops TTML regions, so every graphic lands at (0.05, 0.05) and gets
     # text_pos: the MOGRT's box measured on screen, its glyphs within 2 px.

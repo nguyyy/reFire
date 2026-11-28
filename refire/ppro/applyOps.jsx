@@ -240,6 +240,17 @@ var reFireOps = (function () {
             for (i = tr.clips.numItems - 1; i >= 0; i--) {
                 if (refersTo(tr.clips[i], nest.projectItem)) { found.push(tr.clips[i]); }
             }
+            // the nest moved (V5 -> V6, 04-sauce): a clip of it on any other track goes, with its linked audio
+            for (t = 0; t < m.videoTracks.numTracks; t++) {
+                if (t === op.v) { continue; }
+                for (i = m.videoTracks[t].clips.numItems - 1; i >= 0; i--) {
+                    var old = m.videoTracks[t].clips[i];
+                    if (!refersTo(old, nest.projectItem)) { continue; }
+                    var ln = old.getLinkedItems();
+                    for (g = 0; ln && g < ln.numItems; g++) { if (ln[g].mediaType === "Audio") { ln[g].remove(false, false); } }
+                    old.remove(false, false);
+                }
+            }
             for (i = op.fresh ? 0 : 1; i < found.length; i++) { found[i].remove(false, false); }
             var clip = op.fresh ? null : found[0];
             if (!clip) {

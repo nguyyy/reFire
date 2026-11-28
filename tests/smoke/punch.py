@@ -2,7 +2,7 @@
 
 Needs Premiere open on a scratch sequence (>= 30 s of footage on V1) with the reFire panel
 and a project item named refire_punch_adj. Builds ops for two fixed punches on the active
-sequence's frame grid, applies them twice (idempotency), asserts V2 items, ticks, effect
+sequence's frame grid, applies them twice (idempotency), asserts V3 items, ticks, effect
 params, and that a mid-punch frame has no black edges.
 
     uv run python tests/smoke/punch.py
@@ -26,14 +26,14 @@ PUNCHES = [{"id": "p01", "t_in": 5.0, "t_out": 7.5, "pin": [0.0, 1.0], "scale": 
            {"id": "p02", "t_in": 20.0, "t_out": 23.333, "pin": [0.0, 1.0], "scale": 1.8}]
 
 
-# es3 has no JSON: tiny writer, then V2's refire items with their Transform/Unsharp values
+# es3 has no JSON: tiny writer, then V3's refire items with their Transform/Unsharp values
 DUMP = r"""
 function J(v) { if (v === null || v === undefined) { return "null"; } var t = typeof v, a = [], k;
   if (t === "number" || t === "boolean") { return String(v); }
   if (t === "string") { return '"' + v.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"'; }
   if (v.length !== undefined) { for (k = 0; k < v.length; k++) { a.push(J(v[k])); } return "[" + a.join(",") + "]"; }
   for (k in v) { a.push(J(k) + ":" + J(v[k])); } return "{" + a.join(",") + "}"; }
-var tr = app.project.activeSequence.videoTracks[1], out = [];
+var tr = app.project.activeSequence.videoTracks[2], out = [];
 for (var i = 0; i < tr.clips.numItems; i++) {
   var c = tr.clips[i];
   if (!c.projectItem || c.projectItem.name.replace(/^\s+|\s+$/g, "") !== "refire_punch_adj") { continue; }
@@ -66,7 +66,7 @@ def main() -> int:
     for rnd in (1, 2):
         print(remote.apply_ops(path))
         dump = json.loads(remote.call(DUMP))
-        check(f"round {rnd}: exactly two reFire punch items on V2", len(dump) == 2, len(dump))
+        check(f"round {rnd}: exactly two reFire punch items on V3", len(dump) == 2, len(dump))
         for p, d in zip(PUNCHES, dump):
             a, b = tm.ticks(p["t_in"]), tm.ticks(p["t_out"])
             check(f"{p['id']} frame-exact", int(d["start"]) == a and int(d["end"]) == b, (d["start"], d["end"]))
