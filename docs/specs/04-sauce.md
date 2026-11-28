@@ -175,6 +175,14 @@ The director names the target in words ("the enemy that just one-shot him", "the
 3. Smooth the crop path, clamp it to the frame, and cap scale at 200%.
 4. If localization confidence is low, or the target leaves the frame, **skip the zoom**.
 
+Built (Nov 27, Nguy's calls): zooms and punches stay **hard cuts**. Premiere's script API can't set a key's
+ease, and matching his preset would mean hand-built dense keyframes, so neither uses the ease. Zooms are held
+2-7 s like his, start at the phrase start, stop at the next V1 cut, and are capped by a whole-video budget
+(1.5x his rate). Targeting is OWLv2 ONNX on the CPU (spike S9) with a static window clamped inside the
+frame, plus one Claude look at every zoomed view, because detector scores don't separate right from wrong.
+No tracking yet: a target that leaves the window skips the zoom. A zoom overlapping a facecam punch is
+skipped until split-screen (P5).
+
 ---
 
 ## 6. Premiere apply (panel side)

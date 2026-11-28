@@ -246,7 +246,10 @@ var reFireOps = (function () {
             var tr = track(op.v), n = 0;
             for (var c = tr.clips.numItems - 1; c >= 0; c--) {
                 var pi = tr.clips[c].projectItem;
-                if (pi && trimmed(pi.name) === op.item) { tr.clips[c].remove(false, false); n++; }
+                // op.prefix: only items named so (punch's old V2 layers, not sauce's zooms sharing the item)
+                if (pi && trimmed(pi.name) === op.item && (!op.prefix || String(tr.clips[c].name).indexOf(op.prefix) === 0)) {
+                    tr.clips[c].remove(false, false); n++;
+                }
             }
             return n;
         },

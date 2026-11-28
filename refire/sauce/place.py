@@ -20,9 +20,10 @@ from . import detect, mine
 from .project import VOL_0DB
 
 DEFAULTS = {"tau": 0.6, "density": 1.5, "cold_open": 60.0, "soft_cap": 3, "soft_window": 10.0, "earned": 0.9,
-            "boom_len": 1.25, "boom_db": -14.0, "min_emote": 0.6, "size": [1920, 1080], "max_emote_h": 700}
+            "boom_len": 1.25, "boom_db": -14.0, "min_emote": 0.6, "size": [1920, 1080], "max_emote_h": 700,
+            "zoom_len": [2.0, 7.0], "zoom_gap": 0.5}   # Nguy: zooms like his, 2-7 s; >= 0.5 s at 100% between (spec)
 PREFIX = "refire:sauce:"
-V_EMOTE, A_BOOM = 4, 2           # V5, A3 (00-shared track contract)
+V_ZOOM, V_EMOTE, A_BOOM = 1, 4, 2   # V2, V5, A3 (00-shared track contract)
 MAX_WORD_S = mine.MAX_WORD_S
 
 
@@ -46,28 +47,60 @@ def cap(curve: list[dict], body: float, t: float, density: float) -> tuple[tuple
     return span, max(1, math.ceil(density * rate * (span[1] - span[0]) / 60))
 
 
-def solve(evs: list[dict], phrases: dict, prof: dict, cfg: dict) -> tuple[list[dict], list[dict]]:
-    """proposals -> (kept events with times, dropped with a reason)."""
+def budget(prof: dict, ty: str, total: float, density: float) -> int:
+    """the most events of a type a whole video may take: density x his expected count over its length
+    (per-bin caps alone round every rare type up to one per bin)."""
+    curve, body = prof["curve"].get(ty, []), prof["rates"][ty]["body_per_min"]
+    n, end = 0.0, 0.0
+    for b in curve:
+        a, c = b["t0"], min(b["t1"], total)
+        if c > a:
+            n += b["per_min"] * (c - a) / 60
+            end = c
+    n += body * max(0.0, total - max(end, curve[-1]["t1"] if curve else 0.0)) / 60
+    return max(1, math.ceil(density * n))
+
+
+def solve(evs: list[dict], phrases: dict, prof: dict, cfg: dict, total: float | None = None, cuts=(),
+          punches=()) -> tuple[list[dict], list[dict]]:
+    """proposals -> (kept events with times, dropped with a reason). cuts: V1 edit points (a zoom
+    stops at the next one); punches: facecam punch spans [t0, t1] (a zoom may not overlap one until
+    split-screen, P5)."""
     delta = prof["boom"]["delta"].get("median", 0.0)
     hold = prof["emote"]["hold"].get("median", 1.4)
+    zmin, zmax = cfg["zoom_len"]
     kept: list[dict] = []
     dropped: list[dict] = []
     boom_at = {}
     for e in evs:
         p = phrases[e["phrase"]]
-        e = {**e, "t": round(hit_time(p, delta), 3), "text": p["text"]}
+        t = p["t0"] if e["type"] == "zoom" else hit_time(p, delta)
+        e = {**e, "t": round(t, 3), "text": p["text"]}
         if e["confidence"] < cfg["tau"]:
             dropped.append({**e, "why": f"confidence {e['confidence']} < tau {cfg['tau']}"})
             continue
-        e["end"] = round(e["t"] + (cfg["boom_len"] if e["type"] == "boom" else hold), 3)
+        if e["type"] == "zoom":
+            end = e["t"] + min(zmax, max(zmin, float(e.get("duration") or zmin)))
+            end = min([end] + [c for c in cuts if e["t"] + 0.05 < c < end])      # the footage changes at a cut
+            if end - e["t"] < zmin:
+                dropped.append({**e, "why": f"a cut {end - e['t']:.1f}s in leaves no room to zoom"})
+                continue
+            e["end"] = round(end, 3)
+        else:
+            e["end"] = round(e["t"] + (cfg["boom_len"] if e["type"] == "boom" else hold), 3)
         kept.append(e)
     # a paired emote lands on its boom's frame (he puts half of them there)
     for e in kept:
         if e["type"] == "boom":
             boom_at[e["phrase"]] = e["t"]
     out: list[dict] = []
+    total = total or max((e["end"] for e in kept), default=0.0)
+    whole = {ty: budget(prof, ty, total, cfg["density"]) for ty in ("boom", "emote", "zoom") if ty in prof["rates"]}
     for e in sorted(kept, key=lambda e: -e["confidence"]):
         same = [o for o in out if o["type"] == e["type"]]
+        if len(same) >= whole.get(e["type"], 10 ** 6):
+            dropped.append({**e, "why": f"density ceiling ({whole[e['type']]} {e['type']}s for the whole video)"})
+            continue
         span, n = cap(prof["curve"].get(e["type"], []), prof["rates"][e["type"]]["body_per_min"], e["t"], cfg["density"])
         if sum(span[0] <= o["t"] < span[1] for o in same) >= n:
             dropped.append({**e, "why": f"density ceiling ({n} {e['type']}s in {span[0]:.0f}-{span[1]:.0f}s)"})
@@ -79,6 +112,14 @@ def solve(evs: list[dict], phrases: dict, prof: dict, cfg: dict) -> tuple[list[d
         if e["type"] == "boom":
             if any(abs(o["t"] - e["t"]) < cfg["boom_len"] for o in same):
                 dropped.append({**e, "why": "another boom is still playing"})
+                continue
+        elif e["type"] == "zoom":
+            g = cfg["zoom_gap"]
+            if any(o["t"] - g < e["end"] and e["t"] < o["end"] + g for o in same):
+                dropped.append({**e, "why": f"another zoom within {g}s (no zoom on zoom)"})
+                continue
+            if any(a < e["end"] and e["t"] < b for a, b in punches):
+                dropped.append({**e, "why": "overlaps a facecam punch (split-screen comes in P5)"})
                 continue
         else:
             if e["phrase"] in boom_at:
@@ -99,11 +140,98 @@ def solve(evs: list[dict], phrases: dict, prof: dict, cfg: dict) -> tuple[list[d
                 first["end"] = second["t"]
         out.append(e)
     out.sort(key=lambda e: e["t"])
-    n = {"boom": 0, "emote": 0}
+    n = {"boom": 0, "emote": 0, "zoom": 0}
     for e in out:
         n[e["type"]] += 1
         e["id"] = f"{e['type'][0]}{n[e['type']]:02d}"
     return out, dropped
+
+
+VERIFY = """You check gameplay zooms in a stream edit before they ship. Each image is exactly what the zoomed
+frame will show; the target is what the zoom is meant to show. Answer shows=true only if the target is
+clearly visible and is the obvious subject of the image. A wrong zoom costs the editor a fix, so when in
+doubt answer false. Reply with ONLY JSON: {"verdicts": [{"i": 0, "shows": true, "note": "short"}]}"""
+
+
+def verify_zooms(zooms: list[dict], root: Path, model: str, backend: str, ask=None) -> dict:
+    """one call over the zoom crops (zoom_<i>.jpg in root) -> {index: (shows, note)}."""
+    from pydantic import BaseModel
+
+    from .plan import _call
+
+    class V(BaseModel):
+        i: int
+        shows: bool = False
+        note: str = ""
+
+    class Out(BaseModel):
+        verdicts: list[V]
+
+    user = "Read each image, then judge it.\n" + "\n".join(f"{i}. zoom_{i}.jpg - target: {z['target']}" for i, z in enumerate(zooms))
+    out = _call(VERIFY, user, Out, model, backend, "sauce zoom check", ask, cwd=None if ask else root)
+    return {v.i: (v.shows, v.note) for v in out.verdicts}
+
+
+def localize(kept: list[dict], dropped: list[dict], run_dir: Path, tmap, log=print, model: str = "claude-opus-5",
+             backend: str = "cli", ask=None) -> None:
+    """each zoom's target found on its first frame (anchor + scale) and still in the window on its
+    last, then the zoomed view itself checked by one Claude look (S9: OWLv2 scores a wrong box as
+    high as a right one); otherwise the zoom is dropped (spec 5.4: low confidence or target gone = skip)."""
+    zooms = [e for e in kept if e["type"] == "zoom"]
+    if not zooms:
+        return
+    from ..facecam import Facecams
+    from . import locate
+    cams = Facecams(run_dir / "ae" / "manifest.json")
+
+    def frame(t):
+        src = tmap.timeline_to_source(t)
+        got = cams.frames(src[0], [src[1]], width=0) if src else []
+        return got[0] if got else None
+
+    for e in zooms:
+        f0, f1 = frame(e["t"] + 0.1), frame(e["end"] - 0.1)
+        why = None
+        if f0 is None:
+            why = "no frame at the zoom's start"
+        else:
+            h, w = f0.shape[:2]
+            s0, box = locate.detect(f0, e["target"])
+            win = locate.window(box, w, h)
+            if s0 < locate.MIN_SCORE:
+                why = f"target not found on screen (score {s0:.2f})"
+            elif win is None:
+                why = "target too big to be worth a zoom"
+            elif f1 is not None:
+                s1, box1 = locate.detect(f1, e["target"])
+                if s1 < locate.MIN_SCORE or not locate.inside(box1, win[0], win[1], w, h):
+                    why = "target left the zoomed window before the zoom ends"
+            if why is None:
+                e["anchor"], e["scale"], e["score"] = win[0], win[1], round(s0, 3)
+                e["_view"] = f0[int((win[0][1] - 0.5 / win[1]) * h):int((win[0][1] + 0.5 / win[1]) * h),
+                                int((win[0][0] - 0.5 / win[1]) * w):int((win[0][0] + 0.5 / win[1]) * w)]
+        got = why or f"{e['scale']:.2f}x at {e['anchor']}"
+        log(f"[sauce] zoom {e['t']:.1f}s on {e['target']!r}: {got}")
+        if why:
+            kept.remove(e)
+            dropped.append({**e, "why": why})
+    found = [e for e in kept if e["type"] == "zoom"]
+    if found:
+        import cv2
+        root = run_dir / "sauce"
+        root.mkdir(parents=True, exist_ok=True)
+        for i, e in enumerate(found):
+            cv2.imwrite(str(root / f"zoom_{i}.jpg"), cv2.resize(e["_view"], (960, 540)))
+        verdicts = verify_zooms(found, root, model, backend, ask)
+        for i, e in enumerate(found):
+            shows, note = verdicts.get(i, (False, "no verdict"))
+            e.pop("_view", None)
+            log(f"[sauce] zoom {e['t']:.1f}s check: {'shows' if shows else 'does not show'} the target ({note})")
+            if not shows:
+                kept.remove(e)
+                dropped.append({**e, "why": f"the zoomed view doesn't show the target: {note}"})
+    for i, e in enumerate((e for e in kept if e["type"] == "zoom"), 1):
+        e["id"] = f"z{i:02d}"
 
 
 # --------------------------------------------------------------------------- assets
@@ -160,27 +288,40 @@ def render_emote(src: Path, out: Path, height: int, hold: float, fade_end: float
 
 
 def ops(kept: list[dict], tmap, emote_files: dict, cfg: dict) -> dict:
+    from ..punch import ADJ_ITEM, TRANSFORM
     level = round(VOL_0DB * 10 ** (cfg["boom_db"] / 20), 6)
-    out = [{"op": "sauce_clear", "prefix": PREFIX, "video": [V_EMOTE], "audio": [A_BOOM]}]
+    out = [{"op": "sauce_clear", "prefix": PREFIX, "video": [V_ZOOM, V_EMOTE], "audio": [A_BOOM]}]
     for e in kept:
         a, b = tmap.ticks(e["t"]), tmap.ticks(e["end"])
         base = {"op": "place_media", "bin": "refire_sauce", "prefix": PREFIX, "name": f"{PREFIX}{e['id']}",
                 "start": str(a), "end": str(b)}
-        if e["type"] == "boom":
+        if e["type"] == "zoom":                     # a hard cut to a static window (Nguy): punch's ops, centered
+            s100 = round(e["scale"] * 100, 2)
+            out += [{"op": "insert_adjustment", "id": e["id"], "v": V_ZOOM, "item": ADJ_ITEM, "start": str(a),
+                     "end": str(b), "name": f"{PREFIX}{e['id']}"},
+                    {"op": "add_effect", "v": V_ZOOM, "start": str(a), "effect": "Transform", "match": TRANSFORM,
+                     "params": [[0, e["anchor"]], [1, [0.5, 0.5]], [2, True], [3, s100], [4, s100], [5, 0], [6, 0],
+                                [7, 0], [8, 100], [9, True], [10, 0], [11, 0]]}]
+        elif e["type"] == "boom":
             out.append({**base, "file": str(detect.BOOM_FILE.resolve()), "audio": True, "track": A_BOOM, "level": level})
         else:
             out.append({**base, "file": str(Path(emote_files[e["asset"]]).resolve()), "audio": False, "track": V_EMOTE})
     return {"version": 1, "feature": "sauce", "ticks_per_frame": tmap.ticks_per_frame, "ops": out}
 
 
+def counts(kept: list[dict]) -> str:
+    return ", ".join(f"{sum(e['type'] == ty for e in kept)} {ty}s" for ty in ("boom", "emote", "zoom"))
+
+
 def log_md(kept: list[dict], dropped: list[dict], cfg: dict) -> str:
     stamp = lambda t: f"{int(t // 60):02d}:{t % 60:05.2f}"       # noqa: E731
-    L = ["# sauce log", "", f"{sum(e['type'] == 'boom' for e in kept)} booms, {sum(e['type'] == 'emote' for e in kept)} emotes "
-         f"(tau {cfg['tau']}, density {cfg['density']}x)", "", "## Placed", ""]
-    L += [f"- {stamp(e['t'])} {e['type']}{'+' + e['asset'] if e['type'] == 'emote' else ''} ({e['confidence']:.2f}) "
+    what = lambda e: (f"+{e['asset']}" if e["type"] == "emote" else                  # noqa: E731
+                      f" on {e.get('target')!r}" + (f" {e['scale']:.2f}x" if e.get("scale") else "") if e["type"] == "zoom" else "")
+    L = ["# sauce log", "", f"{counts(kept)} (tau {cfg['tau']}, density {cfg['density']}x)", "", "## Placed", ""]
+    L += [f"- {stamp(e['t'])} {e['type']}{what(e)} ({e['confidence']:.2f}) "
           f"\"{e['text']}\" - {e['reason']}" + (f" / critic: {e['critic']}" if e.get("critic") else "") for e in kept]
     L += ["", "## Dropped", ""]
-    L += [f"- {stamp(e['t'])} {e['type']}{'+' + str(e.get('asset')) if e['type'] == 'emote' else ''} ({e['confidence']:.2f}) "
+    L += [f"- {stamp(e['t'])} {e['type']}{what(e)} ({e['confidence']:.2f}) "
           f"\"{e['text']}\" - {e['why']}" for e in sorted(dropped, key=lambda e: e["t"])]
     return "\n".join(L) + "\n"
 
@@ -203,7 +344,12 @@ def run(run_dir, timeline=None, overrides: dict | None = None, model: str = "cla
     names = [] if ask else plan.sheets(run_dir, data["phrases"], plan.marked(data["phrases"]), root)
     evs = plan.direct(data, prof, lib, exemplars, model=model, backend=backend, ask=ask, sheet_names=names,
                       cwd=root, negatives=negatives, log=log)
-    kept, dropped = solve(evs, {p["id"]: p for p in data["phrases"]}, prof, cfg)
+    pj = run_dir / "punch.json"
+    punches = [(p["t_in"], p["t_out"]) for p in json.loads(pj.read_text(encoding="utf-8"))["punches"]] if pj.exists() else []
+    kept, dropped = solve(evs, {p["id"]: p for p in data["phrases"]}, prof, cfg, total=data["total"],
+                          cuts=data["tmap"].cuts(), punches=punches)
+    if not dry_run:
+        localize(kept, dropped, run_dir, data["tmap"], log, model=model, backend=backend, ask=ask)
     (run_dir / "sauce.json").write_text(json.dumps({"version": 1, "params": cfg, "events": kept}, indent=1,
                                                    ensure_ascii=False), encoding="utf-8")
     (run_dir / "sauce_log.md").write_text(log_md(kept, dropped, cfg), encoding="utf-8")
@@ -220,6 +366,5 @@ def run(run_dir, timeline=None, overrides: dict | None = None, model: str = "cla
         (run_dir / "ppro").mkdir(exist_ok=True)
         (run_dir / "ppro" / "ops_sauce.json").write_text(json.dumps(ops(kept, data["tmap"], files, cfg), indent=1),
                                                          encoding="utf-8")
-    log(f"[sauce] {sum(e['type'] == 'boom' for e in kept)} booms, {sum(e['type'] == 'emote' for e in kept)} emotes "
-        f"placed; {len(dropped)} dropped (sauce_log.md)")
+    log(f"[sauce] {counts(kept)} placed; {len(dropped)} dropped (sauce_log.md)")
     return {"kept": kept, "dropped": dropped}

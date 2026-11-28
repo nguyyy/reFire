@@ -157,6 +157,11 @@ What Nguy does (measured on his uploads):
   Half of them land with a boom on the same frame. About {prof['rates']['emote']['body_per_min']:.2f}/min.
   Closed library (use only these names):
 {lib}
+- Gameplay zoom (rare: about {prof['rates'].get('zoom', {}).get('body_per_min', 0.1) * 10:.0f} per 10 min): a hard cut into the part of the
+  screen he is looking at, talking about or reacting to (a 5-star reveal, a stat line he reads out, the
+  enemy that just one-shot him, building suspense), held 2-7 s. target = what to zoom on, described so a
+  detector can find it on that frame ("the gold 5-star character card", "the CRIT DMG substat line", "the
+  boss health bar"); duration = seconds. It starts at the START of the phrase. Never on his face (punches do that).
 - Nothing for filler, read-aloud quest text, stat lists, chat reading, donation/sub alerts, unless the
   moment itself is funny or out of pocket. Everything on stream is fair game, teammates and friends too.
 
@@ -165,13 +170,14 @@ laughter / exclamation signals; anything can qualify, starred or not. You also g
 Nguy did (the event sat at [*] in the transcript). Propose events on the phrase whose END is the hit.
 A phrase may get both a boom and an emote. confidence = how sure you are Nguy would keep it (0-1).
 
-Reply with ONLY JSON: {{"events": [{{"phrase": 12, "type": "boom|emote", "asset": "emote name or null",
-"confidence": 0.8, "reason": "short: the line + why it's funny"}}]}}"""
+Reply with ONLY JSON: {{"events": [{{"phrase": 12, "type": "boom|emote|zoom", "asset": "emote name or null",
+"target": "zoom only: what to zoom on", "duration": 3.0, "confidence": 0.8, "reason": "short: the line + why"}}]}}"""
 
 
 CRITIC = """You are Nguy, zy0x's editor, reviewing polish another editor proposed for his stream edit
-(vine booms, meme emotes). For each proposal decide: would you delete it? Delete anything generic (a
-boom on a line that isn't a punchline, an emote that doesn't fit the line's mood), anything on filler,
+(vine booms, meme emotes, gameplay zooms). For each proposal decide: would you delete it? Delete anything
+generic (a boom on a line that isn't a punchline, an emote that doesn't fit the line's mood, a zoom on
+something he isn't looking at or talking about), anything on filler,
 quest text, stat lists or chat reading, and anything that only works if you squint. Keep what lands.
 Give your own confidence 0-1 that it stays in your final edit.
 Reply with ONLY JSON: {"verdicts": [{"i": 0, "keep": true, "confidence": 0.8, "note": "short"}]}"""
@@ -200,6 +206,8 @@ def _models():
         phrase: int
         type: str
         asset: str | None = None
+        target: str | None = None
+        duration: float | None = None
         confidence: float = 0.0
         reason: str = ""
 
@@ -221,8 +229,10 @@ def _models():
 def problems(events: list[dict], ids: set, names: set) -> list[str]:
     errs = []
     for e in events:
-        if e["type"] not in ("boom", "emote"):
-            errs.append(f"type {e['type']!r}: boom or emote only")
+        if e["type"] not in ("boom", "emote", "zoom"):
+            errs.append(f"type {e['type']!r}: boom, emote or zoom only")
+        if e["type"] == "zoom" and not (e.get("target") or "").strip():
+            errs.append(f"zoom on p{e['phrase']} needs a target to find on screen")
         if e["phrase"] not in ids:
             errs.append(f"no phrase p{e['phrase']}")
         if e["type"] == "emote" and e.get("asset") not in names:
@@ -273,7 +283,8 @@ def direct(data: dict, prof: dict, library: list[dict], exemplars: list[dict], m
         return (" ".join(w["text"] for w in words if t - 8 <= w["t0"] < t) + " [*] "
                 + " ".join(w["text"] for w in words if t <= w["t0"] < t + 8))
 
-    rev = "\n".join(f"{i}. [{e['type']}{':' + str(e['asset']) if e['type'] == 'emote' else ''}] "
+    rev = "\n".join(f"{i}. [{e['type']}{':' + str(e['asset']) if e['type'] == 'emote' else ''}"
+                    f"{' on ' + str(e['target']) if e['type'] == 'zoom' else ''}] "
                     f"{around(by[e['phrase']]['t1'])}  (proposed because: {e['reason']})" for i, e in enumerate(evs))
     verdicts = {v.i: v for v in _call(CRITIC, rev + neg, Critic, model, backend, "sauce critic", ask).verdicts}
     for i, e in enumerate(evs):

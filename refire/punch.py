@@ -625,9 +625,9 @@ def ops(punches: list[dict], tmap, cfg: dict) -> dict:
     v = int(cfg["track"]) - 1
     sh = cfg["sharpen"]
     out = [{"op": "clear_track", "v": v, "item": ADJ_ITEM}]
-    if v != 1:      # punches lived on V2 before 04-sauce moved them to V3: a re-run clears the old ones too
-        # ponytail: sauce's gameplay zooms take V2 (P4); they must use another project item than ADJ_ITEM
-        out.append({"op": "clear_track", "v": 1, "item": ADJ_ITEM})
+    if v != 1:      # punches lived on V2 before 04-sauce moved them to V3: a re-run clears the old ones too,
+        # by name: sauce's gameplay zooms on V2 use the same adjustment layer item
+        out.append({"op": "clear_track", "v": 1, "item": ADJ_ITEM, "prefix": "refire:punch:"})
     for p in punches:
         a, b = tmap.ticks(p["t_in"]), tmap.ticks(p["t_out"])
         s100 = round(p["scale"] * 100, 2)
