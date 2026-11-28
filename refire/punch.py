@@ -462,7 +462,7 @@ def ocr_reader(frames, mode: str = "auto", regions=None, budget: float = OCR_BUD
         if eng is None and todo:
             try:
                 from rapidocr_onnxruntime import RapidOCR
-                eng = RapidOCR()
+                eng = RapidOCR(intra_op_num_threads=4, inter_op_num_threads=1)   # default (all cores) ~25x slower
             except Exception as e:          # missing models / runtime: transcript inference only
                 log(f"[punch] ocr off: {e}")
                 return {}

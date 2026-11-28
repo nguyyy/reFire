@@ -198,8 +198,9 @@ def sheet(root: Path, ids: list[str]) -> Path:
     return p
 
 
-def review(root: Path, browser=None, model: str = MODEL, ask=None, log=print) -> list[dict]:
-    """one call over a run's candidates -> moves applied + re-rendered, critic.json per candidate."""
+def review(root: Path, browser=None, model: str = MODEL, ask=None, log=print, past: str = "") -> list[dict]:
+    """one call over a run's candidates -> moves applied + re-rendered, critic.json per candidate.
+    past: the last test & compare results (feedback.context), scored against."""
     from .. import director
     from . import render
     root = Path(root)
@@ -209,7 +210,7 @@ def review(root: Path, browser=None, model: str = MODEL, ask=None, log=print) ->
     specs = {k: json.loads((root / k / "spec.json").read_text(encoding="utf-8")) for k in ids}
     p = sheet(root, ids)
     facts = "\n".join(f"{k}: {measure(root / k, specs[k])}" for k in ids)
-    user = f"Read {p.name} (tiles {', '.join(ids)}, REF). Measurements:\n{facts}"
+    user = f"Read {p.name} (tiles {', '.join(ids)}, REF). Measurements:\n{facts}" + (f"\n\n{past}" if past else "")
     Out = _models()
     try:
         out = ask(user, Out) if ask else director._complete_cli(

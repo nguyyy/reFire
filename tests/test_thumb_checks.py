@@ -32,7 +32,8 @@ def test_checks_pass_and_fail(tmp_path):
 
 
 def test_dominant_hue_and_phash():
-    blue = np.zeros((40, 40, 3), np.uint8); blue[..., 2] = 220
+    blue = np.zeros((40, 40, 3), np.uint8)
+    blue[..., 2] = 220
     assert abs(checks.dominant_hue(blue) - 240) < 2
 
 
@@ -47,3 +48,12 @@ def test_report_orders_passing_candidates_first(tmp_path):
     md = out.read_text(encoding="utf-8")
     assert md.index("1. **B**") < md.index("2. **A**") and "slot 1" in md
     assert "What did he roll?" in md and "Paid off by:** 5, 6" in md and "three concept types ok" in md
+
+
+def test_a_wide_bubble_above_the_face_does_not_count_as_covering_it(tmp_path):
+    (tmp_path / "assets").mkdir()
+    Image.new("RGBA", (420, 60)).save(tmp_path / "assets" / "quote.png")      # wide and short, no h in the spec
+    spec = {"layers": [{"kind": "face", "src": "f.png", "face_box": [850, 200, 250, 300]},
+                       {"kind": "quote", "src": "assets/quote.png", "x": 660, "y": 10, "w": 420}]}
+    assert checks.face_clear(spec, None, tmp_path)["ok"]
+    assert not checks.face_clear(spec, None)["ok"]           # without the image it falls back to a square

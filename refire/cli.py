@@ -185,6 +185,8 @@ def main(argv: list[str] | None = None) -> None:
                     help="keep the emote punch-ins but place them silently (no impact hits)")
     mk.add_argument("--no-cards", action="store_true",
                     help="no section title cards in the AE Master -- the cut runs clip to clip")
+    mk.add_argument("--no-thumb", action="store_true",
+                    help="don't start `refire thumb` on the run afterwards (it runs in the background)")
     mk.add_argument("--no-proxy", action="store_true",
                     help="point AE at the raw VOD instead of cutting all-intra (DNxHR LB) "
                          "clip proxies -- skips the transcode, but AE previews far slower")
@@ -259,7 +261,11 @@ def main(argv: list[str] | None = None) -> None:
     ca.add_argument("--corrections-dir", default="run", help="where corrections_<game>.json lives")
 
     th = sub.add_parser("thumb", help="thumbnail candidates: `thumb render <run_dir> <A|B|C>` re-renders one")
-    th.add_argument("args", nargs="+", help="<run_dir> (full run) | render <run_dir> <A|B|C> | report <run_dir>")
+    th.add_argument("args", nargs="+", help="<run_dir> (full run) | render <run_dir> <A|B|C> | report <run_dir> | "
+                    "revise <run_dir> <A|B|C> \"<instruction>\" | sync | result <video_id> winner|same|inconclusive")
+    th.add_argument("--v", type=int, default=None, help="which run's candidates (thumb/v<n>; default: the newest)")
+    th.add_argument("--runs-dir", default="run", help="sync/result: where the candidate sets live")
+    th.add_argument("--uploads", type=int, default=50, help="sync: how many of the newest uploads to check")
     th.add_argument("--hires", action="store_true", help="render 2x and downsample (crisper text)")
     th.add_argument("--runs", type=int, default=1, help="full runs side by side in thumb/v1.. (each bets differently)")
     th.add_argument("--claude-model", default="claude-opus-5")
@@ -470,10 +476,31 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.cmd == "thumb":
         a = args.args
+
+        def cands(run_dir) -> Path:                       # thumb/v<n> (newest unless --v), else an older thumb/
+            base = Path(run_dir) / "thumb"
+            if args.v:
+                return base / f"v{args.v}"
+            vs = [int(d.name[1:]) for d in base.glob("v*") if d.name[1:].isdigit()]
+            return base / f"v{max(vs)}" if vs else base
+
         if a[0] == "render" and len(a) == 3:
             from .thumb import render
-            out = render.render(Path(a[1]) / "thumb" / a[2].upper() / "spec.json", hires=args.hires or None)
+            out = render.render(cands(a[1]) / a[2].upper() / "spec.json", hires=args.hires or None)
             print(f"Thumbnail: {out.resolve()}")
+            return
+        if a[0] == "revise" and len(a) == 4:
+            from .thumb import revise
+            r = revise.revise(cands(a[1]) / a[2].upper(), a[3], model=args.claude_model, backend=args.director_backend)
+            print(f"Thumbnail: {r['png'].resolve()}")
+            return
+        if a[0] == "sync" and len(a) == 1:
+            from .thumb import feedback, youtube
+            feedback.sync(youtube.YouTube(), args.runs_dir, n=args.uploads)
+            return
+        if a[0] == "result" and len(a) == 3:
+            from .thumb import feedback, youtube
+            feedback.result(youtube.YouTube(), a[1], a[2], args.runs_dir)
             return
         if len(a) == 1:                                   # the full run, --runs times
             from .thumb import pipeline
@@ -490,9 +517,10 @@ def main(argv: list[str] | None = None) -> None:
             return
         if a[0] == "report" and len(a) == 2:
             from .thumb import report
-            print(f"Report: {report.build(a[1]).resolve()}")
+            print(f"Report: {report.build(a[1], root=cands(a[1])).resolve()}")
             return
-        p.error("thumb: `thumb render <run_dir> <A|B|C>` or `thumb report <run_dir>` (full run: coming)")
+        p.error("thumb: <run_dir> | render <run_dir> <A|B|C> | report <run_dir> | revise <run_dir> <A|B|C> "
+                "\"<instruction>\" | sync | result <video_id> winner|same|inconclusive")
 
     if args.cmd == "caption":
         from . import caption
@@ -625,6 +653,23 @@ def main(argv: list[str] | None = None) -> None:
         # relative paths against AE's own cwd
         print(f"Manifest: {Path(out).resolve()}")
         print("In After Effects or Premiere Pro: Window > Extensions > reFire -> Build.")
+        if not args.no_thumb:
+            print(f"Thumbnails: started in the background (log: {_thumb_background(Path(out).resolve().parent.parent)})")
+
+
+def _thumb_background(run_dir: Path) -> Path:
+    """`refire thumb <run_dir>` as a detached process: the panels wait for make to exit before
+    loading the manifest, and the thumbnails take minutes (spec: thumb runs at the end of make)."""
+    import subprocess
+    log = run_dir / "thumb" / "thumb.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    # no window: its own children (the claude cli) inherit the hidden console
+    flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
+    with log.open("a", encoding="utf-8") as f:
+        subprocess.Popen([sys.executable, "-m", "refire.cli", "thumb", str(run_dir)], stdout=f,
+                         stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, creationflags=flags,
+                         start_new_session=os.name != "nt", env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    return log
 
 
 if __name__ == "__main__":

@@ -197,6 +197,8 @@ Output: a 0–100 score plus up to 3 concrete edits expressed as `spec.json` cha
 - `refire thumb sync`: for videos with a candidate set on file and a test older than 14 days, fetch the live thumbnail with `videos.list` (1 unit) and perceptual-hash match it to A/B/C.
   - The live thumbnail alone is ambiguous (an inconclusive test also leaves slot 1 live), so Nguy records the outcome with one command: `refire thumb result <video_id> winner|same|inconclusive`.
 - CTR: from the YouTube Analytics API if it exposes impressions CTR for the channel (verify); otherwise import the Studio CSV exports Nguy already pulls.
+  - Verified (Nov 27): the Analytics API has `videoThumbnailImpressions` and `videoThumbnailImpressionsClickRate`, so there's no CSV import. It needs the channel owner's OAuth, and the same token covers the Data API: one Google Cloud OAuth client ("Desktop app", YouTube Data API v3 + YouTube Analytics API enabled) saved at `~/.refire/youtube_client.json`; the first sync opens the browser once.
+  - Built as: `sync` lists the channel's 50 newest uploads and pHash-matches each live thumbnail against every candidate set under `run/` (distance ≤ 12), so no command is needed to tell reFire which video used which set. `result ... winner` re-reads the live thumbnail to name the winner.
 - Store in `~/.refire/thumbs.sqlite`: video, each candidate's features (type, layout, hook, accent, expression, pixelate, critic scores), upload order, result, CTR.
 - Use: the last 10 results go into the concept and critic prompts as context. After ≥ 10 decided tests, compute per-feature win rates and bias concept selection (e.g. if `reveal` keeps winning, always include it).
 
@@ -204,7 +206,7 @@ Output: a 0–100 score plus up to 3 concrete edits expressed as `spec.json` cha
 
 | Command | Does |
 |---|---|
-| `refire thumb <run_dir>` | Full run. Also runs at the end of `refire make` unless `--no-thumb`. |
+| `refire thumb <run_dir>` | Full run. Also runs at the end of `refire make` unless `--no-thumb` (detached, log in `thumb/thumb.log`: the panels wait for make to exit before loading the manifest). |
 | `refire thumb render <run_dir> <A\|B\|C>` | Re-render one candidate from its `spec.json` |
 | `refire thumb revise <run_dir> <A\|B\|C> "<instruction>"` | Claude edits `spec.json`, re-renders, re-runs the deterministic checks |
 | `refire thumb sync` | Match live thumbnails to candidates |
@@ -244,4 +246,4 @@ Output: a 0–100 score plus up to 3 concrete edits expressed as `spec.json` cha
 
 ## Open items for Nguy
 
-- Emotes folder path.
+- ~~Emotes folder path~~: `refire/assets/emotes/`.

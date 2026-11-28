@@ -209,9 +209,15 @@ def _models():
     return Out
 
 
-def validate(out, n_beats: int) -> list[str]:
-    """house rules the schema can't express -> problems (empty = ok)."""
+def validate(out, n_beats: int, favored: dict | None = None) -> list[str]:
+    """house rules the schema can't express -> problems (empty = ok). favored: feature values past
+    tests keep picking as winners (feedback.favored); each must appear in at least one concept."""
+    from .feedback import concept_features
     errs = []
+    feats = [concept_features(c.model_dump()) for c in out.concepts]
+    for f, v in (favored or {}).items():
+        if not any(str(x[f]) == v for x in feats):
+            errs.append(f"past tests keep picking {f} = {v} as the winner: use it in at least one concept")
     types = [c.type for c in out.concepts]
     if sorted(types) != sorted(TYPES):
         errs.append(f"need exactly one of each type {TYPES}, got {types}")
@@ -239,15 +245,18 @@ def validate(out, n_beats: int) -> list[str]:
 
 
 def direct(ctx: dict, previous_hooks: list[str], variant: int, backend: str = "cli",
-           model: str = "claude-opus-5", effort: str = "medium", ask=None, sheets=None, cwd=None):
+           model: str = "claude-opus-5", effort: str = "medium", ask=None, sheets=None, cwd=None,
+           past: tuple[str, dict] = ("", {})):
     """one call (plus one corrective retry) -> validated Out. sheets: frame sheet file names in
-    `cwd` the model Reads first (cli only; ponytail: the api fallback goes without them)."""
+    `cwd` the model Reads first (cli only; ponytail: the api fallback goes without them).
+    past: feedback.context() (the last results as text, favored features)."""
     from .. import director
     Out = _models()
     note = (f"\n\nThis is run {variant}. Bet differently from these earlier hooks: {previous_hooks}"
             if previous_hooks else "")
     look = f"\n\nFrame sheets (Read them first): {', '.join(sheets)}" if sheets else ""
-    user = json.dumps(ctx, ensure_ascii=False) + note + look
+    user = json.dumps(ctx, ensure_ascii=False) + note + look + (f"\n\n{past[0]}" if past[0] else "")
+    fav = past[1]
 
     def call(text):
         if ask:
@@ -268,10 +277,10 @@ def direct(ctx: dict, previous_hooks: list[str], variant: int, backend: str = "c
                                   effort=effort)
 
     out = call(user)
-    errs = validate(out, len(ctx["beats"]))
+    errs = validate(out, len(ctx["beats"]), fav)
     if errs:
         out = call(user + "\n\nYour last answer broke these rules, fix them: " + "; ".join(errs))
-        errs = validate(out, len(ctx["beats"]))
+        errs = validate(out, len(ctx["beats"]), fav)
         if errs:
             raise ValueError("thumb director: " + "; ".join(errs))
     return out
@@ -884,7 +893,8 @@ def _render_all(run_dir: Path, root: Path, concepts: list, variant: int, brief: 
                 assemble(c, k, root, cams, b, variant, brief, log)
             if critic:                                   # one cheap look at placement, moves applied
                 from . import critic as crit
-                crit.review(root, browser=b, log=log)
+                from . import feedback
+                crit.review(root, browser=b, log=log, past=feedback.context()[0])
         finally:
             b.close()
     return report.build(run_dir, root=root)
@@ -903,7 +913,11 @@ def run(run_dir, variant: int = 1, previous_hooks: list[str] | None = None, back
     sheets = frame_sheets(Facecams(run_dir / "ae" / "manifest.json"), beat_times(run_dir), root)
     log(f"[thumb] frame sheets: {sheets}")
     t1 = time.monotonic()
-    out = direct(ctx, previous_hooks or [], variant, backend, model, ask=ask, sheets=sheets, cwd=root)
+    from . import feedback
+    past = feedback.context()                    # the last test & compare results (empty before any)
+    if past[0]:
+        log(f"[thumb] past results in the prompt; favored: {past[1] or 'none yet'}")
+    out = direct(ctx, previous_hooks or [], variant, backend, model, ask=ask, sheets=sheets, cwd=root, past=past)
     log(f"[thumb] director: {[c.hook.lines for c in out.concepts]} ({time.monotonic() - t1:.0f}s)")
     (root / "brief.json").write_text(json.dumps(out.brief, indent=1, ensure_ascii=False), encoding="utf-8")
     order = sorted(out.concepts, key=lambda c: TYPES.index(c.type))

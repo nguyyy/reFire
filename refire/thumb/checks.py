@@ -26,6 +26,11 @@ def hook_text(spec: dict) -> str:
     return " ".join(t if isinstance(t, str) else t["text"] for t in (spec.get("text") or {}).get("lines", []))
 
 
+_ENG = None                          # one ocr engine per process
+OCR_THREADS = 4                      # onnxruntime's default (every core, 20 here) ran ~25x slower: 5 s vs 0.2 s a pass
+_MEMO: dict = {}                     # candidate checks per rendered file (revise + its report re-check)
+
+
 def readable(png: Path, text: str, ocr=None) -> dict:
     """the hook still OCRs at feed size: char accuracy >= 0.80 at both small sizes."""
     import difflib
@@ -34,9 +39,11 @@ def readable(png: Path, text: str, ocr=None) -> dict:
     if not text:
         return _r("hook readable small", True, None, ">= 0.80")
     if ocr is None:
-        from rapidocr_onnxruntime import RapidOCR
-        eng = RapidOCR()
-        ocr = lambda im: " ".join(r[1] for r in (eng(im, use_cls=False)[0] or []))   # noqa: E731
+        global _ENG
+        if _ENG is None:
+            from rapidocr_onnxruntime import RapidOCR
+            _ENG = RapidOCR(intra_op_num_threads=OCR_THREADS, inter_op_num_threads=1)
+        ocr = lambda im: " ".join(r[1] for r in (_ENG(im, use_cls=False)[0] or []))   # noqa: E731
     img = cv2.imread(str(png))
     want = "".join(text.upper().split())
     scores = []
@@ -64,7 +71,18 @@ def _overlap(a, b) -> float:
     return ix * iy
 
 
-def face_clear(spec: dict, hook_box: list | None) -> dict:
+def _h(L: dict, d: Path | None) -> float:
+    """a layer's drawn height: given, else from its image's aspect (a wide bubble isn't a square)."""
+    if "h" in L:
+        return L["h"]
+    if d is not None and (d / L["src"]).exists():
+        from PIL import Image
+        with Image.open(d / L["src"]) as im:
+            return L["w"] * im.height / im.width
+    return L["w"]
+
+
+def face_clear(spec: dict, hook_box: list | None, d: Path | None = None) -> dict:
     """nothing drawn over the eyes/mouth: the face box's inner 60% vs later layers + the hook."""
     fb = _face(spec)
     if not fb:
@@ -77,7 +95,7 @@ def face_clear(spec: dict, hook_box: list | None) -> dict:
             seen = True
             continue
         if seen and "w" in L:
-            after.append([L["x"], L["y"], L["w"], L.get("h", L["w"])])
+            after.append([L["x"], L["y"], L["w"], _h(L, d)])
     if hook_box:
         after.append(hook_box)
     hit = max((_overlap(core, b) / (core[2] * core[3]) for b in after), default=0)
@@ -96,9 +114,13 @@ def badge_zone(spec: dict, hook_box: list | None) -> dict:
 def dominant_hue(img_rgb: np.ndarray) -> float:
     """saturation-weighted circular mean hue (degrees) of an image."""
     px = img_rgb.reshape(-1, 3)[::7] / 255.0
-    hs = np.array([colorsys.rgb_to_hsv(*p)[:2] for p in px])
-    a = hs[:, 0] * 2 * np.pi
-    w = hs[:, 1] ** 2 + 1e-6
+    r, g, b = px.T
+    mx, dl = px.max(1), px.max(1) - px.min(1)
+    safe = np.where(dl > 0, dl, 1.0)
+    # colorsys.rgb_to_hsv, vectorized (a per-pixel loop took ~4 s a thumbnail)
+    h = np.select([dl == 0, mx == r, mx == g], [0.0, (g - b) / safe, 2.0 + (b - r) / safe], 4.0 + (r - g) / safe)
+    a = ((h / 6.0) % 1.0) * 2 * np.pi
+    w = np.where(mx > 0, dl / np.where(mx > 0, mx, 1.0), 0.0) ** 2 + 1e-6
     return float(np.degrees(np.arctan2((np.sin(a) * w).sum(), (np.cos(a) * w).sum())) % 360)
 
 
@@ -139,14 +161,20 @@ def candidate(d: Path, ocr=None) -> list[dict]:
     import cv2
     spec = json.loads((d / "spec.json").read_text(encoding="utf-8"))
     png = next(p for p in (d / "thumb.png", d / "thumb.jpg") if p.exists())
+    key = (str(png.resolve()), png.stat().st_mtime_ns, (d / "spec.json").stat().st_mtime_ns)
+    if ocr is None and key in _MEMO:
+        return _MEMO[key]
     hook = None
     hj = d / "assets" / "hook.json"
     if hj.exists() and hook_text(spec):
         i = json.loads(hj.read_text(encoding="utf-8"))
         hook = [i["x"], i["y"], i["w"], i["h"]]
     rgb = cv2.cvtColor(cv2.imread(str(png)), cv2.COLOR_BGR2RGB)
-    return [readable(png, hook_text(spec), ocr), face_size(spec), face_clear(spec, hook), badge_zone(spec, hook),
-            accent_contrast(spec, rgb), clutter(spec)]
+    out = [readable(png, hook_text(spec), ocr), face_size(spec), face_clear(spec, hook, d), badge_zone(spec, hook),
+           accent_contrast(spec, rgb), clutter(spec)]
+    if ocr is None:
+        _MEMO[key] = out
+    return out
 
 
 def distinct(dirs: list[Path], types: list[str] | None = None) -> list[dict]:

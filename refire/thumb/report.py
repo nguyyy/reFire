@@ -74,4 +74,5 @@ def build(run_dir, ocr=None, root=None) -> Path:
         L += [f"- **Warning:** {w}" for w in r["warnings"]] + [""]
     out = root / "report.md"
     out.write_text("\n".join(L), encoding="utf-8")
+    (root / "upload_order.json").write_text(json.dumps([r["id"] for r in rows]), encoding="utf-8")   # for sync
     return out
