@@ -137,10 +137,20 @@ def test_punch_button_is_wired():
     cli = CLI.read_text(encoding="utf-8")
     ops_jsx = (ROOT / "refire" / "ppro" / "applyOps.jsx").read_text(encoding="utf-8")
     assert 'id="punch"' in panel and '$("#punch").onclick = punchIns' in panel
-    assert '"refire", "punch", runDir' in panel and 'sub.add_parser("punch"' in cli
+    assert '"refire", sub || "punch", runDir' in panel and 'sub.add_parser("punch"' in cli
     assert "applyOps.jsx" in panel and "reFireOps.apply(" in panel and "return { apply: function" in ops_jsx
     assert '"/ppro/ops_punch.json"' in panel and '"ops_punch.json"' in (ROOT / "refire" / "punch.py").read_text(
         encoding="utf-8")
+
+
+def test_sauce_button_is_wired():
+    """panel -> jsx timeline() -> `refire sauce <run_dir>` -> ops_sauce.json through the same applier."""
+    panel = PANEL.read_text(encoding="utf-8")
+    cli = CLI.read_text(encoding="utf-8")
+    ops_jsx = (ROOT / "refire" / "ppro" / "applyOps.jsx").read_text(encoding="utf-8")
+    assert 'id="sauce"' in panel and '$("#sauce").onclick = sauce' in panel and 'runPunch(btn, "sauce"' in panel
+    assert '"/ppro/ops_sauce.json"' in panel and 'sub.add_parser("sauce"' in cli
+    assert "sauce_clear: function" in ops_jsx and "place_media: function" in ops_jsx
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs node to run ExtendScript")
