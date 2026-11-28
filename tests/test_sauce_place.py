@@ -122,9 +122,9 @@ def test_split_crops_keep_each_panes_aspect_and_stay_on_screen():
     from refire.sauce import split
     game, face = split.crops([0.9, 0.1], 2.0, [0.0, 0.6, 0.3, 1.0], 1920, 1080)
     gx, gy, gw, gh = game
-    assert abs(gw / gh - 1280 / 1080) < 0.01 and gx + gw <= 1920 and gy >= 0                # 2/3 pane, clamped
+    assert abs(gw / gh - 920 / 504) < 0.01 and gx + gw <= 1920 and gy >= 0                  # right card, clamped
     fx, fy, fw, fh = face
-    assert abs(fw / fh - 640 / 1080) < 0.01 and fx >= 0 and fx + fw <= 0.3 * 1920 + 1 and fy >= 0.6 * 1080 - 1
+    assert abs(fw / fh - 594 / 525) < 0.01 and fx >= 0 and fx + fw <= 0.3 * 1920 + 1 and fy >= 0.6 * 1080 - 1
 
 
 def test_rare_types_get_a_whole_video_budget_not_one_per_bin():

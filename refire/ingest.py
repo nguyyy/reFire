@@ -147,8 +147,16 @@ def ensure_vod(vod_id, cache_dir: str | Path = "vods",
         out.unlink(missing_ok=True)         # aborted runs leave a 0-byte stub
         step = None if progress is None else (
             lambda f, m, i=i: progress((i + f) / len(jobs), m))
-        _run([str(CLI), kind, "--id", vid, "-o", str(out),
-              "-t", str(threads)] + crop, step)
+        try:
+            _run([str(CLI), kind, "--id", vid, "-o", str(out),
+                  "-t", str(threads)] + crop, step)
+        except RuntimeError as e:
+            if kind != "chatdownload":
+                raise
+            # chat is optional downstream (missing -> zero signal); a deleted VOD keeps no chat
+            print(f"[ingest] chat download failed, continuing without chat: {str(e)[:120]}")
+            out.unlink(missing_ok=True)
+            continue
         if not _done(out):
             raise RuntimeError(f"{kind} produced an empty {out}")
     return video, chat

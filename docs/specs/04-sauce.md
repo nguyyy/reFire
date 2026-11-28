@@ -183,9 +183,10 @@ frame, plus one Claude look at every zoomed view, because detector scores don't 
 No tracking yet: a target that leaves the window skips the zoom.
 
 Split-screen (P5, `refire/sauce/split.py`): where a placed zoom overlaps a facecam punch from `punch.json`
-by ≥ 0.75 s, that stretch becomes one ffmpeg-rendered comp on V4: the zoom's window on the left 2/3, his
-face (cropped tall from the facecam box, centered on his face) on the right 1/3. Hard cut in and out, video
-only. The side is a setting (`GAME_SIDE`).
+by ≥ 0.75 s, that stretch becomes one ffmpeg-rendered comp on V4, laid out like his own (Odette video,
+0:15-0:21, Nov 28): the gameplay blurred full-frame behind two floating cards with drop shadows, his face on
+the left (~1/3, centered on his face) and the zoom's window on the right (~2/3). Card boxes are measured off
+that frame (`FACE_BOX`, `GAME_BOX`). Hard cut in and out (his cards slide in), video only.
 
 ---
 
