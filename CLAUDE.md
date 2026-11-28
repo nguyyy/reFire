@@ -43,6 +43,13 @@ order) then `01-punch.md`, `02-caption.md`, `03-thumb.md`. Spike results: `docs/
 Premiere assets in `refire/assets/premiere/`, thumbnail refs in `refire/thumb/refs/`, emotes in
 `refire/assets/emotes/`. Python decides, a thin idempotent .jsx applies `ops_<feature>.json`.
 
+**`refire sauce`** (`docs/specs/04-sauce.md`, `refire/sauce/`): booms (A3), emotes (V5), gameplay zooms (V2),
+split-screen (V4) in Nguy's style. `sauce mine` learns it from every @fye_er upload into `run/sauce/`
+(style_profile.json, exemplars.jsonl, style_report.md); `sauce <run>` places (sauce.json, sauce_log.md,
+ops_sauce.json); `sauce eval <run>` scores his review of it from the saved project and feeds his fixes back
+(`run/sauce_corrections.jsonl`); `sauce bench` scores sauce on his own finished edits (blind to their examples).
+Track layout since Nov 27: V2 zooms, V3 punch, V4 split, V5 emotes, V6 caption nest, A3 booms.
+
 `refire auto <vod>` (`auto.py`) = `make` with every input picked: Twitch title/game from
 the chat download, no brief (stream-driven director), duration = median runtime of the
 learned finals, measured stage defaults, base edit (no emotes/sfx/music/cards/zoom),

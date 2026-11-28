@@ -19,7 +19,7 @@ from pathlib import Path
 
 W_DLG, W_AUD = 1.0, 0.6           # s(t) weights: dialogue first (spec 5.1); chat 0
 MARK = 40                         # phrases marked as strong candidates for the director
-EXEMPLARS = 40                    # retrieved exemplars in the prompt
+EXEMPLARS = 80                    # retrieved exemplars in the prompt (bench: 40 missed most of his moments)
 _TOK = re.compile(r"[a-z0-9']+")
 
 
@@ -261,8 +261,12 @@ def direct(data: dict, prof: dict, library: list[dict], exemplars: list[dict], m
     neg = "\n".join(f"- [{r['type']}{':' + str(r['asset']) if r.get('asset') else ''}] {r['text']}"
                     + (f"  (it was proposed because: {r['reason']})" if r.get("reason") else "") for r in negatives)
     neg = f"\n\nNguy DELETED these on earlier videos (don't repeat the pattern):\n{neg}" if neg else ""
+    mins = data.get("total", 0) / 60
+    want = {ty: round(prof["rates"][ty]["body_per_min"] * mins) for ty in ("boom", "emote")}
+    size = (f"\n\nThis cut is {mins:.1f} min: Nguy would place about {want['boom']} booms and {want['emote']} emotes in it. "
+            f"Propose about twice that, best first, with honest confidences (the solver keeps the best).")
     user = (f"Video: {json.dumps(data['context'], ensure_ascii=False)}\n\nWhat Nguy did before:\n{ex_txt}{neg}\n\n"
-            f"The cut:\n{transcript(phr, mark)}{look}")
+            f"The cut:\n{transcript(phr, mark)}{look}{size}")
     sys_p = system(prof, library)
     ids, names = {p["id"] for p in phr}, {r["name"] for r in library}
     see = cwd if sheet_names else None
@@ -290,6 +294,7 @@ def direct(data: dict, prof: dict, library: list[dict], exemplars: list[dict], m
     for i, e in enumerate(evs):
         v = verdicts.get(i)
         e["critic"] = v.note if v else ""
+        e["director_confidence"] = e["confidence"]           # kept so the bench can tell what the critic adds
         # both have to believe it: the critic can only lower the director's confidence or drop it
         e["confidence"] = 0.0 if v and not v.keep else round(min(e["confidence"], v.confidence if v else e["confidence"]), 3)
     log(f"[sauce] critic kept {sum(e['confidence'] > 0 for e in evs)} of {len(evs)}")

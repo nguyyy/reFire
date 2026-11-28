@@ -211,6 +211,14 @@ Reference projects can't serve as held-out tests (they were cut from a different
 4. **Learning:** deletions and additions are written to `run/sauce_corrections.jsonl` and fed back as exemplars, with negatives ("Nguy deleted this") included. This is the same pattern as `corrections_<game>.json`.
 5. **Ship bar:** $A \ge 0.95$ on 3 consecutive fresh videos.
 
+Bench (Nov 27, `refire sauce bench`, his 4 finished edits on his own final V1, sauce blind to each one's
+examples, booms + emotes): agreement with his own independent picks is low. Loose A (same moment within
+0.5 s) is 0.08–0.13 at every tau and critic setting tried. Precision rises to ~0.5 at tau 0.7, with ~10
+placements over 4 videos. Strict A (3 frames) is ~0: his hits sit a median 0.1 s before the word-end snap,
+spreading about ±0.3 s. The director proposed only 20 of his 57 moments within 1 s. This underestimates the
+real keep rate (he'd keep good booms he didn't think of), but A counts his additions, so the ship bar also needs
+recall. Next lever: real reviews through `sauce eval` (corrections feed the director), not more prompt tuning.
+
 Built (Nov 27), `refire sauce eval <run_dir> [--project x.prproj]`: reads the saved project read-only (the
 same data as a panel dump, no panel needed) and matches each placement by its `refire:sauce:<id>` clip name.
 Writes `sauce_eval.json`, appends to `run/sauce/eval.jsonl` (ship bar checked there) and to

@@ -540,6 +540,10 @@ def main(argv: list[str] | None = None) -> None:
             from .sauce import mine
             print(f"Report: {mine.run(fetch=not args.no_fetch, labels=not args.no_labels).resolve()}")
             return
+        if args.args == ["bench"]:
+            from .sauce import bench
+            print(f"Bench: {bench.run(model=args.claude_model, backend=args.director_backend).resolve()}")
+            return
         if args.args[0] == "eval" and len(args.args) == 2:
             from .sauce import evaluate
             evaluate.run(args.args[1], project=args.project)

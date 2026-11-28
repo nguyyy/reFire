@@ -43,3 +43,13 @@ def test_corrections_feed_back_as_exemplars_and_negatives(tmp_path):
     assert add == [{"type": "boom", "asset": None, "text": "a [*] b", "why": "Nguy added this by hand"}]
     assert [n["asset"] for n in neg] == ["sajj"]
     assert evaluate.load_corrections(tmp_path / "none.jsonl") == ([], [])
+
+
+def test_bench_scores_same_type_nearest_within_tolerance():
+    from refire.sauce import bench
+    placed = [{"type": "boom", "t": 10.0}, {"type": "boom", "t": 20.0}, {"type": "emote", "t": 30.0, "asset": "sajj"}]
+    his = [{"type": "boom", "t": 10.3}, {"type": "emote", "t": 30.1, "asset": "sajj"}, {"type": "boom", "t": 50.0}]
+    loose = bench.score(placed, his, 0.5)
+    assert (loose["matched"], loose["missed"], loose["emote_same_asset"]) == (2, 1, 1) and loose["A"] == 0.5
+    strict = bench.score(placed, his, 3 / 60)
+    assert strict["matched"] == 0 and strict["precision"] == 0.0
