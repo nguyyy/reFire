@@ -272,6 +272,11 @@ def main(argv: list[str] | None = None) -> None:
     th.add_argument("--director-backend", choices=["cli", "api"], default="cli")
     th.add_argument("--no-critic", action="store_true", help="skip the cheap vision pass over placement")
 
+    sa = sub.add_parser("sauce", help="engagement layer (04-sauce.md): `sauce mine` learns the style from his videos")
+    sa.add_argument("args", nargs="+", help="mine")
+    sa.add_argument("--no-fetch", action="store_true", help="mine: don't download channel uploads missing on disk")
+    sa.add_argument("--no-labels", action="store_true", help="mine: skip the one Claude call that labels exemplars")
+
     sr = sub.add_parser("srt", help="manifest.json -> captions.srt (the Premiere path)")
     sr.add_argument("manifest", help="path to a run's ae/manifest.json")
     sr.add_argument("--offset", type=float, default=0.0,
@@ -521,6 +526,13 @@ def main(argv: list[str] | None = None) -> None:
             return
         p.error("thumb: <run_dir> | render <run_dir> <A|B|C> | report <run_dir> | revise <run_dir> <A|B|C> "
                 "\"<instruction>\" | sync | result <video_id> winner|same|inconclusive")
+
+    if args.cmd == "sauce":
+        if args.args == ["mine"]:
+            from .sauce import mine
+            print(f"Report: {mine.run(fetch=not args.no_fetch, labels=not args.no_labels).resolve()}")
+            return
+        p.error("sauce: mine")
 
     if args.cmd == "caption":
         from . import caption
