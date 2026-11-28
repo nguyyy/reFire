@@ -285,6 +285,10 @@ def main(argv: list[str] | None = None) -> None:
     sa.add_argument("--no-fetch", action="store_true", help="mine: don't download channel uploads missing on disk")
     sa.add_argument("--no-labels", action="store_true", help="mine: skip the one Claude call that labels exemplars")
 
+    pv = sub.add_parser("preview", help="render the run's timeline with every reFire layer to preview.mp4 (no Premiere)")
+    pv.add_argument("run_dir", help="the run dir holding ae/manifest.json")
+    pv.add_argument("-o", "--out", default=None, help="output mp4 (default: <run_dir>/preview.mp4)")
+
     sr = sub.add_parser("srt", help="manifest.json -> captions.srt (the Premiere path)")
     sr.add_argument("manifest", help="path to a run's ae/manifest.json")
     sr.add_argument("--offset", type=float, default=0.0,
@@ -479,6 +483,11 @@ def main(argv: list[str] | None = None) -> None:
                       model=args.model, transcriber=args.transcriber,
                       whisper_model=args.whisper_model, batch_size=args.batch_size,
                       compute_type=args.compute_type, threads=args.threads)
+        return
+
+    if args.cmd == "preview":
+        from .preview import render
+        print(f"Preview: {render(args.run_dir, args.out)}")
         return
 
     if args.cmd == "srt":
